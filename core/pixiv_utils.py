@@ -16,7 +16,7 @@ Pixiv 工具模块
     pip install requests
 
 使用:
-    from pixiv_utils import (
+    from core.pixiv_utils import (
         log_message, download_image, write_success_log, 
         load_downloaded_ids, save_downloaded_id, APICallCounter
     )
@@ -33,6 +33,7 @@ import json
 import time
 import random
 import string
+import shutil
 import urllib.parse
 import threading
 from datetime import datetime
@@ -46,7 +47,7 @@ import requests
 # ============================================================
 
 # 模块根目录
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parents[1]
 
 # HTTP 请求头
 HEADERS = {
@@ -62,6 +63,18 @@ ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9,en;q=0.8'
 GLOBAL_ID_RECORD_FILE = 'downloaded_id_record.json'
 ARTIST_ID_RECORD_FILE = 'downloaded_record.json'
 GLOBAL_MD_RECORD_FILE = '全局下载总记录.md'
+
+# 项目级集中日志目录（与下载目录解耦，便于同步网盘后继续防重）
+CENTRAL_LOG_DIR = ROOT / 'download_logs'
+CENTRAL_ID_RECORD_FILE = 'master_downloaded_record.json'
+CENTRAL_RECENT_MD_FILE = '总下载记录_最近3000条.md'
+CENTRAL_MONTHLY_DIR = '按月记录'
+
+# Markdown 最近行数上限，避免单文件过大影响浏览与写入
+MAX_MD_ROWS = 3000
+
+# 完成记录信任开关：文件不在本地时仍按记录跳过（适合已归档到网盘）
+TRUST_COMPLETED_RECORD_WITHOUT_FILE = True
 
 # 兼容旧版日志开关：默认关闭，避免与新记录体系重复。
 ENABLE_LEGACY_SUCCESS_LOG = False
@@ -408,7 +421,7 @@ def _record_item_to_md_row(item):
     }
 
 
-def _refresh_markdown_from_record(record_path, md_path):
+def _refresh_markdown_from_record(record_path, md_path, max_rows=None):
     """根据 JSON 防重记录重建 Markdown（按时间倒序）。"""
     data = _load_json(record_path, {})
     rows = []
@@ -416,6 +429,8 @@ def _refresh_markdown_from_record(record_path, md_path):
         if isinstance(item, dict):
             rows.append(_record_item_to_md_row(item))
     rows.sort(key=lambda x: x.get('download_time', ''), reverse=True)
+    if max_rows is not None and max_rows > 0:
+        rows = rows[:max_rows]
     _write_markdown_table(md_path, rows)
 
 
@@ -435,6 +450,41 @@ def _is_completed_record_valid(record_item):
     path = record_item.get('file_path')
     size = _safe_int(record_item.get('file_size'), 0) or 0
     return bool(path and os.path.exists(path) and os.path.getsize(path) == size and size > 0)
+
+
+def _is_completed_record(record_item):
+    """仅基于记录状态判断是否已完成。"""
+    return isinstance(record_item, dict) and record_item.get('status') == '下载完成'
+
+
+def _get_central_log_root():
+    """获取项目级集中日志目录。"""
+    return str(CENTRAL_LOG_DIR)
+
+
+def _record_to_central_logs(record_key, record_item):
+    """写入项目级集中日志：总JSON、最近MD、按月JSON/MD。"""
+    root = _get_central_log_root()
+    os.makedirs(root, exist_ok=True)
+
+    # 机器可读总记录：用于跨下载目录防重
+    central_json = os.path.join(root, CENTRAL_ID_RECORD_FILE)
+    _update_id_record(central_json, record_key, record_item)
+
+    # 人可读最近日志：限制行数，避免文件无限增长
+    recent_md = os.path.join(root, CENTRAL_RECENT_MD_FILE)
+    _refresh_markdown_from_record(central_json, recent_md, max_rows=MAX_MD_ROWS)
+
+    # 按月分片，便于长期查看
+    month = (record_item.get('updated_at') or '')[:7]
+    if not month or len(month) != 7:
+        month = datetime.now().strftime('%Y-%m')
+    month_root = os.path.join(root, CENTRAL_MONTHLY_DIR)
+    os.makedirs(month_root, exist_ok=True)
+    month_json = os.path.join(month_root, f'{month}.json')
+    month_md = os.path.join(month_root, f'{month}.md')
+    _update_id_record(month_json, record_key, record_item)
+    _refresh_markdown_from_record(month_json, month_md)
 
 
 def _record_download_event(
@@ -485,7 +535,7 @@ def _record_download_event(
 
         # 全局 Markdown 总记录（由全局 JSON 重建，避免额外冗余 json 侧车文件）
         global_md_path = os.path.join(download_root, GLOBAL_MD_RECORD_FILE)
-        _refresh_markdown_from_record(global_record_path, global_md_path)
+        _refresh_markdown_from_record(global_record_path, global_md_path, max_rows=MAX_MD_ROWS)
 
         # 按画师分文件夹时写入画师级 JSON/MD
         if folder_by_user:
@@ -495,7 +545,10 @@ def _record_download_event(
 
             safe_artist_name = sanitize_filename(artist_name) or str(artist_id or 'unknown')
             artist_md_path = os.path.join(artist_dir, f'{safe_artist_name}_作品下载记录.md')
-            _refresh_markdown_from_record(artist_record_path, artist_md_path)
+            _refresh_markdown_from_record(artist_record_path, artist_md_path, max_rows=MAX_MD_ROWS)
+
+        # 项目级集中日志（始终开启）
+        _record_to_central_logs(record_key, record_item)
 
 
 def _check_record_skip(download_root, illust_id, page_index):
@@ -503,30 +556,53 @@ def _check_record_skip(download_root, illust_id, page_index):
     if not download_root or not illust_id:
         return False
     record_key = f'{illust_id}_p{page_index}'
-    record_path = os.path.join(download_root, GLOBAL_ID_RECORD_FILE)
-    data = _load_json(record_path, {})
-    item = data.get(record_key)
-    return _is_completed_record_valid(item)
+    local_record_path = os.path.join(download_root, GLOBAL_ID_RECORD_FILE)
+    local_data = _load_json(local_record_path, {})
+    local_item = local_data.get(record_key)
+
+    if _is_completed_record_valid(local_item):
+        return True
+    if TRUST_COMPLETED_RECORD_WITHOUT_FILE and _is_completed_record(local_item):
+        return True
+
+    # 再检查项目级总记录（跨下载目录/网盘归档后仍可防重）
+    central_record_path = os.path.join(_get_central_log_root(), CENTRAL_ID_RECORD_FILE)
+    central_data = _load_json(central_record_path, {})
+    central_item = central_data.get(record_key)
+    if _is_completed_record_valid(central_item):
+        return True
+    if TRUST_COMPLETED_RECORD_WITHOUT_FILE and _is_completed_record(central_item):
+        return True
+    return False
 
 
-def clear_download_records(save_dir):
+def clear_download_records(save_dir, clear_central=False):
     """清理下载目录中的 JSON 防重记录和 Markdown 下载记录。"""
     if not save_dir or not os.path.exists(save_dir):
-        return
+        save_dir = None
 
-    for root, _, files in os.walk(save_dir):
-        for name in files:
-            should_delete = (
-                name in {GLOBAL_ID_RECORD_FILE, ARTIST_ID_RECORD_FILE, GLOBAL_MD_RECORD_FILE, GLOBAL_MD_RECORD_FILE + '.json'}
-                or name == 'success_log.md'
-                or name.endswith('_作品下载记录.md')
-                or name.endswith('_作品下载记录.md.json')
-            )
-            if should_delete:
-                try:
-                    os.remove(os.path.join(root, name))
-                except Exception:
-                    pass
+    if save_dir:
+        for root, _, files in os.walk(save_dir):
+            for name in files:
+                should_delete = (
+                    name in {GLOBAL_ID_RECORD_FILE, ARTIST_ID_RECORD_FILE, GLOBAL_MD_RECORD_FILE, GLOBAL_MD_RECORD_FILE + '.json'}
+                    or name == 'success_log.md'
+                    or name.endswith('_作品下载记录.md')
+                    or name.endswith('_作品下载记录.md.json')
+                )
+                if should_delete:
+                    try:
+                        os.remove(os.path.join(root, name))
+                    except Exception:
+                        pass
+
+    if clear_central:
+        central_root = _get_central_log_root()
+        if os.path.exists(central_root):
+            try:
+                shutil.rmtree(central_root)
+            except Exception:
+                pass
 
 def download_image(
     url,

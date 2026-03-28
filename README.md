@@ -2,6 +2,16 @@
 
 一个基于 Python + Tkinter 的 Pixiv 图片下载工具，支持多种数据来源、基础筛选和多线程下载。
 
+当前版本: v2.0.0
+
+当前版本使用重构后的目录结构，默认入口与模块边界如下：
+
+- 入口：`main.py`
+- 界面：`gui/`
+- 核心逻辑：`core/`
+- 工具函数：`utils/`
+- 配置：`config/`
+
 ## 功能概览
 
 - 图形界面操作，配置自动保存
@@ -29,6 +39,26 @@
 pip install -r requirements.txt
 ```
 
+## 启动方式（推荐）
+
+Windows:
+
+```bash
+启动.bat
+```
+
+macOS/Linux:
+
+```bash
+bash 启动.sh
+```
+
+或直接使用 Python：
+
+```bash
+python main.py
+```
+
 ## 快速开始
 
 ### 1. 获取 Refresh Token
@@ -42,17 +72,19 @@ python pixiv_get_token.py
 ### 2. 启动主程序
 
 ```bash
-python pixiv_downloader.py
+python main.py
 ```
 
 在界面中填入 Refresh Token，登录后选择下载模式并开始下载。
 
-## 主要脚本说明
+## 主要文件说明
 
-- pixiv_downloader.py: 主 GUI 程序入口
-- pixiv_fetcher.py: 不同模式的作品获取逻辑
-- pixiv_utils.py: 下载、日志、ID 记录、防封等待等公共工具
-- pixiv_multi_filter.py: 多数据源交集下载界面
+- main.py: 程序入口
+- config/: YAML 配置目录（default_config.yaml + config.yaml）
+- core/: 核心服务层（配置/API/下载/防重/记录）
+- gui/: 界面层（主 GUI + 多条件筛选 + 控制器）
+- utils/: 工具函数层（文件/请求/哈希）
+- tests/: 单元测试与冒烟测试
 - pixiv_get_token.py: 获取 Pixiv Refresh Token 的辅助脚本
 
 ## 配置与安全
@@ -82,4 +114,5 @@ python pixiv_downloader.py
 - Git 文档索引: docs/git-guides/README.md
 - 上传与推送流程: docs/git-guides/GITHUB_UPLOAD_PROCESS_2026-03-28.md
 - 本地恢复手册: docs/git-guides/LOCAL_RECOVERY_GUIDE.md
+- 当前发布说明: docs/git-guides/RELEASE_v2.0.0.md
 - 首版发布说明: docs/git-guides/RELEASE_v1.0.0.md

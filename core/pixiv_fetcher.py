@@ -17,15 +17,27 @@ import time
 import random
 import re
 import os
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from pathlib import Path
+from urllib.parse import quote
 
-from pixiv_utils import (
+import requests
+
+from core.pixiv_utils import (
     sanitize_filename,
     APICallCounter,
     DEBUG_MODE
 )
 
-import pixiv_utils  # 用于访问 DEBUG_MODE（可能被动态修改）
+import core.pixiv_utils as pixiv_utils  # 用于访问 DEBUG_MODE（可能被动态修改）
+
+
+# 角色同义词组（可继续扩展）
+CHARACTER_ALIASES = {
+    '初音未来': ['初音未来', '初音ミク', 'miku', 'hatsune miku', 'hatsunemiku'],
+    '洛天依': ['洛天依', 'luo tianyi', 'luotianyi', 'vsinger 洛天依'],
+}
 
 # ============================================================
 # 配置类
@@ -53,10 +65,14 @@ class FetchConfig:
         # 模式参数
         self.mode = kwargs.get('mode', '')  # 当前下载模式
         self.keyword = kwargs.get('keyword', '')
+        self.search_sort = kwargs.get('search_sort', 'popular_desc')
         self.user_ids = kwargs.get('user_ids', [])
         self.rank_mode = kwargs.get('rank_mode', 'day')
         self.rank_date = kwargs.get('rank_date', '')  # 排行榜开始日期 (YYYY-MM-DD)
         self.rank_date_end = kwargs.get('rank_date_end', '')  # 排行榜结束日期 (YYYY-MM-DD)
+        self.related_illust_id = kwargs.get('related_illust_id', '')
+        self.auth_cookie = kwargs.get('auth_cookie', '')
+        self.user_agent = kwargs.get('user_agent', '')
 
 
 # ============================================================
@@ -80,6 +96,8 @@ class PixivFetcher:
         self.config = config
         self.log = log_callback or (lambda msg: print(msg))
         self.stop_event = stop_event
+        self._search_runtime = None
+        self._disable_web_popular = False
         
         # API 请求计数器
         self.api_counter = APICallCounter(log_callback=self.log)
@@ -110,10 +128,98 @@ class PixivFetcher:
             if not self.config.keyword:
                 self.log("[!] 请输入搜索关键词")
                 return 0
-            self.log(f"[*] 搜索: {self.config.keyword}")
+            sort_mode = self.config.search_sort or 'popular_desc'
+            self._search_runtime = None
+
+            # App API 的 popular_desc 在部分账号/场景会退化成新作流。
+            # 若有 Cookie，优先尝试网页 Ajax 的热门排序兜底。
+            if sort_mode == 'popular_desc' and self.config.auth_cookie and not self._disable_web_popular:
+                web_probe_pages = 1 if int(self.config.min_bookmarks or 0) >= 1000 else 2
+                self.log("[*] 搜索: 先尝试网页热门排序兜底")
+                web_count = self._fetch_search_web_popular(
+                    self.config.keyword,
+                    download_queue,
+                    stats,
+                    stats_lock,
+                    update_status,
+                    downloaded_ids,
+                    max_probe_pages=web_probe_pages,
+                )
+                if web_count > 0:
+                    return web_count
+                self.log("[!] 网页热门排序未取到可用结果，回退 App API 搜索")
+
+            self.log(f"[*] 搜索: {self.config.keyword} | 排序: {sort_mode}")
+            probe_pages = 1 if (sort_mode == 'popular_desc' and int(self.config.min_bookmarks or 0) >= 1000) else None
+            if sort_mode == 'popular_desc' and int(self.config.min_bookmarks or 0) >= 1000:
+                first_result = self._search_illust_with_sort(self.config.keyword, sort_mode)
+                if self._is_popular_preview_below_threshold(first_result):
+                    self.log("[!] App热门首屏最高收藏低于阈值，跳过当前页并进入推荐/排行榜兜底")
+                    search_count = 0
+                else:
+                    search_count = self._fetch_and_queue(
+                        lambda r=first_result: r,
+                        lambda r, qs: self._search_next_page_with_runtime(qs),
+                        download_queue, stats, stats_lock, update_status, downloaded_ids,
+                        max_pages=probe_pages,
+                    )
+            else:
+                search_count = self._fetch_and_queue(
+                    lambda: self._search_illust_with_sort(self.config.keyword, sort_mode),
+                    lambda r, qs: self._search_next_page_with_runtime(qs),
+                    download_queue, stats, stats_lock, update_status, downloaded_ids,
+                    max_pages=probe_pages,
+                )
+
+            # 高门槛收藏场景下，关键词热门失效会导致长时间刷低质量新作。
+            # 自动切到推荐流，优先拿到更可能命中的高质量结果。
+            if (
+                search_count == 0
+                and not self._should_stop()
+                and sort_mode == 'popular_desc'
+                and int(self.config.min_bookmarks or 0) >= 1000
+            ):
+                self.log("[!] 关键词热门流无命中，自动切换到推荐流兜底")
+                rec_count = self._fetch_recommended_by_keyword(
+                    self.config.keyword,
+                    download_queue, stats, stats_lock, update_status, downloaded_ids
+                )
+                if rec_count > 0:
+                    self.log(f"[*] 推荐流兜底命中: {rec_count}")
+                    return rec_count
+
+                self.log("[!] 推荐流仍无命中，自动切换到排行榜关键词兜底")
+                rank_count = self._fetch_keyword_from_ranking(
+                    self.config.keyword,
+                    download_queue,
+                    stats,
+                    stats_lock,
+                    update_status,
+                    downloaded_ids,
+                )
+                if rank_count > 0:
+                    self.log(f"[*] 排行榜关键词兜底命中: {rank_count}")
+                    return rank_count
+
+            return search_count
+
+        elif mode == 'related':
+            seed_id = str(self.config.related_illust_id or '').strip()
+            if not seed_id.isdigit():
+                self.log("[!] 请输入有效的作品ID")
+                return 0
+            self.log(f"[*] 基于作品相似推荐: illust_id={seed_id}")
             return self._fetch_and_queue(
-                lambda: self.api.search_illust(self.config.keyword, search_target='partial_match_for_tags'),
-                lambda r, qs: self.api.search_illust(**qs),
+                lambda: self.api.illust_related(seed_id),
+                lambda r, qs: self.api.illust_related(**qs),
+                download_queue, stats, stats_lock, update_status, downloaded_ids
+            )
+
+        elif mode == 'recommended':
+            self.log("[*] 获取个性化推荐作品")
+            return self._fetch_and_queue(
+                lambda: self.api.illust_recommended(),
+                lambda r, qs: self.api.illust_recommended(**qs),
                 download_queue, stats, stats_lock, update_status, downloaded_ids
             )
         
@@ -200,6 +306,398 @@ class PixivFetcher:
     def _should_stop(self):
         """检查是否应该停止"""
         return self.stop_event and self.stop_event.is_set()
+
+    def _search_illust_with_sort(self, keyword, sort_mode):
+        """关键词搜索：优先热门 + 精确标签，失败自动降级，并记录本次搜索策略用于翻页。"""
+        plan = [
+            (sort_mode, 'exact_match_for_tags'),
+            (sort_mode, 'partial_match_for_tags'),
+        ]
+        if sort_mode == 'popular_desc':
+            plan.extend([
+                ('date_desc', 'exact_match_for_tags'),
+                ('date_desc', 'partial_match_for_tags'),
+            ])
+
+        last_error = None
+        for sort_value, target in plan:
+            try:
+                result = self.api.search_illust(
+                    keyword,
+                    search_target=target,
+                    sort=sort_value,
+                )
+                self._search_runtime = {
+                    'keyword': keyword,
+                    'sort': sort_value,
+                    'search_target': target,
+                }
+                if sort_value != sort_mode:
+                    self.log(f"[!] 热度排序不可用，已切换 {sort_value}")
+                self.log(f"[*] 搜索策略: {target} + {sort_value}")
+                self._log_search_preview(result)
+                return result
+            except Exception as e:
+                last_error = e
+                self.log(f"[!] 搜索策略失败({target}+{sort_value}): {e}")
+
+        if last_error:
+            raise last_error
+        return None
+
+    def _search_next_page_with_runtime(self, next_qs):
+        """搜索翻页时强制沿用首屏选定的排序与匹配参数，避免接口回退到默认排序。"""
+        params = dict(next_qs or {})
+        runtime = self._search_runtime or {}
+
+        # 保底 keyword：不同版本接口可能用 word/keyword。
+        keyword = runtime.get('keyword')
+        if keyword:
+            params['word'] = keyword
+
+        if runtime.get('sort'):
+            params['sort'] = runtime['sort']
+        if runtime.get('search_target'):
+            params['search_target'] = runtime['search_target']
+
+        return self.api.search_illust(**params)
+
+    def _is_popular_preview_below_threshold(self, result):
+        """判断热门首屏收藏数是否整体低于当前阈值。"""
+        threshold = int(self.config.min_bookmarks or 0)
+        if threshold <= 0:
+            return False
+        try:
+            if not result or not hasattr(result, 'illusts') or not result.illusts:
+                return True
+            values = []
+            for illust in result.illusts[:5]:
+                values.append(getattr(illust, 'total_bookmarks', 0) or 0)
+            return bool(values) and max(values) < threshold
+        except Exception:
+            return False
+
+    def _fetch_search_web_popular(self, keyword, download_queue, stats, stats_lock, update_status, downloaded_ids, max_probe_pages=None):
+        """使用网页 Ajax 热门排序获取作品，再复用现有下载队列逻辑。"""
+        page = 1
+        queued_total = 0
+        fetched = 0
+
+        while fetched < self.config.max_count and not self._should_stop():
+            try:
+                result = self._web_popular_page_to_result(keyword, page)
+            except Exception as e:
+                self.log(f"[!] 网页热门搜索失败(p={page}): {e}")
+                # Windows/OpenSSL 环境下常见 EOF，直接停用网页分支，避免反复报错。
+                if 'SSL' in str(e) or 'EOF' in str(e):
+                    self._disable_web_popular = True
+                    self.log("[!] 检测到 SSL EOF，已停用网页热门兜底，后续直接走 App/推荐/排行榜兜底")
+                break
+
+            if not result or not getattr(result, 'illusts', None):
+                if page == 1:
+                    self.log("[!] 网页热门搜索返回空数据")
+                break
+
+            # 首屏若最高收藏都小于阈值，判定热门权限不可用，立即切换下个兜底。
+            if page == 1 and int(self.config.min_bookmarks or 0) > 0:
+                preview = getattr(result, 'preview_bookmarks', None) or []
+                if preview and max(preview) < int(self.config.min_bookmarks or 0):
+                    self.log("[!] 网页热门首屏最高收藏低于阈值，立即切换 App/推荐/排行榜兜底")
+                    return 0
+
+            # 复用当前筛选与入队流程：单页处理，避免重写下载逻辑。
+            remain = max(1, self.config.max_count - fetched)
+            old_limit = self.config.max_count
+            self.config.max_count = remain
+            queued_now = self._fetch_and_queue(
+                lambda r=result: r,
+                lambda r, qs: None,
+                download_queue,
+                stats,
+                stats_lock,
+                update_status,
+                downloaded_ids,
+            )
+            self.config.max_count = old_limit
+
+            queued_total += queued_now
+            fetched += len(result.illusts)
+
+            # 高频场景只做短探测，防止长时间卡在网页分支。
+            if max_probe_pages is not None and page >= max_probe_pages and queued_total == 0:
+                self.log(f"[!] 网页热门探测 {max_probe_pages} 页无命中，立即切换下个兜底")
+                return 0
+
+            if not getattr(result, 'next_url', None):
+                break
+
+            page += 1
+            self._api_sleep()
+
+        if queued_total > 0:
+            self.log(f"[*] 网页热门排序入队完成: {queued_total}")
+        return queued_total
+
+    def _fetch_keyword_from_ranking(self, keyword, download_queue, stats, stats_lock, update_status, downloaded_ids):
+        """当搜索热门不可用时，用近期日榜数据按关键词匹配兜底。"""
+        keyword = (keyword or '').strip()
+        if not keyword:
+            return 0
+        aliases = self._build_keyword_aliases(keyword)
+        self.log(f"[*] 排行榜兜底关键词组: {', '.join(aliases[:6])}")
+
+        total_queued = 0
+        max_target = self.config.max_count
+        # 向前回溯 30 天，通常足够覆盖高热作品池。
+        for i in range(30):
+            if self._should_stop():
+                break
+            day = (datetime.now() - timedelta(days=i + 1)).strftime('%Y-%m-%d')
+            try:
+                result = self.api.illust_ranking(mode='day', date=day)
+                self.api_counter.increment()
+            except Exception as e:
+                self.log(f"[!] 读取日榜失败({day}): {e}")
+                continue
+
+            if not result or not hasattr(result, 'illusts') or not result.illusts:
+                continue
+
+            matched = []
+            for illust in result.illusts:
+                if self._match_keyword_aliases(illust, aliases):
+                    matched.append(illust)
+
+            if not matched:
+                continue
+
+            self.log(f"[*] 日榜兜底命中({day}): {len(matched)}")
+
+            remain = max(1, self.config.max_count - total_queued)
+            old_limit = self.config.max_count
+            self.config.max_count = remain
+            queued = self._fetch_and_queue(
+                lambda m=matched: SimpleNamespace(illusts=m, next_url=None),
+                lambda r, qs: None,
+                download_queue,
+                stats,
+                stats_lock,
+                update_status,
+                downloaded_ids,
+            )
+            self.config.max_count = old_limit
+            total_queued += queued
+
+            if total_queued >= max_target:
+                break
+
+            self._api_sleep()
+
+        return total_queued
+
+    def _fetch_recommended_by_keyword(self, keyword, download_queue, stats, stats_lock, update_status, downloaded_ids):
+        """推荐流兜底：先按关键词同义词过滤，再进入统一下载链路。"""
+        keyword = (keyword or '').strip()
+        if not keyword:
+            return 0
+
+        aliases = self._build_keyword_aliases(keyword)
+        total_queued = 0
+        result = None
+
+        try:
+            result = self.api.illust_recommended()
+            self.api_counter.increment()
+        except Exception as e:
+            self.log(f"[!] 推荐流请求失败: {e}")
+            return 0
+
+        while result and getattr(result, 'illusts', None) and not self._should_stop() and total_queued < self.config.max_count:
+            matched = [ill for ill in result.illusts if self._match_keyword_aliases(ill, aliases)]
+            if matched:
+                self.log(f"[*] 推荐流关键词命中: {len(matched)}")
+                remain = max(1, self.config.max_count - total_queued)
+                old_limit = self.config.max_count
+                self.config.max_count = remain
+                queued = self._fetch_and_queue(
+                    lambda m=matched: SimpleNamespace(illusts=m, next_url=None),
+                    lambda r, qs: None,
+                    download_queue,
+                    stats,
+                    stats_lock,
+                    update_status,
+                    downloaded_ids,
+                )
+                self.config.max_count = old_limit
+                total_queued += queued
+
+            if total_queued >= self.config.max_count:
+                break
+
+            if not getattr(result, 'next_url', None):
+                break
+            next_qs = self.api.parse_qs(result.next_url)
+            if not next_qs:
+                break
+            try:
+                result = self.api.illust_recommended(**next_qs)
+                self.api_counter.increment()
+            except Exception as e:
+                self.log(f"[!] 推荐流翻页失败: {e}")
+                break
+            self._api_sleep()
+
+        return total_queued
+
+    def _build_keyword_aliases(self, keyword):
+        """根据输入关键词扩展同义词组，用于角色身份匹配。"""
+        raw = (keyword or '').strip().lower()
+        if not raw:
+            return []
+
+        # 直接命中预定义角色组
+        for _, aliases in CHARACTER_ALIASES.items():
+            norm_aliases = [a.lower() for a in aliases]
+            if raw in norm_aliases:
+                return norm_aliases
+
+        # 关键词包含角色名时也扩展组
+        for _, aliases in CHARACTER_ALIASES.items():
+            norm_aliases = [a.lower() for a in aliases]
+            for a in norm_aliases:
+                if a in raw or raw in a:
+                    return norm_aliases
+
+        return [raw]
+
+    def _match_keyword_aliases(self, illust, aliases):
+        """标题或标签匹配同义词组；优先看标签，其次看标题。"""
+        if not aliases:
+            return False
+        try:
+            title = (getattr(illust, 'title', '') or '').lower()
+
+            tags = getattr(illust, 'tags', None)
+            tag_names = []
+            if tags:
+                if isinstance(tags, (list, tuple)):
+                    for t in tags:
+                        name = ''
+                        if isinstance(t, str):
+                            name = t
+                        else:
+                            name = getattr(t, 'name', '') or ''
+                        if name:
+                            tag_names.append(name.lower())
+                else:
+                    tag_list = getattr(tags, 'tags', None) or []
+                    for t in tag_list:
+                        name = getattr(t, 'name', '') or ''
+                        if name:
+                            tag_names.append(name.lower())
+
+            # 标签完全匹配优先，角色识别更稳。
+            for a in aliases:
+                if a in tag_names:
+                    return True
+
+            # 标签包含匹配。
+            for a in aliases:
+                for t in tag_names:
+                    if a in t:
+                        return True
+
+            # 标题包含匹配（长度门槛避免误判，如 "mi"）。
+            for a in aliases:
+                if len(a) >= 3 and a in title:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _web_popular_page_to_result(self, keyword, page):
+        """请求网页热门页并转换为与 fetch 流程兼容的结果对象。"""
+        ua = self.config.user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        encoded = quote(keyword)
+        url = (
+            f"https://www.pixiv.net/ajax/search/artworks/{encoded}"
+            f"?word={encoded}&order=popular_d&mode=all&p={page}&s_mode=s_tag_full&type=all&lang=zh"
+        )
+        headers = {
+            'Referer': f"https://www.pixiv.net/tags/{encoded}/artworks",
+            'User-Agent': ua,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Cookie': self.config.auth_cookie,
+        }
+
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        body = data.get('body') or {}
+        illust_manga = body.get('illustManga') or {}
+        rows = (illust_manga.get('data') or [])
+
+        illusts = []
+        preview_bookmarks = []
+        for row in rows:
+            if self._should_stop():
+                break
+            illust_id = row.get('id')
+            if not illust_id:
+                continue
+            bookmark_count = row.get('bookmarkCount', 0) or 0
+            ai_type = row.get('aiType', 0) or 0
+            preview_bookmarks.append(bookmark_count)
+            user_id = row.get('userId')
+            user_name = row.get('userName') or ''
+            illusts.append(SimpleNamespace(
+                id=int(illust_id) if str(illust_id).isdigit() else illust_id,
+                title=row.get('title') or '',
+                total_bookmarks=bookmark_count,
+                illust_ai_type=ai_type,
+                tags=row.get('tags') or [],
+                user=SimpleNamespace(id=str(user_id) if user_id else '', name=user_name),
+                create_date=row.get('createDate'),
+            ))
+
+        sample = []
+        for item in rows[:5]:
+            sample.append(str(item.get('bookmarkCount', 0) or 0))
+        if sample:
+            self.log(f"[*] 网页热门首屏预览(top5): {', '.join(sample)}")
+
+        has_next = bool(illust_manga.get('next')) and len(rows) > 0
+        return SimpleNamespace(
+            illusts=illusts,
+            next_url=f"web_page:{page + 1}" if has_next else None,
+            preview_bookmarks=preview_bookmarks,
+        )
+
+    def _log_search_preview(self, result):
+        """记录搜索首屏收藏数预览，便于判断排序是否生效。"""
+        try:
+            if not result or not hasattr(result, 'illusts') or not result.illusts:
+                self.log("[!] 搜索首屏为空")
+                return
+            sample = []
+            values = []
+            for illust in result.illusts[:5]:
+                v = getattr(illust, 'total_bookmarks', 0) or 0
+                values.append(v)
+                sample.append(str(v))
+            self.log(f"[*] 首屏收藏预览(top5): {', '.join(sample)}")
+
+            runtime = self._search_runtime or {}
+            min_bm = int(self.config.min_bookmarks or 0)
+            if runtime.get('sort') == 'popular_desc' and min_bm > 0:
+                top_max = max(values) if values else 0
+                if top_max < min_bm:
+                    self.log("[!] 热度首屏仍低于你的收藏阈值，可能是账号热门排序权限受限或关键词高热作品本就很少")
+                    self.log("[*] 建议：改用“基于关注推荐”或“基于作品相似推荐”模式获取高质量样本")
+        except Exception:
+            pass
     
     def _get_ranking_step(self):
         """根据排行榜类型返回时间步长"""
@@ -401,7 +899,7 @@ class PixivFetcher:
         except Exception as e:
             self.log(f"[-] 保存跳过用户失败: {e}")
     
-    def _fetch_and_queue(self, first_fetch, next_fetch, download_queue, stats, stats_lock, update_status, downloaded_ids):
+    def _fetch_and_queue(self, first_fetch, next_fetch, download_queue, stats, stats_lock, update_status, downloaded_ids, max_pages=None):
         """
         获取作品并添加到下载队列
         
@@ -452,10 +950,12 @@ class PixivFetcher:
             self.log(f"[D] 首次请求返回 {illust_count} 个作品")
         
         fetched = 0
+        page_index = 0
         
         while result and hasattr(result, 'illusts') and result.illusts and fetched < self.config.max_count:
             if self._should_stop():
                 break
+            page_index += 1
             
             page_processed = 0  # 本页处理的作品数（包括跳过的）
             
@@ -600,6 +1100,10 @@ class PixivFetcher:
             
             # 获取下一页
             if result.next_url and fetched < self.config.max_count:
+                if max_pages is not None and page_index >= max_pages:
+                    if pixiv_utils.DEBUG_MODE:
+                        self.log(f"[D] 已达到页探测上限: {max_pages}")
+                    break
                 next_qs = self.api.parse_qs(result.next_url)
                 if pixiv_utils.DEBUG_MODE:
                     self.log(f"[D] 获取下一页，当前已获取 {fetched} 个，已跳过 {skipped_count} 个")
@@ -753,9 +1257,7 @@ class PixivFetcher:
             else:
                 # 年/月/
                 folder_path = os.path.join(self.config.save_dir, year, month)
-            
-            if not os.path.exists(folder_path):
-                os.makedirs(folder_path)
+
             return os.path.join(folder_path, filename)
         
         # 其他模式：原有逻辑
@@ -766,8 +1268,6 @@ class PixivFetcher:
             if not user_folder:
                 user_folder = str(user_id) if user_id else "unknown"
             folder_path = os.path.join(self.config.save_dir, user_folder)
-            if not os.path.exists(folder_path):
-                os.makedirs(folder_path)
             return os.path.join(folder_path, filename)
         else:
             return os.path.join(self.config.save_dir, filename)

@@ -11,7 +11,7 @@ Pixiv 图片下载器
     pip install pixivpy3 requests
 
 使用:
-    python pixiv_downloader.py
+    python main.py
 """
 
 # ============================================================
@@ -36,28 +36,28 @@ from tkinter import ttk, filedialog, scrolledtext, messagebox
 # 路径配置
 # ============================================================
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parents[1]
 CONFIG_FILE = ROOT / "pixiv_config.json"
 DOWNLOADED_IDS_FILE = ROOT / "downloaded_ids.txt"
-CONFIG_VERSION = "1.2"
+CONFIG_VERSION = "2.0.0"
 
 # ============================================================
 # 模块导入
 # ============================================================
 
 try:
-    from pixiv_multi_filter import open_multi_filter
+    from gui.pixiv_multi_filter import open_multi_filter
 except ImportError:
     open_multi_filter = None
 
-from pixiv_utils import (
+from core.pixiv_utils import (
     download_image, log_message,
     load_downloaded_ids, save_downloaded_id,
     clear_download_records,
     DEBUG_MODE
 )
 
-from pixiv_fetcher import PixivFetcher, FetchConfig
+from core.pixiv_fetcher import PixivFetcher, FetchConfig
 
 try:
     from pixivpy3 import AppPixivAPI
@@ -118,6 +118,27 @@ class PixivDownloaderGUI:
                     self.skip_ai_var.set(cfg['skip_ai'])
                 if cfg.get('skip_downloaded') is not None:
                     self.skip_downloaded_var.set(cfg['skip_downloaded'])
+
+                saved_mode = cfg.get('mode', 'search')
+                if saved_mode in ('search', 'user', 'follow', 'follow_all', 'ranking', 'related', 'recommended'):
+                    self.mode_var.set(saved_mode)
+
+                if cfg.get('keyword') is not None:
+                    self._set_entry(self.keyword_entry, cfg.get('keyword', ''))
+                if cfg.get('search_sort'):
+                    self.search_sort_combo.set(cfg['search_sort'])
+                if cfg.get('user_ids') is not None:
+                    self._set_entry(self.user_entry, cfg.get('user_ids', ''))
+                if cfg.get('related_illust_id') is not None:
+                    self._set_entry(self.related_entry, cfg.get('related_illust_id', ''))
+                if cfg.get('rank_mode'):
+                    self.rank_combo.set(cfg.get('rank_mode', 'day'))
+                if cfg.get('rank_date') is not None:
+                    self._set_entry(self.rank_date_entry, cfg.get('rank_date', ''))
+                if cfg.get('rank_date_end') is not None:
+                    self._set_entry(self.rank_date_end_entry, cfg.get('rank_date_end', ''))
+
+                self._toggle_mode()
         except Exception as e:
             log_message(f"加载配置失败: {e}", "warning")
     
@@ -143,6 +164,14 @@ class PixivDownloaderGUI:
                 'min_bookmarks': self.min_bookmarks_entry.get().strip(),
                 'skip_ai': self.skip_ai_var.get(),
                 'skip_downloaded': self.skip_downloaded_var.get(),
+                'mode': self.mode_var.get(),
+                'keyword': self.keyword_entry.get().strip(),
+                'search_sort': self.search_sort_combo.get(),
+                'user_ids': self.user_entry.get().strip(),
+                'related_illust_id': self.related_entry.get().strip(),
+                'rank_mode': self.rank_combo.get(),
+                'rank_date': self.rank_date_entry.get().strip(),
+                'rank_date_end': self.rank_date_end_entry.get().strip(),
                 'cookie': base_cfg.get('cookie', self.auth_cookie),
                 'user_agent': base_cfg.get('user_agent', self.user_agent),
             }
@@ -196,7 +225,9 @@ class PixivDownloaderGUI:
         modes = [
             ("关键词搜索", "search"), ("用户作品", "user"),
             ("关注用户新作", "follow"), ("关注用户全部作品", "follow_all"),
-            ("排行榜", "ranking")
+            ("排行榜", "ranking"),
+            ("基于作品相似推荐", "related"),
+            ("基于关注推荐", "recommended")
         ]
         for text, value in modes:
             ttk.Radiobutton(mode_frame, text=text, variable=self.mode_var,
@@ -207,7 +238,16 @@ class PixivDownloaderGUI:
         self.search_frame.pack(pady=5, padx=10, fill='x')
         ttk.Label(self.search_frame, text="搜索关键词:").pack(side='left')
         self.keyword_entry = ttk.Entry(self.search_frame)
-        self.keyword_entry.pack(side='left', fill='x', expand=True)
+        self.keyword_entry.pack(side='left', fill='x', expand=True, padx=(0, 10))
+        ttk.Label(self.search_frame, text="排序:").pack(side='left')
+        self.search_sort_combo = ttk.Combobox(
+            self.search_frame,
+            values=['popular_desc', 'date_desc'],
+            state='readonly',
+            width=14,
+        )
+        self.search_sort_combo.set('popular_desc')
+        self.search_sort_combo.pack(side='left')
         
         # 用户ID
         self.user_frame = ttk.Frame(self.root)
@@ -215,6 +255,12 @@ class PixivDownloaderGUI:
         self.user_entry = ttk.Entry(self.user_frame)
         self.user_entry.pack(side='left', fill='x', expand=True, padx=(5,5))
         ttk.Button(self.user_frame, text="导入txt", command=self._import_user_ids).pack(side='left')
+
+        # 相似推荐种子作品 ID
+        self.related_frame = ttk.Frame(self.root)
+        ttk.Label(self.related_frame, text="作品ID:").pack(side='left')
+        self.related_entry = ttk.Entry(self.related_frame)
+        self.related_entry.pack(side='left', fill='x', expand=True)
         
         # 排行榜类型
         self.rank_frame = ttk.Frame(self.root)
@@ -354,7 +400,7 @@ class PixivDownloaderGUI:
         ttk.Button(btn_frame, text="多条件筛选", command=self._open_multi_filter).pack(side='left', padx=5)
         
         # 调试模式
-        import pixiv_utils
+        import core.pixiv_utils as pixiv_utils
         self.debug_var = tk.BooleanVar(value=pixiv_utils.DEBUG_MODE)
         ttk.Checkbutton(btn_frame, text="调试", variable=self.debug_var,
                        command=self._toggle_debug).pack(side='left', padx=5)
@@ -381,6 +427,7 @@ class PixivDownloaderGUI:
         self.user_frame.pack_forget()
         self.rank_frame.pack_forget()
         self.rank_hint_frame.pack_forget()
+        self.related_frame.pack_forget()
         
         if mode == 'search':
             self.search_frame.pack(pady=5, padx=10, fill='x', after=self.root.children['!labelframe'])
@@ -389,6 +436,8 @@ class PixivDownloaderGUI:
         elif mode == 'ranking':
             self.rank_frame.pack(pady=5, padx=10, fill='x', after=self.root.children['!labelframe'])
             self.rank_hint_frame.pack(pady=(0,5), padx=10, fill='x', after=self.rank_frame)
+        elif mode == 'related':
+            self.related_frame.pack(pady=5, padx=10, fill='x', after=self.root.children['!labelframe'])
     
     def _browse_dir(self):
         d = filedialog.askdirectory()
@@ -437,7 +486,7 @@ class PixivDownloaderGUI:
             messagebox.showinfo("成功", f"日志已导出")
     
     def _toggle_debug(self):
-        import pixiv_utils
+        import core.pixiv_utils as pixiv_utils
         pixiv_utils.DEBUG_MODE = self.debug_var.get()
         self.log_queue.put(f"[*] 调试模式: {'开启' if self.debug_var.get() else '关闭'}")
     
@@ -450,8 +499,7 @@ class PixivDownloaderGUI:
                 DOWNLOADED_IDS_FILE.unlink()
 
             save_dir = self.dir_entry.get().strip()
-            if save_dir and os.path.exists(save_dir):
-                clear_download_records(save_dir)
+            clear_download_records(save_dir, clear_central=True)
 
             messagebox.showinfo("成功", "已清空")
         except Exception as e:
@@ -581,10 +629,14 @@ class PixivDownloaderGUI:
             name_template=self.name_template.get(),
             mode=self.mode_var.get(),  # 传递当前下载模式
             keyword=self.keyword_entry.get().strip(),
+            search_sort=self.search_sort_combo.get(),
             user_ids=self._parse_user_ids(),
+            related_illust_id=self.related_entry.get().strip(),
             rank_mode=self.rank_combo.get(),
             rank_date=self.rank_date_entry.get().strip(),  # 排行榜开始日期
-            rank_date_end=self.rank_date_end_entry.get().strip()  # 排行榜结束日期
+            rank_date_end=self.rank_date_end_entry.get().strip(),  # 排行榜结束日期
+            auth_cookie=self.auth_cookie,
+            user_agent=self.user_agent,
         )
         
         self.log_queue.put(f"[*] 下载间隔: {delay}~{delay+1}秒 | API间隔: {api_delay}~{api_delay+0.5}秒")
@@ -726,7 +778,7 @@ class PixivDownloaderGUI:
                 
         except Exception as e:
             self.log_queue.put(f"[-] 错误: {e}")
-            import pixiv_utils
+            import core.pixiv_utils as pixiv_utils
             if pixiv_utils.DEBUG_MODE:
                 import traceback
                 self.log_queue.put(f"[D] {traceback.format_exc()}")

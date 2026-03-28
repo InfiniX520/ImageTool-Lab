@@ -1,5 +1,6 @@
 # Python cache
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 
@@ -33,3 +34,5 @@ downloads/
 output/
 DL/
 测试日志/
+download_logs/
+data/backup/

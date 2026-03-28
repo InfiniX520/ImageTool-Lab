@@ -140,7 +140,7 @@ def get_token():
             print(f"\n[+] Refresh Token: {data['refresh_token']}")
             print(f"\n[*] Access Token: {data['access_token']}")
             print(f"[*] 有效期: {data.get('expires_in', 0)} 秒")
-            print("\n[*] 请保存好你的 Refresh Token，用于 pixiv_downloader.py 登录")
+            print("\n[*] 请保存好你的 Refresh Token，用于 main.py 登录")
             print("[*] Refresh Token 长期有效，不需要频繁获取")
         else:
             print("\n[-] 获取失败:")

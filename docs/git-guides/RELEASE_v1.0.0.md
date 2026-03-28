@@ -8,10 +8,10 @@
 
 ## 本版本内容
 
-1. 主程序: pixiv_downloader.py
-2. 获取模块: pixiv_fetcher.py
-3. 工具模块: pixiv_utils.py
-4. 交集模式: pixiv_multi_filter.py
+1. 主程序: main.py
+2. 核心模块: core/
+3. 界面模块: gui/
+4. 工具模块: utils/
 5. Token 获取: pixiv_get_token.py
 6. 依赖清单: requirements.txt
 

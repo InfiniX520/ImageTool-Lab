@@ -20,7 +20,6 @@ Pixiv 多数据源交集下载器
 
 # 标准库
 import os
-import sys
 import json
 import time
 import random
@@ -31,9 +30,6 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-# 添加当前目录到路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 # 可选模块
 try:
     from pixivpy3 import AppPixivAPI
@@ -41,7 +37,7 @@ except ImportError:
     AppPixivAPI = None
 
 # 从工具模块导入公共函数
-from pixiv_utils import (
+from core.pixiv_utils import (
     download_image, 
     sanitize_filename, 
     APICallCounter,
@@ -192,7 +188,7 @@ class MultiFilterDialog:
         self.stop_btn.pack(side='left', padx=5)
         
         # 调试模式
-        import pixiv_utils
+        import core.pixiv_utils as pixiv_utils
         self.debug_var = tk.BooleanVar(value=pixiv_utils.DEBUG_MODE)
         ttk.Checkbutton(btn_frame, text="调试日志", variable=self.debug_var,
                        command=self._toggle_debug).pack(side='left', padx=5)
@@ -207,7 +203,7 @@ class MultiFilterDialog:
     
     def _toggle_debug(self):
         """切换调试模式"""
-        import pixiv_utils
+        import core.pixiv_utils as pixiv_utils
         pixiv_utils.DEBUG_MODE = self.debug_var.get()
         if self.debug_var.get():
             log_message("调试模式已开启，将显示详细错误信息", "info", self.log_queue)
@@ -605,12 +601,12 @@ if __name__ == '__main__':
     else:
         print("[*] 独立运行模式")
         print("[!] 注意: 独立运行时需要手动登录，请从主程序启动")
-        print("[*] 主程序: python pixiv_downloader.py")
+        print("[*] 主程序: python main.py")
         print()
         
         # 尝试加载已保存的 token
         from pathlib import Path
-        config_file = Path(__file__).parent / "pixiv_config.json"
+        config_file = Path(__file__).resolve().parents[1] / "pixiv_config.json"
         api = None
         
         if config_file.exists():
