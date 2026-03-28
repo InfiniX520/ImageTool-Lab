@@ -53,6 +53,7 @@ except ImportError:
 from pixiv_utils import (
     download_image, log_message,
     load_downloaded_ids, save_downloaded_id,
+    clear_download_records,
     DEBUG_MODE
 )
 
@@ -77,6 +78,8 @@ class PixivDownloaderGUI:
         self.root.geometry("850x750")
         
         self.api = None
+        self.auth_cookie = ""
+        self.user_agent = ""
         self.running = False
         self.stop_event = threading.Event()
         self.log_queue = queue.Queue()
@@ -104,6 +107,8 @@ class PixivDownloaderGUI:
                 self._set_entry(self.delay_entry, cfg.get('delay', '0.5'))
                 self._set_entry(self.api_delay_entry, cfg.get('api_delay', '0.3'))
                 self._set_entry(self.min_bookmarks_entry, cfg.get('min_bookmarks', '0'))
+                self.auth_cookie = cfg.get('cookie', '')
+                self.user_agent = cfg.get('user_agent', '')
                 
                 if cfg.get('name_template'):
                     self.name_template.set(cfg['name_template'])
@@ -119,6 +124,12 @@ class PixivDownloaderGUI:
     def _save_config(self):
         """保存配置"""
         try:
+            # 保留未知字段，避免覆盖用户手动写入的扩展配置（如 cookie）。
+            base_cfg = {}
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    base_cfg = json.load(f)
+
             config = {
                 'version': CONFIG_VERSION,
                 'token': self.token_entry.get().strip(),
@@ -131,10 +142,13 @@ class PixivDownloaderGUI:
                 'folder_by_user': self.folder_var.get(),
                 'min_bookmarks': self.min_bookmarks_entry.get().strip(),
                 'skip_ai': self.skip_ai_var.get(),
-                'skip_downloaded': self.skip_downloaded_var.get()
+                'skip_downloaded': self.skip_downloaded_var.get(),
+                'cookie': base_cfg.get('cookie', self.auth_cookie),
+                'user_agent': base_cfg.get('user_agent', self.user_agent),
             }
+            base_cfg.update(config)
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+                json.dump(base_cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
             log_message(f"保存配置失败: {e}", "error")
     
@@ -428,10 +442,20 @@ class PixivDownloaderGUI:
         self.log_queue.put(f"[*] 调试模式: {'开启' if self.debug_var.get() else '关闭'}")
     
     def _clear_downloaded_ids(self):
-        if DOWNLOADED_IDS_FILE.exists():
-            if messagebox.askyesno("确认", "确定清空下载记录？"):
+        if not messagebox.askyesno("确认", "确定清空下载记录？"):
+            return
+
+        try:
+            if DOWNLOADED_IDS_FILE.exists():
                 DOWNLOADED_IDS_FILE.unlink()
-                messagebox.showinfo("成功", "已清空")
+
+            save_dir = self.dir_entry.get().strip()
+            if save_dir and os.path.exists(save_dir):
+                clear_download_records(save_dir)
+
+            messagebox.showinfo("成功", "已清空")
+        except Exception as e:
+            messagebox.showerror("错误", f"清空记录失败: {e}")
     
     def _open_multi_filter(self):
         if open_multi_filter is None:
@@ -481,6 +505,7 @@ class PixivDownloaderGUI:
             try:
                 self.api = AppPixivAPI()
                 self.api.auth(refresh_token=token)
+                self._refresh_auth_context_from_api()
                 self.log_queue.put(f"[+] 登录成功! 用户: {self.api.user_id}")
                 self.root.after(0, lambda: self.login_status.config(text="已登录", foreground='green'))
             except Exception as e:
@@ -488,6 +513,26 @@ class PixivDownloaderGUI:
                 self.api = None
         
         threading.Thread(target=do_login, daemon=True).start()
+
+    def _refresh_auth_context_from_api(self):
+        """尽量从已登录会话提取 Cookie/UA，提升网页端原图请求成功率。"""
+        try:
+            # 优先使用配置中的 UA，若没有再从会话中取。
+            if not self.user_agent:
+                self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+            # pixivpy3 内部字段版本差异较大，使用宽松探测。
+            session = getattr(self.api, 'requests', None) or getattr(self.api, '_requests', None)
+            if session and hasattr(session, 'cookies') and session.cookies:
+                cookie_pairs = []
+                for c in session.cookies:
+                    if getattr(c, 'name', None) and getattr(c, 'value', None):
+                        cookie_pairs.append(f"{c.name}={c.value}")
+                if cookie_pairs:
+                    self.auth_cookie = '; '.join(cookie_pairs)
+                    self.log_queue.put("[*] 已从会话提取 Cookie")
+        except Exception as e:
+            self.log_queue.put(f"[!] 会话信息提取失败: {e}")
     
     def _start_download(self):
         """开始下载"""
@@ -605,10 +650,40 @@ class PixivDownloaderGUI:
                     if self.stop_event.is_set():
                         break
                     try:
-                        url, save_path, illust_id, log_dir, is_ai, bookmarks, create_date = download_queue.get(timeout=0.5)
-                        success = download_image(url, save_path, self.log_queue,
-                                                success_log_dir=log_dir, illust_id=illust_id,
-                                                is_ai=is_ai, bookmarks=bookmarks, create_date=create_date)
+                        (
+                            url,
+                            save_path,
+                            illust_id,
+                            log_dir,
+                            is_ai,
+                            bookmarks,
+                            create_date,
+                            page_index,
+                            title,
+                            artist_id,
+                            artist_name,
+                        ) = download_queue.get(timeout=0.5)
+                        success = download_image(
+                            url,
+                            save_path,
+                            self.log_queue,
+                            success_log_dir=log_dir,
+                            illust_id=illust_id,
+                            is_ai=is_ai,
+                            bookmarks=bookmarks,
+                            create_date=create_date,
+                            page_index=page_index,
+                            title=title,
+                            artist_id=artist_id,
+                            artist_name=artist_name,
+                            download_root=config.save_dir,
+                            folder_by_user=config.folder_by_user,
+                            resume_enabled=self.skip_downloaded_var.get(),
+                            original_enabled=config.original,
+                            multi_page=config.multi_page,
+                            auth_cookie=self.auth_cookie,
+                            user_agent=self.user_agent,
+                        )
                         with stats_lock:
                             if success:
                                 stats['downloaded'] += 1

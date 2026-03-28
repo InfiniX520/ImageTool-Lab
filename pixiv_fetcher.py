@@ -475,7 +475,38 @@ class PixivFetcher:
                         self.log(f"[D] 跳过已下载: {illust.id}")
                     continue
                 
-                # 获取详情
+                # 先做轻量预筛：用列表页已有字段先判断，避免对明显不符合条件的作品请求详情。
+                pre_ai_type = getattr(illust, 'illust_ai_type', None)
+                pre_bookmarks = getattr(illust, 'total_bookmarks', None)
+
+                if self.config.skip_ai and pre_ai_type == 2:
+                    title = getattr(illust, 'title', '') or ''
+                    self.log(f"[*] 跳过AI作品: {illust.id} {title}")
+                    fetched += 1
+                    with stats_lock:
+                        stats['fetched'] = fetched
+                        stats['skipped'] = stats.get('skipped', 0) + 1
+                    update_status()
+                    self._api_sleep()
+                    continue
+
+                if self.config.min_bookmarks > 0 and pre_bookmarks is not None:
+                    bookmarks = pre_bookmarks or 0
+                    if bookmarks < self.config.min_bookmarks:
+                        title = getattr(illust, 'title', '') or ''
+                        if pixiv_utils.DEBUG_MODE:
+                            self.log(f"[D] 收藏不足({bookmarks}<{self.config.min_bookmarks}): {illust.id} {title}")
+                        else:
+                            self.log(f"[*] 收藏不足({bookmarks}<{self.config.min_bookmarks}): {illust.id} {title}")
+                        fetched += 1
+                        with stats_lock:
+                            stats['fetched'] = fetched
+                            stats['low_bookmarks'] = stats.get('low_bookmarks', 0) + 1
+                        update_status()
+                        self._api_sleep()
+                        continue
+
+                # 只有通过预筛后才请求详情，减少无效 API 调用。
                 try:
                     detail = self.api.illust_detail(illust.id)
                     if detail and hasattr(detail, 'illust') and detail.illust:
@@ -487,8 +518,8 @@ class PixivFetcher:
                         self.log(f"[D] 作品详情: {illust.id} 收藏={bookmarks} AI类型={ai_type}")
                 except Exception as e:
                     self.log(f"[!] 获取 {illust.id} 详情失败: {e}")
-                
-                # 跳过AI作品
+
+                # 详情后再做一次最终校验，避免列表页字段缺失或不准确。
                 if self.config.skip_ai:
                     ai_type = getattr(illust, 'illust_ai_type', 0) or 0
                     if ai_type == 2:
@@ -501,8 +532,7 @@ class PixivFetcher:
                         update_status()
                         self._api_sleep()
                         continue
-                
-                # 检查收藏数
+
                 if self.config.min_bookmarks > 0:
                     bookmarks = getattr(illust, 'total_bookmarks', 0) or 0
                     if bookmarks < self.config.min_bookmarks:
@@ -527,15 +557,35 @@ class PixivFetcher:
                 is_ai = getattr(illust, 'illust_ai_type', 0) == 2
                 bookmarks = getattr(illust, 'total_bookmarks', 0) or 0
                 create_date = getattr(illust, 'create_date', None)
+                title = getattr(illust, 'title', '') or ''
+                artist_id = ''
+                artist_name = ''
+                if hasattr(illust, 'user') and illust.user:
+                    artist_id = str(getattr(illust.user, 'id', '') or '')
+                    artist_name = getattr(illust.user, 'name', '') or ''
                 
-                for url in urls:
+                for url, page_index in urls:
                     save_path = self._get_save_path(illust, url)
                     # 排行榜模式：log_dir 应该是实际保存目录（年/月/ 或 年/月/画师/）
                     if self.config.mode == 'ranking':
                         log_dir = os.path.dirname(save_path)
                     else:
                         log_dir = os.path.dirname(save_path) if self.config.folder_by_user else self.config.save_dir
-                    download_queue.put((url, save_path, illust.id, log_dir, is_ai, bookmarks, create_date))
+                    download_queue.put(
+                        (
+                            url,
+                            save_path,
+                            illust.id,
+                            log_dir,
+                            is_ai,
+                            bookmarks,
+                            create_date,
+                            page_index,
+                            title,
+                            artist_id,
+                            artist_name,
+                        )
+                    )
                     queued_count += 1
                 
                 fetched += 1
@@ -598,31 +648,26 @@ class PixivFetcher:
         urls = []
         
         if self.config.original:
-            # 多图作品
+            # 原图模式统一只入队首张，后续是否扩展多P由下载层基于 Ajax pageCount 决定。
             if hasattr(illust, 'meta_pages') and illust.meta_pages:
-                if self.config.multi_page:
-                    for page in illust.meta_pages:
-                        if hasattr(page, 'image_urls') and hasattr(page.image_urls, 'original') and page.image_urls.original:
-                            urls.append(page.image_urls.original)
-                else:
-                    if hasattr(illust.meta_pages[0], 'image_urls') and hasattr(illust.meta_pages[0].image_urls, 'original'):
-                        urls.append(illust.meta_pages[0].image_urls.original)
-            # 单图作品
+                first_page = illust.meta_pages[0]
+                if hasattr(first_page, 'image_urls') and hasattr(first_page.image_urls, 'original') and first_page.image_urls.original:
+                    urls.append((first_page.image_urls.original, 0))
             elif hasattr(illust, 'meta_single_page') and illust.meta_single_page:
                 original_url = illust.meta_single_page.get('original_image_url')
                 if original_url:
-                    urls.append(original_url)
+                    urls.append((original_url, 0))
             
             # 兜底
             if not urls and hasattr(illust, 'image_urls'):
                 if hasattr(illust.image_urls, 'original') and illust.image_urls.original:
-                    urls.append(illust.image_urls.original)
+                    urls.append((illust.image_urls.original, 0))
                 elif hasattr(illust.image_urls, 'large') and illust.image_urls.large:
-                    urls.append(illust.image_urls.large)
+                    urls.append((illust.image_urls.large, 0))
                     self.log(f"[!] 作品 {illust.id} 无法获取原图，使用大图")
         else:
             if hasattr(illust, 'image_urls') and hasattr(illust.image_urls, 'large') and illust.image_urls.large:
-                urls.append(illust.image_urls.large)
+                urls.append((illust.image_urls.large, 0))
         
         return urls
     

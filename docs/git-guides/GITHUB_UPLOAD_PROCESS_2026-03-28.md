@@ -81,3 +81,12 @@ git restore --staged pixiv_config.json
 - LOCAL_RECOVERY_GUIDE.md
 - RELEASE_v1.0.0.md
 - README.md（项目总说明）
+
+## 七、优化验收记录（2026-03-28）
+
+已完成并验证:
+
+1. 原图下载改造为 Pixiv Ajax `body.urls.original` 与 `body.pageCount`。
+2. 多P下载、断点续传、文件大小校验、防重记录与 Markdown 记录均可工作。
+3. 清空记录可同步清理 JSON/Markdown 记录文件。
+4. 旧版 `success_log.md` 已降级为兼容开关，默认不写入，避免重复记录。

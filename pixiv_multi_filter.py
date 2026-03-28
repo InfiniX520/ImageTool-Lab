@@ -546,8 +546,25 @@ class MultiFilterDialog:
             bookmarks = getattr(illust, 'total_bookmarks', 0) or 0
             create_date = getattr(illust, 'create_date', None)
             
-            if download_image(url, save_path, self.log_queue, success_log_dir=save_dir, 
-                            illust_id=illust.id, is_ai=is_ai, bookmarks=bookmarks, create_date=create_date):
+            if download_image(
+                url,
+                save_path,
+                self.log_queue,
+                success_log_dir=save_dir,
+                illust_id=illust.id,
+                is_ai=is_ai,
+                bookmarks=bookmarks,
+                create_date=create_date,
+                page_index=0,
+                title=getattr(illust, 'title', '') or '',
+                artist_id=str(getattr(getattr(illust, 'user', None), 'id', '') or ''),
+                artist_name=getattr(getattr(illust, 'user', None), 'name', '') or '',
+                download_root=save_dir,
+                folder_by_user=False,
+                resume_enabled=False,
+                original_enabled=True,
+                multi_page=False,
+            ):
                 downloaded += 1
             else:
                 failed += 1
