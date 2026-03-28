@@ -1,0 +1,8 @@
+# JpgPng 项目依赖
+# pip install -r requirements.txt
+
+# Pixiv API
+pixivpy3>=3.7.0
+
+# HTTP 请求
+requests>=2.28.0
