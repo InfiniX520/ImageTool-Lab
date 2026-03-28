@@ -76,3 +76,10 @@ python pixiv_downloader.py
 ## 免责声明
 
 请遵守 Pixiv 服务条款与当地法律法规，仅用于个人学习与合规用途。
+
+## 文档导航
+
+- Git 文档索引: docs/git-guides/README.md
+- 上传与推送流程: docs/git-guides/GITHUB_UPLOAD_PROCESS_2026-03-28.md
+- 本地恢复手册: docs/git-guides/LOCAL_RECOVERY_GUIDE.md
+- 首版发布说明: docs/git-guides/RELEASE_v1.0.0.md
