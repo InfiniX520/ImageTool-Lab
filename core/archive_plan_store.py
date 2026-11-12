@@ -769,6 +769,8 @@ def _decode_scope(
         )
     except (ValueError, TypeError, KeyError, ContractError) as exc:
         raise ArchivePlanStoreError("Stored plan inventory is invalid") from exc
+    if max(inventory.input_entry_count, len(inventory.assets)) > ARCHIVE_PLAN_MAX_ENTRIES:
+        raise ArchivePlanStoreError("Stored plan exceeds the entry budget")
     scope_receipt = raw["scope_receipt"]
     if scope_receipt is None:
         raise ArchivePlanStoreError("Stored archive plan requires a scope receipt")

@@ -1500,8 +1500,14 @@ def migrate_archive_copy(
                         if conn.in_transaction:
                             conn.execute("ROLLBACK")
                         raise
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+                checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint is not None and checkpoint[0] != 0:
+                    raise ArchiveMigrationError("Archive migration checkpoint could not drain WAL")
+                digest = hashlib.sha256()
+                with backup.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                digest = digest.hexdigest()
                 return ArchiveMigrationReport(
                     "already_current" if source_version == ARCHIVE_SCHEMA_VERSION else "migrated",
                     source_version, ARCHIVE_SCHEMA_VERSION, backup, digest,

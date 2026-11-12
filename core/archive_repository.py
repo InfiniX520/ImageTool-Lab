@@ -156,5 +156,9 @@ class ArchiveLibraryRepository(LibraryRepository):
             raise
         except ContractError as exc:
             raise ArchiveLibraryError("Archive plan facts were rejected") from exc
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                raise ArchiveLibraryBusyError("Archive library is busy") from exc
+            raise ArchiveLibraryError("Archive plan reload failed") from exc
         except sqlite3.Error as exc:
             raise ArchiveLibraryError("Archive plan reload failed") from exc
