@@ -3,7 +3,7 @@
 ## 当前状态
 
 - 分支：`fix/a1-recheck-f1-f4-20261112`
-- HEAD：`8a7002e`；C 的 `LibraryBusyError` 已合并并跑全量；产品代码最后功能性提交 `8a7002e`。
+- HEAD：`231c7e1`；计划格式已升到 v3，scope 根代次与回执交叉校验；C 的 `LibraryBusyError` 已合并并跑全量。
 - 产品工作树干净；仅有运行时更新的 `AGENTS.md`/`CLAUDE.md` 不纳入本批提交。
 - **不是生产可用，不是真实图库迁移，不是删除/释放授权。**
 
@@ -27,10 +27,9 @@
 
 ## 当前验证
 
-- 全量：**1375 项 / 1371 通过 / 0 失败 / 1 个 Tk/Tcl 环境 error / 3 skip**。
-  - 唯一 error 是 `test_collection_presentation` 的 Tk/Tcl setup，不是归档代码。
+- 全量：**1376 项 / 1373 通过 / 0 失败 / 0 error / 3 skip**（本轮 Tk/Tcl 未复现）。
 - F5-v2 在 `6790565`：**576/576**，2,000 文件、12 段、payload 3,109,761 B。
-- 当前树 `p100-current-eb31`：**2,000 文件通过**，12 段、payload 3,109,779 B、10.37 s。
+- 当前树 `p100-current-v3`：**2,000 文件通过**，12 段、payload 3,109,779 B、10.51 s。
 - 当前树负向：**41 个用例，40 个 required 通过**；唯一 observation 是 O2（未绑定回执 + 伪造清单摘要按设计接受）。
 - F6：**61/61**。
 
