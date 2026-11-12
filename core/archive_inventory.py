@@ -540,7 +540,10 @@ def build_archive_inventory(
     member_bytes = sum(asset.content.size_bytes for asset in counted_assets)
     if not scope_complete:
         physical_member_bytes = 0
-    unique_contents = {asset.content_key: asset.content.size_bytes for asset in counted_assets}
+    # Visible neighbours in a partial result must still have coherent counts.
+    # They never contribute to member/capacity totals, but 0 counts with a
+    # non-empty asset list is a contradictory stored plan.
+    unique_contents = {asset.content_key: asset.content.size_bytes for asset in ordered_assets}
     adjustment_codes = []
     if not scope_complete:
         adjustment_codes.append("inventory_rejected_items")
@@ -554,8 +557,8 @@ def build_archive_inventory(
         scope_complete=scope_complete,
         input_entry_count=input_entry_count,
         duplicate_entry_count=duplicate_entry_count,
-        asset_count=len({(asset.content.asset_id, asset.content.revision) for asset in counted_assets}),
-        path_count=len(counted_assets),
+        asset_count=len({(asset.content.asset_id, asset.content.revision) for asset in ordered_assets}),
+        path_count=len(ordered_assets),
         unique_content_count=len(unique_contents),
         member_payload_bytes=member_bytes,
         physical_member_payload_bytes=physical_member_bytes,

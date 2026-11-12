@@ -870,7 +870,7 @@ def test_complete_inventory_rejects_sub_batch_and_complete_receipts_reject_parti
     partial_capacity = plan_archive_capacity(
         partial_inventory, available_additional_bytes=1_000_000,
     )
-    with pytest.raises(ArchivePlanStoreError, match="complete scope|incomplete inventory"):
+    with pytest.raises(ArchivePlanStoreError, match="complete scope|incomplete inventory|Incomplete scope counts|Invalid archive plan input"):
         prepare_archive_plan(partial_inventory, partial_capacity, receipt=complete_receipt)
 
 

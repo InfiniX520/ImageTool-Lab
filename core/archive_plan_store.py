@@ -417,11 +417,20 @@ def _validate_inventory(inventory: ArchiveInventory) -> None:
         raise ContractError("Inventory status differs from its adjustments")
     if not inventory.scope_complete:
         # Valid neighbours may remain visible, but never contribute to a partial plan.
-        if (inventory.packages or inventory.path_count or inventory.asset_count
-                or inventory.unique_content_count or inventory.member_payload_bytes
-                or inventory.physical_member_payload_bytes or inventory.unique_content_bytes
+        visible_contents = {asset.content_key: asset.content.size_bytes for asset in inventory.assets}
+        if (inventory.packages or inventory.member_payload_bytes
+                or inventory.physical_member_payload_bytes
                 or "inventory_rejected_items" not in inventory.adjustment_codes):
             raise ContractError("Incomplete scope must not contain a package plan")
+        if (
+            inventory.path_count != len(inventory.assets)
+            or inventory.asset_count != len({
+                (asset.content.asset_id, asset.content.revision) for asset in inventory.assets
+            })
+            or inventory.unique_content_count != len(visible_contents)
+            or inventory.unique_content_bytes != sum(visible_contents.values())
+        ):
+            raise ContractError("Incomplete scope counts differ from its visible assets")
         return
     if inventory.input_entry_count != inventory.path_count + inventory.duplicate_entry_count:
         raise ContractError("Inventory input and duplicate counts differ")
