@@ -206,6 +206,52 @@ class LibraryClosedError(LibraryError):
     """The repository has been closed (or is closing)."""
 
 
+class LibraryBusyError(LibraryError):
+    """SQLite could not take the lock it needed before the busy timeout.
+
+    Only lock contention (SQLITE_BUSY/SQLITE_LOCKED) is reported through this
+    type; disk, corruption and constraint failures keep their own sqlite3 type.
+    The original sqlite3.OperationalError is always kept as __cause__.  This is
+    the v1 writer-transport busy error; the archive repository's
+    ArchiveLibraryBusyError lives in a separate hierarchy
+    (ArchiveLibraryError/ArchivePlanStoreError) and is deliberately not merged.
+    """
+
+
+# SQLite primary result codes for lock contention.  Extended result codes keep
+# the primary code in the low byte; the values are spelled out because the
+# module-level sqlite3 constants do not exist on every supported Python.
+_SQLITE_BUSY = 5
+_SQLITE_LOCKED = 6
+
+
+def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
+    """True only when SQLite itself reported lock contention.
+
+    An expired busy timeout is retryable; an I/O error, a corrupt database or a
+    constraint violation is not.  Classification uses the extended result code
+    when Python provides it and falls back to the message only for exceptions
+    built without one.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in (_SQLITE_BUSY, _SQLITE_LOCKED)
+    name = getattr(exc, "sqlite_errorname", None)
+    if isinstance(name, str) and name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+        return True
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _translate_busy_failure(exc: BaseException) -> BaseException:
+    """Return the exception the caller should see for one failed command."""
+    if isinstance(exc, sqlite3.OperationalError) and _is_lock_contention(exc):
+        busy = LibraryBusyError("Library database is locked by another connection")
+        busy.__cause__ = exc
+        return busy
+    return exc
+
+
 @dataclass(slots=True)
 class _Command:
     kind: str
@@ -791,7 +837,9 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                         result = self._dispatch(conn, command)
                     except Exception as exc:
                         if not command.future.done():
-                            command.future.set_exception(exc)
+                            # Lock contention is retryable and must not escape as a
+                            # bare sqlite3.OperationalError.
+                            command.future.set_exception(_translate_busy_failure(exc))
                     else:
                         if not command.future.done():
                             command.future.set_result(result)

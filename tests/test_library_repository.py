@@ -22,12 +22,14 @@ from pathlib import Path
 import pytest
 
 from core.library_paths import InstanceLock
+import core.library_repository as library_repository
 from core.library_repository import (
     BudgetExceeded,
     CommandConflict,
     CorruptDataError,
     CursorConflict,
     InvalidStateError,
+    LibraryBusyError,
     LibraryClosedError,
     LibraryError,
     LibraryRepository,
@@ -1267,3 +1269,83 @@ def test_database_path_rejects_unc_and_linked_locations(tmp_path: Path) -> None:
         assert link.is_junction()
     with pytest.raises(LibraryError):
         LibraryRepository(link / "library.sqlite3")
+
+
+# ---------------------------------------------------------------------------
+# F6-2: SQLite lock contention is a typed, retryable error
+# ---------------------------------------------------------------------------
+
+
+def _hold_write_lock(db_path: Path) -> sqlite3.Connection:
+    """Open an independent raw connection that holds the database write lock."""
+    holder = sqlite3.connect(str(db_path), isolation_level=None, timeout=0)
+    holder.execute("PRAGMA busy_timeout=0")
+    holder.execute("BEGIN IMMEDIATE")
+    return holder
+
+
+def test_submit_lock_contention_is_typed_busy_error_and_retryable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A busy timeout must not escape submit as a bare sqlite3 error."""
+    db_path = tmp_path / "library.sqlite3"
+    monkeypatch.setattr(library_repository, "_BUSY_TIMEOUT_MS", 150)
+    request = _request()
+    with LibraryRepository(db_path) as repo:
+        holder = _hold_write_lock(db_path)
+        try:
+            started = time.monotonic()
+            with pytest.raises(LibraryBusyError) as raised:
+                repo.submit(request, "submit-busy")
+            waited = time.monotonic() - started
+            # It waited for the configured busy timeout instead of failing at once.
+            assert waited >= 0.05
+            cause = raised.value.__cause__
+            assert type(cause) is sqlite3.OperationalError
+            assert "locked" in str(cause).lower()
+            assert repo._writer_thread.is_alive()
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+        with closing(sqlite3.connect(str(db_path))) as check:
+            assert check.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+            assert check.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+        # The rejected command persisted nothing, so the same id can be retried.
+        accepted = repo.submit(request, "submit-busy")
+        assert repo.get_batch(accepted["batch_id"])["phase"] == "queued"
+
+
+def test_non_lock_sqlite_failures_are_not_reported_as_busy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Disk and constraint faults keep their own type; only BUSY/LOCKED is typed."""
+    with LibraryRepository(tmp_path / "library.sqlite3") as repo:
+
+        def disk_fault(*args, **kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(repo, "_submit", disk_fault)
+        with pytest.raises(sqlite3.OperationalError) as disk:
+            repo.submit(_request("req-disk"), "submit-disk")
+        assert not isinstance(disk.value, LibraryBusyError)
+
+        def constraint_fault(*args, **kwargs):
+            raise sqlite3.IntegrityError("UNIQUE constraint failed: jobs.job_id")
+
+        monkeypatch.setattr(repo, "_submit", constraint_fault)
+        with pytest.raises(sqlite3.IntegrityError) as constraint:
+            repo.submit(_request("req-constraint"), "submit-constraint")
+        assert not isinstance(constraint.value, LibraryBusyError)
+
+
+def test_busy_classification_prefers_extended_sqlite_result_codes() -> None:
+    busy = sqlite3.OperationalError("contention")
+    busy.sqlite_errorcode = 5 | (2 << 8)  # SQLITE_BUSY_SNAPSHOT
+    assert library_repository._is_lock_contention(busy)
+    locked = sqlite3.OperationalError("contention")
+    locked.sqlite_errorcode = 6  # SQLITE_LOCKED
+    assert library_repository._is_lock_contention(locked)
+    for primary in (10, 11, 13, 19):  # IOERR, CORRUPT, FULL, CONSTRAINT
+        other = sqlite3.OperationalError("contention")
+        other.sqlite_errorcode = primary
+        assert not library_repository._is_lock_contention(other)
