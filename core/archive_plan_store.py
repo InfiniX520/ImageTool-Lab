@@ -58,6 +58,7 @@ _ARCHIVE_PLAN_VERSION = 2
 _ARCHIVE_PLAN_SEGMENT_CHARS = 200_000
 ARCHIVE_PLAN_MAX_BYTES = 8 * 1024 * 1024
 ARCHIVE_PLAN_MAX_ENTRIES = 9_000
+ARCHIVE_PLAN_MAX_SEGMENTS = 128
 _BATCH_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
@@ -634,42 +635,52 @@ def _decode_scope(
         or not isinstance(raw["inventory_sha256"], str)
         or type(raw["inventory_bytes"]) is not int
         or type(raw["segment_count"]) is not int
-        or raw["segment_count"] < 1
-        or (raw["scope_receipt"] is not None and not isinstance(raw["scope_receipt"], dict))
+        or not 1 <= raw["segment_count"] <= ARCHIVE_PLAN_MAX_SEGMENTS
+        or type(raw["inventory_bytes"]) is not int
+        or not 0 <= raw["inventory_bytes"] <= ARCHIVE_PLAN_MAX_BYTES
     ):
         raise ArchivePlanStoreError("Stored scope identity or bound is invalid")
-    rows = conn.execute(
+    if not isinstance(raw["scope_receipt"], dict):
+        raise ArchivePlanStoreError("Stored archive plan requires a scope receipt")
+    pieces = []
+    total_bytes = 0
+    cursor = conn.execute(
         """SELECT segment_index,payload,byte_length FROM archive_plan_segments
            WHERE batch_id=? ORDER BY segment_index""",
         (expected_batch_id,),
-    ).fetchall()
-    if len(rows) != raw["segment_count"]:
-        raise ArchivePlanStoreError("Stored plan segment count differs from its header")
-    pieces = []
-    for index, row in enumerate(rows):
+    )
+    for index, row in enumerate(cursor):
+        if index >= raw["segment_count"]:
+            raise ArchivePlanStoreError("Stored plan has extra segments")
         if tuple(row[:1]) != (index,) or not isinstance(row[1], str):
             raise ArchivePlanStoreError("Stored plan segments are not contiguous")
-        if len(row[1].encode("utf-8")) != row[2]:
+        byte_length = len(row[1].encode("utf-8"))
+        if byte_length != row[2] or byte_length > 1024 * 1024:
             raise ArchivePlanStoreError("Stored plan segment byte length differs")
+        total_bytes += byte_length
+        if total_bytes > ARCHIVE_PLAN_MAX_BYTES:
+            raise ArchivePlanStoreError("Stored plan exceeds the document byte budget")
         pieces.append(row[1])
+    if len(pieces) != raw["segment_count"] or total_bytes != raw["inventory_bytes"]:
+        raise ArchivePlanStoreError("Stored plan segment count or bytes differ from its header")
     inventory_json = "".join(pieces)
-    if (
-        len(inventory_json.encode("utf-8")) != raw["inventory_bytes"]
-        or hashlib.sha256(inventory_json.encode("utf-8")).hexdigest()
-        != raw["inventory_sha256"]
-    ):
+    if hashlib.sha256(inventory_json.encode("utf-8")).hexdigest() != raw["inventory_sha256"]:
         raise ArchivePlanStoreError("Stored plan document digest differs")
     try:
-        inventory = _inventory(json.loads(inventory_json), expected_batch_id)
+        inventory = _inventory(
+            json.loads(normalize_json(inventory_json, object_only=True)),
+            expected_batch_id,
+        )
     except (ValueError, TypeError, KeyError, ContractError) as exc:
         raise ArchivePlanStoreError("Stored plan inventory is invalid") from exc
     scope_receipt = raw["scope_receipt"]
-    if scope_receipt is not None:
-        try:
-            receipt = ScopeReceipt.from_json(canonical_json(scope_receipt))
-            _receipt_json(receipt, inventory)
-        except (ContractError, TypeError, ValueError, UnicodeError) as exc:
-            raise ArchivePlanStoreError("Stored scope receipt is invalid") from exc
+    if scope_receipt is None:
+        raise ArchivePlanStoreError("Stored archive plan requires a scope receipt")
+    try:
+        receipt = ScopeReceipt.from_json(canonical_json(scope_receipt))
+        _receipt_json(receipt, inventory)
+    except (ContractError, TypeError, ValueError, UnicodeError) as exc:
+        raise ArchivePlanStoreError("Stored scope receipt is invalid") from exc
     return inventory, raw["scope"], scope_receipt
 
 
@@ -721,6 +732,15 @@ def _check_assets(conn: sqlite3.Connection, inventory: ArchiveInventory) -> None
         ).fetchone()
         if row is None or tuple(row[:7]) != expected:
             raise ArchivePlanStoreError("Content/path facts differ from the immutable plan JSON")
+        content_row = conn.execute(
+            "SELECT content_key,size_bytes,sha256 FROM archive_contents "
+            "WHERE asset_id=? AND revision=?",
+            (content.asset_id, content.revision),
+        ).fetchone()
+        if content_row is None or tuple(content_row) != (
+            expected[0], content.size_bytes, content.sha256,
+        ):
+            raise ArchivePlanStoreError("Referenced content facts differ from the plan")
         source_kind, artifact_id = row[7], row[8]
         if source_kind == "download_receipt":
             receipt = conn.execute(

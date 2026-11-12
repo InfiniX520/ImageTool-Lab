@@ -638,6 +638,85 @@ def test_plan_receipt_is_persisted_and_tampering_rejected(migrated_copy):
         load_archive_plan(conn, "receipt-batch")
 
 
+def test_persisted_null_receipt_is_rejected_by_load_and_full_audit(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("null-receipt")
+    save_plan(conn, inventory, capacity)
+    header = json.loads(conn.execute(
+        "SELECT scope_json FROM archive_batches WHERE batch_id='null-receipt'"
+    ).fetchone()[0])
+    header["scope_receipt"] = None
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='null-receipt'",
+            (json.dumps(header),),
+        )
+    with pytest.raises(ArchivePlanStoreError, match="receipt"):
+        load_archive_plan(conn, "null-receipt")
+    with pytest.raises(ArchiveSchemaError, match="receipt"):
+        validate_archive_facts(conn)
+
+
+def test_referenced_content_digest_is_checked_on_load_and_replay(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("content-corruption")
+    save_plan(conn, inventory, capacity)
+    with conn:
+        conn.execute(
+            "UPDATE archive_contents SET sha256=NULL WHERE asset_id='synthetic-asset'"
+        )
+    with pytest.raises(ArchivePlanStoreError, match="content/path|Referenced"):
+        load_archive_plan(conn, "content-corruption")
+    with pytest.raises(ArchivePlanStoreError, match="content/path|Referenced"):
+        save_plan(conn, inventory, capacity)
+
+
+def test_reload_rejects_duplicate_inventory_json_key(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("duplicate-key")
+    save_plan(conn, inventory, capacity)
+    payload = conn.execute(
+        "SELECT payload FROM archive_plan_segments "
+        "WHERE batch_id='duplicate-key' AND segment_index=0"
+    ).fetchone()[0]
+    assert payload.endswith("}")
+    changed = payload[:-1] + ',"batch_id":"duplicate"}'
+    header = json.loads(conn.execute(
+        "SELECT scope_json FROM archive_batches WHERE batch_id='duplicate-key'"
+    ).fetchone()[0])
+    header["inventory_bytes"] = len(changed.encode("utf-8"))
+    header["inventory_sha256"] = hashlib.sha256(changed.encode("utf-8")).hexdigest()
+    with conn:
+        conn.execute(
+            "UPDATE archive_plan_segments SET payload=?,byte_length=? "
+            "WHERE batch_id='duplicate-key' AND segment_index=0",
+            (changed, len(changed.encode("utf-8"))),
+        )
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='duplicate-key'",
+            (json.dumps(header),),
+        )
+    with pytest.raises(ArchivePlanStoreError, match="inventory"):
+        load_archive_plan(conn, "duplicate-key")
+
+
+def test_reload_rejects_header_document_budget_before_segments(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("over-budget-header")
+    save_plan(conn, inventory, capacity)
+    header = json.loads(conn.execute(
+        "SELECT scope_json FROM archive_batches WHERE batch_id='over-budget-header'"
+    ).fetchone()[0])
+    header["inventory_bytes"] = ARCHIVE_PLAN_MAX_BYTES + 1
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='over-budget-header'",
+            (json.dumps(header),),
+        )
+    with pytest.raises(ArchivePlanStoreError, match="bound|budget"):
+        load_archive_plan(conn, "over-budget-header")
+
+
 def test_prepared_scope_is_a_frozen_copy():
     inventory, capacity = make_plan("frozen-batch")
     scope = {"kind": "explicit", "selected": ["one"]}

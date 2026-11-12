@@ -479,6 +479,26 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
     ):
         for (value,) in conn.execute(f"SELECT {field} FROM {table}"):
             _stored_json(value, field)
+    for (scope_json, state) in conn.execute(
+        "SELECT scope_json,state FROM archive_batches"
+    ):
+        try:
+            scope = json.loads(normalize_json(scope_json, object_only=True))
+        except (ContractError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
+            raise ArchiveSchemaError("Invalid archive plan scope header") from exc
+        if (
+            state == "planned"
+            and isinstance(scope, dict)
+            and scope.get("format") == "jpgpng-archive-plan"
+            and not isinstance(scope.get("scope_receipt"), dict)
+        ):
+            raise ArchiveSchemaError("Stored archive plan requires a scope receipt")
+    for batch_id, total_bytes, segment_count in conn.execute(
+        "SELECT batch_id,COALESCE(SUM(byte_length),0),COUNT(*) "
+        "FROM archive_plan_segments GROUP BY batch_id"
+    ):
+        if total_bytes > 8 * 1024 * 1024 or segment_count > 128:
+            raise ArchiveSchemaError("Archive plan segment budget exceeded")
     content_facts: dict[tuple[str, int], tuple[str, ContentVersion]] = {}
     for row in conn.execute(
         "SELECT content_key,asset_id,revision,size_bytes,sha256 FROM archive_contents"
