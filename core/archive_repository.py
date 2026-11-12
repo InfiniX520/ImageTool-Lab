@@ -1,4 +1,4 @@
-"""Schema-2 archive repository on the existing single-writer transport.
+"""Schema-3 archive repository on the existing single-writer transport.
 
 This class is deliberately opt-in for already migrated temporary copies.  It
 keeps the production LibraryRepository v1 guard and _enqueue transport unchanged,
@@ -7,19 +7,23 @@ and does not migrate, discover, or open a production database automatically.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from core.archive_inventory import ArchiveInventory, CapacityPlan
+from core.archive_scope import ScopeReceipt
 from core.archive_plan_store import (
-    ArchivePlanConflictError, ArchivePlanSaveResult, ArchivePlanStoreError,
-    StoredArchivePlan, load_archive_plan, save_archive_plan,
+    ArchivePlanSaveResult, ArchivePlanStoreError, PreparedArchivePlan,
+    StoredArchivePlan, load_archive_plan_in_transaction, prepare_archive_plan,
+    save_prepared_plan_in_transaction,
 )
 from core.archive_schema import (
-    ARCHIVE_TABLES, ArchiveMigrationError, _check_existing_objects, validate_archive_facts,
+    ARCHIVE_SCHEMA_VERSION, ARCHIVE_TABLES, ArchiveMigrationError, _check_existing_objects,
 )
 from core.library_repository import (
     LibraryRepository, SchemaVersionError, _LIBRARY_FORMAT,
 )
+from core.task_contracts import ContractError
 
 
 class ArchiveLibraryError(ArchivePlanStoreError):
@@ -45,7 +49,7 @@ class ArchiveLibraryRepository(LibraryRepository):
     def _inspect_existing(self) -> bool:
         if not self._path.exists() or self._path.stat().st_size == 0:
             raise SchemaVersionError(
-                "Archive repository requires an existing migrated schema-2 copy"
+                "Archive repository requires an existing migrated schema-3 copy"
             )
         try:
             conn = self._readonly_connection()
@@ -66,8 +70,8 @@ class ArchiveLibraryRepository(LibraryRepository):
             }
             if metadata.get("format") != _LIBRARY_FORMAT:
                 raise SchemaVersionError("Archive copy belongs to a different product")
-            if metadata.get("schema_version") != "2":
-                raise SchemaVersionError("Archive repository requires exactly schema 2")
+            if metadata.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
+                raise SchemaVersionError("Archive repository requires exactly schema 3")
             if not ARCHIVE_TABLES <= tables:
                 raise SchemaVersionError("Archive copy has incomplete archive tables")
             _check_existing_objects(conn)
@@ -81,23 +85,26 @@ class ArchiveLibraryRepository(LibraryRepository):
 
     def _dispatch(self, conn: sqlite3.Connection, command):
         if command.kind == "save_archive_plan":
-            payload = command.payload
-            with self._transaction(conn):
-                result = save_archive_plan(
-                    conn, payload["inventory"], payload["capacity"], scope=payload["scope"],
-                )
-                if result.replayed != payload["expect_replay"]:
-                    raise ArchivePlanConflictError(
-                        "Archive plan command replay state changed since its precheck"
-                    )
-                return result
+            prepared = command.payload["prepared"]
+            if not isinstance(prepared, PreparedArchivePlan):
+                raise ArchivePlanStoreError("Queued archive plan is not a prepared plan")
+            try:
+                with self._transaction(conn):
+                    return save_prepared_plan_in_transaction(conn, prepared)
+            except ContractError as exc:
+                raise ArchiveLibraryError("Archive plan facts were rejected") from exc
         if command.kind == "load_archive_plan":
-            return load_archive_plan(conn, command.payload["batch_id"])
+            try:
+                with self._transaction(conn):
+                    return load_archive_plan_in_transaction(conn, command.payload["batch_id"])
+            except ContractError as exc:
+                raise ArchiveLibraryError("Archive plan facts were rejected") from exc
         return super()._dispatch(conn, command)
 
     def save_archive_plan(
         self, inventory: ArchiveInventory, capacity: CapacityPlan, *,
         scope: dict[str, object] | None = None,
+        receipt: ScopeReceipt | None = None,
     ) -> ArchivePlanSaveResult:
         """Enqueue one immutable plan; file hashing never enters this transaction."""
         if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
@@ -106,25 +113,25 @@ class ArchiveLibraryRepository(LibraryRepository):
             raise ArchiveLibraryError("Archive scope must be a JSON object")
         if inventory.batch_id != capacity.batch_id:
             raise ArchiveLibraryError("Inventory and capacity batch IDs differ")
-        replay = False
         try:
-            with self._readonly_connection() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM archive_batches WHERE batch_id=?", (inventory.batch_id,),
-                ).fetchone()
-                replay = row is not None
-        except sqlite3.Error as exc:
-            raise ArchiveLibraryError("Archive plan precheck failed") from exc
+            prepared = prepare_archive_plan(
+                inventory, capacity, scope=scope, receipt=receipt,
+            )
+        except ContractError as exc:
+            raise ArchiveLibraryError("Archive plan input was rejected") from exc
         return self._enqueue(
             "save_archive_plan",
-            {
-                "inventory": inventory, "capacity": capacity, "scope": scope,
-                "expect_replay": replay,
-            },
+            {"prepared": prepared},
             size_payload={
-                "batch_id": inventory.batch_id,
-                "scope": scope,
-                "expect_replay": replay,
+                "batch_id": prepared.batch_id,
+                "payload_bytes": prepared.payload_bytes,
+                "segment_count": len(prepared.segments),
+                "scope_bytes": len(prepared.scope_json.encode("utf-8")),
+                "capacity_bytes": len(prepared.capacity_json.encode("utf-8")),
+                "receipt_bytes": (
+                    0 if prepared.scope_receipt_json is None
+                    else len(prepared.scope_receipt_json.encode("utf-8"))
+                ),
             },
         )
 
@@ -132,10 +139,11 @@ class ArchiveLibraryRepository(LibraryRepository):
         """Run strict validation in a short inherited read transaction."""
         self._ensure_open()
         try:
-            with self._readonly_connection() as conn:
-                validate_archive_facts(conn)
-                return load_archive_plan(conn, batch_id)
+            with closing(self._readonly_connection()) as conn:
+                return load_archive_plan_in_transaction(conn, batch_id)
         except ArchivePlanStoreError:
             raise
+        except ContractError as exc:
+            raise ArchiveLibraryError("Archive plan facts were rejected") from exc
         except sqlite3.Error as exc:
             raise ArchiveLibraryError("Archive plan reload failed") from exc

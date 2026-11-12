@@ -943,6 +943,13 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         except (ContractError, TypeError, ValueError) as exc:
             raise LibraryError("Command payload violates the JSON contract") from exc
         size_bytes = len(measured.encode("utf-8"))
+        # Archive plan commands declare the complete frozen document size; count it
+        # against the same admission budget instead of only the compact summary.
+        declared_bytes = (
+            size_payload.get("payload_bytes") if isinstance(size_payload, dict) else None
+        )
+        if type(declared_bytes) is int and declared_bytes >= 0:
+            size_bytes = max(size_bytes, declared_bytes)
         if size_bytes > _MAX_COMMAND_BYTES:
             raise LibraryError("Command exceeds 8 MiB")
 

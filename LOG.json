@@ -1167,6 +1167,98 @@
       "evidence": "docs/maintenance/2026-11-12_version_checkpoint.md",
       "next_step": "A1 repair R0/R1 on a new work branch; follow docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
       "working_copy_tag": "checkpoint-2026-11-12-a1-wip"
+    },
+    {
+      "id": "JPGPNG-A1-REPAIR-20261112-01",
+      "session_date": "2026-11-12",
+      "status": "offline_repair_passed_a1_04_open_not_production_ready",
+      "summary": "按审计 R0-R5 完成 A1 事实、范围、分段计划与唯一写入者离线修复；保留历史失败证据，不接生产",
+      "changes": [
+        "schema 3 内容/资产/路径绑定分离，物理观察、转移意图与释放事件交叉校验，证据 JSON 上限回到 1 MiB",
+        "范围统一资格、物理身份与 raw 路径；NFC/NFD 与硬链接保留路径，大小写同目录项排除；ScopeReceipt 与祖先/成员快照",
+        "8 MiB 有界分段计划；2k 保存/重载；旧计划换代后可重载；跨批资产复用；单写入者事务与显式读连接关闭",
+        "ScopeReceipt 可校验完整消费、条目摘要并随计划持久化/重载；生产 ArchiveLibraryRepository 默认强制 receipt，低层合成 API 保留显式非强制兼容",
+        "修正对抗审查发现的同路径多代次查询、旧计划重载、转移意图绑定、释放 operation 跨内容、异常类型与队列字节计费"
+      ],
+      "verification": {
+        "focused_report": "../.runtime/jpgpng_a1_repair_20261112_01/archive_focused09.xml",
+        "focused_passed": 203,
+        "focused_failed_or_errors": 0,
+        "focused_skipped": 0,
+        "independent_scope_report": "../.runtime/jpgpng_a1_repair_20261112_01/scope_independent04.xml",
+        "independent_scope_passed": 92,
+        "full_clean_report": "../.runtime/jpgpng_a1_repair_20261112_01/full03.xml",
+        "full_clean_passed": 1298,
+        "full_clean_failed_or_errors": 0,
+        "full_clean_skipped": 3,
+        "full_latest_report": "../.runtime/jpgpng_a1_repair_20261112_01/full11.xml",
+        "full_latest_passed": 1300,
+        "full_latest_errors": 1,
+        "full_latest_error_cause": "Tk/Tcl environment setup error in tests/test_collection_presentation.py; not a product assertion failure",
+        "full_latest_skipped": 3,
+        "scale": "2000 entries: 1686574 bytes, 9 segments; 10000 long names: 8436126 bytes rejected; 10000 short names: 7976391 bytes accepted under budget",
+        "static_quality": "git diff --check clean; py_compile/imports passed; flake8/radon unavailable and not installed",
+        "history_preserved": "full01/full02, all earlier probe/schema/plan failures retained; no report overwritten"
+      },
+      "issues": {
+        "P1": 8,
+        "P2": 4,
+        "total": 12,
+        "fixed": 9,
+        "partial_or_open": 3
+      },
+      "known_gaps": [
+        "Production ArchiveLibraryRepository enforces ScopeReceipt; low-level prepare/save still accepts an explicit require_receipt=False synthetic plan",
+        "Production PathRef.target_key remains casefold; archive identity_key preserves non-ASCII spelling and keeps NFC/NFD distinct",
+        "10000 entries governed by 8 MiB serialized budget, not an independent count cap",
+        "Declared payload bytes exclude Python heap overhead (about 2.9x measured); no RSS assertion",
+        "No multi-process writer, crash/WAL recovery, real symlink, real gallery, tools, password, upload, readback or release"
+      ],
+      "evidence": "docs/maintenance/2026-11-12_jpgpng_a1_repair.md",
+      "validation": "../.runtime/jpgpng_a1_repair_20261112_01/validation.json",
+      "checkpoint": "../.runtime/jpgpng_a1_repair_20261112_01/checkpoint_lowlevel_receipt_20261112/manifest.json",
+      "next_step": "Decide whether to remove the low-level require_receipt=False compatibility path; separately evaluate PathRef.target_key vs inventory; then production schema-3/single-writer review. A1 remains not production-ready.",
+      "remaining": [
+        "A1-04 all default plan APIs enforce ScopeReceipt; explicit require_receipt=False synthetic bypass remains",
+        "Production PathRef.target_key remains casefold; archive identity_key keeps NFC/NFD distinct",
+        "A2-A6 tools/password/archive/recovery/readback/release",
+        "U1-B/U1-C/U2/U3/U4 and E1-3/4 retain separate gates"
+      ]
+    },
+    {
+      "id": "JPGPNG-A1-REAUDIT-20261112-01",
+      "session_date": "2026-11-12",
+      "status": "independent_reaudit_complete_findings_unfixed",
+      "summary": "独立复审 A1 修复：全量 1310/0/3；8 项边界缺口，给出 F0-F5 指导并整理接续",
+      "product_code_changes": false,
+      "verification": {
+        "focused": {
+          "passed": 345,
+          "failed": 0,
+          "skipped": 3,
+          "report": "../.runtime/jpgpng_a1_reaudit_20261112_01/focused.xml"
+        },
+        "full": {
+          "passed": 1310,
+          "failed": 0,
+          "skipped": 3,
+          "report": "../.runtime/jpgpng_a1_reaudit_20261112_01/full.xml"
+        },
+        "scale": "2000 real synthetic small files; all paths/hash facts equal after writer close/reopen; no baseline-resolution persistence exercised",
+        "evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json"
+      },
+      "issues": {
+        "P1": 4,
+        "P2": 4
+      },
+      "changes": [
+        "新增复审总览、问题与 F0-F5 指导；逐项区分上轮已修与仍缺",
+        "统一当前入口与机器下一步；修复前序两级 runtime 定位、94 项实际计数和互相矛盾说明",
+        "保留原始完成/失败 XML 和源码检查点，产品及测试源码未改"
+      ],
+      "overview": "docs/audits/2026-11-12-a1-recheck/README.md",
+      "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated.",
+      "git_work_branch": "audit/a1-recheck-20261112"
     }
   ]
 }

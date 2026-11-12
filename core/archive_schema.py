@@ -16,6 +16,7 @@ from pathlib import Path
 
 from core.library_paths import AlreadyRunningError, InstanceLock
 from core.library_repository import _DDL, _REQUIRED_TABLES, _validate_database_path
+from core.local_observation import FileIdentity, LocalObservation, ObservationStatus
 from core.preservation_policy import (
     ArchiveEvidence, ArchiveState, ContentVersion, LocalEvidence, LocalState, RemovalIntent,
 )
@@ -23,12 +24,12 @@ from core.task_contracts import ContractError, PathRef, canonical_json, normaliz
 
 ARCHIVE_SCHEMA_VERSION = "3"
 ARCHIVE_PROTOCOL_VERSION = 2
-ARCHIVE_JSON_LIMIT = 8 * 1024 * 1024
+ARCHIVE_JSON_LIMIT = 1024 * 1024
 ARCHIVE_TABLES = frozenset({
     "archive_batches", "archive_contents", "archive_assets", "archive_transfer_intents",
     "archive_local_checks", "archive_packages", "archive_members", "archive_objects",
     "archive_path_bindings", "archive_groups", "archive_group_objects", "archive_locations",
-    "archive_checks", "archive_releases",
+    "archive_checks", "archive_releases", "archive_plan_segments",
 })
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
@@ -62,7 +63,7 @@ def _json(value: object) -> str:
         return "{}"
     result = canonical_json(_plain_json(value))
     if len(result.encode("utf-8")) > ARCHIVE_JSON_LIMIT:
-        raise ContractError("Archive evidence detail exceeds 1 MiB")
+        raise ContractError("Archive evidence detail exceeds its bound")
     return result
 
 
@@ -122,6 +123,48 @@ def _content_key(content: ContentVersion) -> str:
     ).hexdigest()
 
 
+def _content_values(content: ContentVersion) -> tuple[object, ...]:
+    return (content.asset_id, content.revision, content.size_bytes, content.sha256)
+
+
+def _require_content(
+    conn: sqlite3.Connection, content: ContentVersion, *,
+    error: type[Exception] = ContractError, message: str = "Content facts are not indexed",
+) -> str:
+    """Require the exact content row, including a NULL digest, not just its key."""
+    if not isinstance(content, ContentVersion):
+        raise error("Expected ContentVersion")
+    content_key = _content_key(content)
+    row = conn.execute(
+        "SELECT asset_id,revision,size_bytes,sha256 FROM archive_contents WHERE content_key=?",
+        (content_key,),
+    ).fetchone()
+    if row is None or tuple(row) != _content_values(content):
+        raise error(message)
+    return content_key
+
+
+def _require_asset_link(
+    conn: sqlite3.Connection, content: ContentVersion, path: PathRef, *,
+    error: type[Exception] = ContractError,
+    message: str = "Asset path is not indexed for this exact content",
+) -> None:
+    """Require the asset row and its canonical path, independent of source labels."""
+    if not isinstance(content, ContentVersion) or not isinstance(path, PathRef):
+        raise error("Expected content and path facts")
+    row = conn.execute(
+        """SELECT content_key,asset_id,revision,path_key,path_json,size_bytes,sha256
+           FROM archive_assets WHERE asset_id=? AND revision=? AND path_key=?""",
+        (content.asset_id, content.revision, path.identity_key),
+    ).fetchone()
+    expected = (
+        _content_key(content), content.asset_id, content.revision, path.identity_key,
+        _path_json(path), content.size_bytes, content.sha256,
+    )
+    if row is None or tuple(row) != expected:
+        raise error(message)
+
+
 ARCHIVE_DDL = (
     """CREATE TABLE archive_batches (
         batch_id TEXT PRIMARY KEY,
@@ -159,17 +202,27 @@ ARCHIVE_DDL = (
         PRIMARY KEY (asset_id, revision, path_key),
         FOREIGN KEY (asset_id, revision) REFERENCES archive_contents(asset_id, revision),
         UNIQUE (content_key, path_key),
-        CHECK ((source_kind != 'download_receipt') OR (artifact_id IS NOT NULL))
+        CHECK ((
+            source_kind = 'download_receipt' AND artifact_id IS NOT NULL
+        ) OR (
+            source_kind != 'download_receipt' AND artifact_id IS NULL
+        ))
     )""",
     """CREATE TABLE archive_path_bindings (
         path_key TEXT PRIMARY KEY,
-        content_key TEXT NOT NULL,
         asset_id TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision >= 0),
         bound_at TEXT NOT NULL,
         FOREIGN KEY (asset_id, revision, path_key) REFERENCES archive_assets(
             asset_id, revision, path_key
         )
+    )""",
+    """CREATE TABLE archive_plan_segments (
+        batch_id TEXT NOT NULL REFERENCES archive_batches(batch_id) ON DELETE CASCADE,
+        segment_index INTEGER NOT NULL CHECK (segment_index >= 0),
+        payload TEXT NOT NULL,
+        byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+        PRIMARY KEY (batch_id, segment_index)
     )""",
     """CREATE TABLE archive_transfer_intents (
         intent_id TEXT PRIMARY KEY,
@@ -206,10 +259,35 @@ ARCHIVE_DDL = (
             length(observed_sha256) = 64 AND observed_sha256 NOT GLOB '*[^0-9a-f]*'
         )),
         evidence_json TEXT NOT NULL,
+        observation_status TEXT,
+        observation_reason TEXT,
+        digest_complete INTEGER CHECK (digest_complete IS NULL OR digest_complete IN (0, 1)),
+        bytes_read INTEGER CHECK (bytes_read IS NULL OR bytes_read >= 0),
+        physical_size INTEGER CHECK (physical_size IS NULL OR physical_size >= 0),
+        physical_mtime_ns INTEGER,
+        file_device TEXT CHECK (file_device IS NULL OR (
+            length(file_device) BETWEEN 1 AND 32 AND file_device NOT GLOB '*[^0-9]*'
+        )),
+        file_index TEXT CHECK (file_index IS NULL OR (
+            length(file_index) BETWEEN 1 AND 32 AND file_index NOT GLOB '*[^0-9]*'
+        )),
         FOREIGN KEY (asset_id, revision, path_key) REFERENCES archive_assets(
             asset_id, revision, path_key
         ),
-        UNIQUE (check_id, content_key)
+        UNIQUE (check_id, content_key),
+        CHECK ((
+            observation_status IS NULL AND observation_reason IS NULL AND
+            digest_complete IS NULL AND bytes_read IS NULL
+        ) OR (
+            observation_status IS NOT NULL AND observation_reason IS NOT NULL AND
+            digest_complete IS NOT NULL AND bytes_read IS NOT NULL
+        )),
+        CHECK ((file_device IS NULL AND file_index IS NULL) OR
+               (file_device IS NOT NULL AND file_index IS NOT NULL)),
+        CHECK (digest_complete IS NULL OR digest_complete = 0 OR (
+            file_device IS NOT NULL AND file_index IS NOT NULL AND
+            physical_size IS NOT NULL AND physical_mtime_ns IS NOT NULL
+        ))
     )""",
     """CREATE TABLE archive_packages (
         package_id TEXT PRIMARY KEY,
@@ -321,6 +399,7 @@ ARCHIVE_DDL = (
     """CREATE TABLE archive_releases (
         event_id TEXT PRIMARY KEY,
         operation_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK (sequence >= 1),
         content_key TEXT NOT NULL,
         local_check_id TEXT NOT NULL,
         archive_check_id TEXT NOT NULL,
@@ -333,9 +412,12 @@ ARCHIVE_DDL = (
         FOREIGN KEY (archive_check_id, content_key) REFERENCES archive_checks(
             check_id, content_key
         ),
+        UNIQUE (operation_id, sequence),
         UNIQUE (operation_id, event)
     )""",
     "CREATE INDEX idx_archive_assets_content ON archive_assets(content_key, path_key)",
+    "CREATE INDEX idx_archive_bindings_asset ON archive_path_bindings(asset_id, revision)",
+    "CREATE INDEX idx_archive_plan_segments_batch ON archive_plan_segments(batch_id, segment_index)",
     "CREATE INDEX idx_archive_intents_asset ON archive_transfer_intents(asset_id, revision, observed_at)",
     "CREATE INDEX idx_archive_local_run ON archive_local_checks(run_id, path_key, checked_at)",
     "CREATE INDEX idx_archive_packages_batch ON archive_packages(batch_id, package_id)",
@@ -343,10 +425,21 @@ ARCHIVE_DDL = (
     "CREATE INDEX idx_archive_locations_object ON archive_locations(object_id, locator_revision)",
     "CREATE INDEX idx_archive_checks_content ON archive_checks(content_key, checked_at, check_id)",
     "CREATE INDEX idx_archive_releases_checks ON archive_releases(local_check_id, archive_check_id, observed_at)",
+    "CREATE INDEX idx_archive_releases_operation ON archive_releases(operation_id, sequence)",
+    """CREATE TRIGGER archive_asset_path_owner
+    BEFORE INSERT ON archive_assets
+    FOR EACH ROW
+    WHEN EXISTS (
+        SELECT 1 FROM archive_assets
+        WHERE path_key = NEW.path_key AND asset_id != NEW.asset_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'archive path belongs to another asset');
+    END""",
 )
 
 _INDEXED_DDL = tuple(
-    (re.match(r"\s*CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\s+(\w+)", sql, re.I).group(1), sql)
+    (re.match(r"\s*CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX|TRIGGER)\s+(\w+)", sql, re.I).group(1), sql)
     for sql in ARCHIVE_DDL
 )
 
@@ -355,7 +448,7 @@ def _normalized_sql_objects(conn: sqlite3.Connection) -> dict[str, str]:
     return {
         str(row[0]): " ".join(str(row[1]).split())
         for row in conn.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type IN ('table','index') "
+            "SELECT name, sql FROM sqlite_master WHERE type IN ('table','index','trigger') "
             "AND name NOT LIKE 'sqlite_%'"
         )
     }
@@ -370,8 +463,10 @@ def _check_existing_objects(conn: sqlite3.Connection) -> None:
 
 def validate_archive_facts(conn: sqlite3.Connection) -> None:
     """Fail closed on malformed stored facts, not only on syntactically valid DDL."""
-    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
-        raise ArchiveSchemaError("Archive validation requires foreign keys enabled")
+    foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    query_only = conn.execute("PRAGMA query_only").fetchone()[0]
+    if foreign_keys != 1 and query_only != 1:
+        raise ArchiveSchemaError("Archive validation requires foreign keys enabled for writes")
     violations = conn.execute("PRAGMA foreign_key_check").fetchall()
     if violations:
         raise ArchiveSchemaError("Archive foreign key violation")
@@ -384,7 +479,7 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
     ):
         for (value,) in conn.execute(f"SELECT {field} FROM {table}"):
             _stored_json(value, field)
-    content_facts = {}
+    content_facts: dict[tuple[str, int], tuple[str, ContentVersion]] = {}
     for row in conn.execute(
         "SELECT content_key,asset_id,revision,size_bytes,sha256 FROM archive_contents"
     ):
@@ -396,99 +491,281 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
         if _content_key(content) != content_key:
             raise ArchiveSchemaError("Archive content identity does not match its facts")
         content_facts[(asset_id, revision)] = (content_key, content)
-    asset_rows = conn.execute(
-        "SELECT asset_id,revision,path_key,path_json,content_key,size_bytes,sha256 FROM archive_assets"
-    )
-    for asset_id, revision, path_key, path_json, content_key, size, digest in asset_rows:
+
+    assets: dict[tuple[str, int, str], tuple[ContentVersion, PathRef, str, str | None]] = {}
+    for row in conn.execute(
+        """SELECT content_key,asset_id,revision,path_key,path_json,artifact_id,
+                  source_kind,size_bytes,sha256 FROM archive_assets"""
+    ):
+        content_key, asset_id, revision, path_key, path_json, artifact_id, source_kind, size, digest = row
         try:
             path = PathRef(**json.loads(path_json))
             content = ContentVersion(asset_id, revision, size, digest)
         except (ContractError, TypeError, ValueError) as exc:
             raise ArchiveSchemaError("Invalid archive asset fact") from exc
-        if path.target_key != path_key or content_facts.get((asset_id, revision)) != (content_key, content):
+        if (
+            _content_key(content) != content_key
+            or content_facts.get((asset_id, revision)) != (content_key, content)
+            or _path_json(path) != path_json
+            or path.identity_key != path_key
+        ):
             raise ArchiveSchemaError("Archive asset identity does not match its facts")
-    local_rows = conn.execute(
-        """SELECT l.check_id,l.content_key,l.asset_id,l.revision,l.path_key,l.root_revision,l.run_id,
-        l.checked_at,l.state,l.observed_size,l.observed_sha256,l.evidence_json,
-        a.path_json,a.size_bytes,a.sha256 FROM archive_local_checks AS l
-        JOIN archive_assets AS a ON a.asset_id=l.asset_id AND a.revision=l.revision
-            AND a.path_key=l.path_key"""
-    )
-    for row in local_rows:
+        if artifact_id is None:
+            if source_kind == "download_receipt":
+                raise ArchiveSchemaError("Download receipt asset has no artifact")
+        else:
+            if source_kind != "download_receipt":
+                raise ArchiveSchemaError("Non-receipt asset references an artifact")
+            receipt = conn.execute(
+                "SELECT output_ref_json,size,sha256,verification FROM artifacts WHERE artifact_id=?",
+                (artifact_id,),
+            ).fetchone()
+            if receipt is None:
+                raise ArchiveSchemaError("Download receipt artifact is missing")
+            try:
+                receipt_path = PathRef(**json.loads(receipt[0]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ArchiveSchemaError("Download receipt path is invalid") from exc
+            if (
+                receipt_path.identity_key != path_key
+                or receipt[1] != content.size_bytes
+                or receipt[2] != content.sha256
+                or receipt[3] != "structure_checked"
+            ):
+                raise ArchiveSchemaError("Download receipt does not prove this exact content")
+        assets[(asset_id, revision, path_key)] = (content, path, source_kind, artifact_id)
+
+    for path_key, asset_id, revision, bound_at in conn.execute(
+        "SELECT path_key,asset_id,revision,bound_at FROM archive_path_bindings"
+    ):
+        if (asset_id, revision, path_key) not in assets:
+            raise ArchiveSchemaError("Path binding has no exact asset row")
+        if not isinstance(bound_at, str) or not bound_at or len(bound_at) > 64:
+            raise ArchiveSchemaError("Path binding time is invalid")
+    if conn.execute(
+        """SELECT COUNT(*) FROM (
+               SELECT path_key FROM archive_assets
+               GROUP BY path_key HAVING COUNT(DISTINCT asset_id) > 1
+           )"""
+    ).fetchone()[0]:
+        raise ArchiveSchemaError("One path is owned by multiple assets")
+
+    for row in conn.execute(
+        """SELECT intent_id,content_key,asset_id,revision,path_key,root_revision,
+                  intent,source,observed_at,details_json
+           FROM archive_transfer_intents"""
+    ):
+        intent_id, content_key, asset_id, revision, path_key, root_revision, intent, source, observed_at, _ = row
+        asset = assets.get((asset_id, revision, path_key))
+        if asset is None or content_key != _content_key(asset[0]):
+            raise ArchiveSchemaError("Transfer intent content/path differs from its asset")
+        if (
+            _TOKEN.fullmatch(intent_id) is None
+            or type(root_revision) is not int or root_revision < 0
+            or intent not in {"none", "offloaded", "excluded"}
+            or source not in {"user_reported", "program_observed", "excluded_scope"}
+            or not isinstance(observed_at, str) or not observed_at or len(observed_at) > 64
+        ):
+            raise ArchiveSchemaError("Transfer intent has invalid immutable facts")
+
+    for row in conn.execute(
+        """SELECT check_id,content_key,asset_id,revision,path_key,root_revision,run_id,
+                  checked_at,state,observed_size,observed_sha256,evidence_json,
+                  observation_status,observation_reason,digest_complete,bytes_read,
+                  physical_size,physical_mtime_ns,file_device,file_index
+           FROM archive_local_checks"""
+    ):
         try:
             evidence = _local_from_json(json.loads(row[11]))
-            content = ContentVersion(row[2], row[3], row[13], row[14])
-            path = PathRef(**json.loads(row[12]))
         except (ContractError, TypeError, ValueError) as exc:
             raise ArchiveSchemaError("Invalid stored local evidence") from exc
-        expected = (evidence.check_id, _content_key(content), content.asset_id, content.revision,
-                    path.target_key, evidence.root_revision, evidence.run_id, evidence.checked_at,
-                    evidence.state.value, evidence.observed_size, evidence.observed_sha256)
-        if evidence.content != content or evidence.path != path or row[:11] != expected:
+        asset = assets.get((row[2], row[3], row[4]))
+        if asset is None:
+            raise ArchiveSchemaError("Local check has no exact asset row")
+        content, path, _, _ = asset
+        if (
+            _content_key(content) != row[1]
+            or evidence.content != content
+            or evidence.path != path
+        ):
             raise ArchiveSchemaError("Local evidence differs from its indexed facts")
-    archive_rows = conn.execute(
+        expected = (
+            evidence.check_id, row[1], content.asset_id, content.revision, path.identity_key,
+            evidence.root_revision, evidence.run_id, evidence.checked_at,
+            evidence.state.value, evidence.observed_size, evidence.observed_sha256,
+        )
+        if tuple(row[:11]) != expected:
+            raise ArchiveSchemaError("Local evidence differs from its indexed facts")
+        physical_core = row[12:16]
+        if any(value is not None for value in physical_core):
+            if any(value is None for value in physical_core):
+                raise ArchiveSchemaError("Local physical observation is incomplete")
+            try:
+                identity = (
+                    FileIdentity(int(row[18]), int(row[19]))
+                    if row[18] is not None and row[19] is not None else None
+                )
+            except (TypeError, ValueError) as exc:
+                raise ArchiveSchemaError("Invalid stored file identity") from exc
+            try:
+                observation = LocalObservation(
+                    status=ObservationStatus(row[12]), reason=row[13], evidence=evidence,
+                    digest_complete=bool(row[14]), bytes_read=row[15], size_bytes=row[16],
+                    mtime_ns=row[17], identity=identity,
+                )
+            except (ContractError, TypeError, ValueError) as exc:
+                raise ArchiveSchemaError("Invalid stored local physical observation") from exc
+            if observation.evidence != evidence:
+                raise ArchiveSchemaError("Local physical observation has different evidence")
+            if (
+                observation.size_bytes is not None and evidence.observed_size is not None
+                and observation.size_bytes != evidence.observed_size
+            ):
+                raise ArchiveSchemaError("Local physical size differs from its evidence")
+            if observation.digest_complete and observation.size_bytes != evidence.observed_size:
+                raise ArchiveSchemaError("Complete local digest requires the exact observed size")
+        elif any(value is not None for value in row[16:20]):
+            raise ArchiveSchemaError("Local physical observation has orphan fields")
+
+    for row in conn.execute(
         """SELECT check_id,content_key,asset_id,revision,location_id,checked_at,state,
-        observed_size,observed_sha256,evidence_json FROM archive_checks"""
-    )
-    for row in archive_rows:
+                  observed_size,observed_sha256,evidence_json FROM archive_checks"""
+    ):
         try:
-            evidence = _archive_from_json(json.loads(row[-1]))
+            evidence = _archive_from_json(json.loads(row[9]))
         except (ContractError, TypeError, ValueError) as exc:
             raise ArchiveSchemaError("Invalid stored archive evidence") from exc
-        expected = (evidence.check_id, _content_key(evidence.content), evidence.content.asset_id,
-                    evidence.content.revision, evidence.location_ref, evidence.checked_at,
-                    evidence.state.value, row[7], row[8])
-        if row[:-1] != expected:
+        content_fact = content_facts.get((row[2], row[3]))
+        if content_fact is None:
+            raise ArchiveSchemaError("Archive check has no exact content row")
+        content_key, content = content_fact
+        if (
+            content_key != row[1]
+            or evidence.content != content
+            or evidence.check_id != row[0]
+            or evidence.location_ref != row[4]
+            or evidence.checked_at != row[5]
+            or evidence.state.value != row[6]
+        ):
             raise ArchiveSchemaError("Archive evidence differs from its indexed facts")
-    mismatched_members = conn.execute(
-        """SELECT COUNT(*) FROM archive_members AS m
-        JOIN archive_assets AS a ON a.asset_id=m.asset_id AND a.revision=m.revision
-            AND a.path_key=m.path_key
-        JOIN archive_packages AS p ON p.package_id=m.package_id
-        WHERE m.content_key != a.content_key OR m.size_bytes != a.size_bytes
-           OR m.sha256 != a.sha256 OR p.state != 'sealed'"""
-    ).fetchone()[0]
-    if mismatched_members:
-        raise ArchiveSchemaError("Package members must match sealed content facts")
-    if conn.execute(
-        """SELECT COUNT(*) FROM archive_checks AS c
-        JOIN archive_contents AS a ON a.content_key=c.content_key
-            AND a.asset_id=c.asset_id AND a.revision=c.revision
-        WHERE c.observed_size IS NOT NULL AND (
-            c.observed_size != a.size_bytes OR c.observed_sha256 != a.sha256
-        )"""
-    ).fetchone()[0]:
-        raise ArchiveSchemaError("Archive check content differs from its asset")
-    if conn.execute(
-        """SELECT COUNT(*) FROM archive_checks AS c
-        JOIN archive_locations AS l ON l.location_id=c.location_id
-        WHERE NOT EXISTS (
-            SELECT 1 FROM archive_objects AS o
-            JOIN archive_members AS m ON m.package_id=o.object_id
-            WHERE o.object_id=l.object_id AND o.object_revision=l.object_revision
-              AND o.object_kind='package' AND m.content_key=c.content_key
-        )"""
-    ).fetchone()[0]:
-        raise ArchiveSchemaError("Archive check location does not contain this content")
-    if conn.execute(
-        """SELECT COUNT(*) FROM archive_objects AS o
-        LEFT JOIN archive_packages AS p ON p.package_id=o.object_id
-            AND p.package_revision=o.object_revision
-        WHERE (o.object_kind='package' AND (
-            p.package_id IS NULL OR p.state!='sealed' OR p.size_bytes!=o.size_bytes
-            OR p.sha256!=o.sha256
-        )) OR (o.object_kind!='package' AND p.package_id IS NOT NULL)"""
-    ).fetchone()[0]:
-        raise ArchiveSchemaError("Physical object and package facts differ")
-    bad_release = conn.execute(
-        """SELECT COUNT(*) FROM archive_releases AS r
-        JOIN archive_local_checks AS l ON l.check_id=r.local_check_id
-        JOIN archive_checks AS a ON a.check_id=r.archive_check_id
-        WHERE l.state != 'hash_match'
-           OR a.state NOT IN ('user_returned_verified','adapter_readback_verified')"""
-    ).fetchone()[0]
-    if bad_release:
-        raise ArchiveSchemaError("Release facts require matching verified local/archive checks")
+        if row[6] in {"user_returned_verified", "adapter_readback_verified"}:
+            if (
+                content.sha256 is None
+                or row[7] != content.size_bytes
+                or row[8] != content.sha256
+            ):
+                raise ArchiveSchemaError("Verified archive check has unknown or different content")
+        elif (row[7] is not None or row[8] is not None) and (
+            row[7] != content.size_bytes or row[8] != content.sha256
+        ):
+            raise ArchiveSchemaError("Archive check content differs from its asset")
+        members = conn.execute(
+            """SELECT m.size_bytes,m.sha256 FROM archive_members AS m
+               JOIN archive_objects AS o ON o.object_id=m.package_id
+               JOIN archive_locations AS l ON l.object_id=o.object_id
+                   AND l.object_revision=o.object_revision
+               WHERE m.content_key=? AND l.location_id=? AND o.object_kind='package'""",
+            (content_key, row[4]),
+        ).fetchall()
+        if not any(
+            tuple(member) == (content.size_bytes, content.sha256) for member in members
+        ):
+            raise ArchiveSchemaError("Archive check location does not contain this content")
+
+    for row in conn.execute(
+        """SELECT package_id,asset_id,revision,path_key,content_key,member_path,
+                  size_bytes,sha256 FROM archive_members"""
+    ):
+        asset = assets.get((row[1], row[2], row[3]))
+        package = conn.execute(
+            "SELECT state FROM archive_packages WHERE package_id=?", (row[0],)
+        ).fetchone()
+        if asset is None or package is None or package[0] != "sealed":
+            raise ArchiveSchemaError("Package member has no sealed exact asset")
+        content = asset[0]
+        if (
+            row[4] != _content_key(content)
+            or row[5] is None or not isinstance(row[5], str) or not row[5]
+            or row[6] != content.size_bytes
+            or row[7] != content.sha256
+        ):
+            raise ArchiveSchemaError("Package members must match sealed content facts")
+
+    for row in conn.execute(
+        """SELECT package_id,batch_id,package_revision,format,tool_version,key_ref,
+                  size_bytes,sha256,state FROM archive_packages"""
+    ):
+        if row[8] == "sealed":
+            if (
+                row[3] != "7z" or row[4] is None or row[5] is None
+                or row[6] is None or row[7] is None
+            ):
+                raise ArchiveSchemaError("Sealed package lacks required facts")
+        elif row[8] != "planned":
+            raise ArchiveSchemaError("Invalid package state")
+
+    for row in conn.execute(
+        """SELECT object_id,object_revision,object_kind,size_bytes,sha256,parameters_json
+           FROM archive_objects"""
+    ):
+        package = conn.execute(
+            """SELECT state,size_bytes,sha256 FROM archive_packages
+               WHERE package_id=? AND package_revision=?""",
+            (row[0], row[1]),
+        ).fetchone()
+        if row[2] == "package":
+            if (
+                package is None or package[0] != "sealed"
+                or package[1] != row[3] or package[2] != row[4]
+            ):
+                raise ArchiveSchemaError("Physical object and package facts differ")
+        elif package is not None:
+            raise ArchiveSchemaError("Non-package object has package facts")
+
+    for row in conn.execute(
+        "SELECT batch_id,protocol_version,state FROM archive_batches"
+    ):
+        if row[1] != ARCHIVE_PROTOCOL_VERSION or row[2] not in {
+            "planned", "paused", "blocked", "completed"
+        }:
+            raise ArchiveSchemaError("Invalid archive batch fact")
+
+    release_rows = conn.execute(
+        """SELECT event_id,operation_id,sequence,content_key,local_check_id,
+                  archive_check_id,event,observed_at,evidence_json
+           FROM archive_releases ORDER BY operation_id,sequence"""
+    ).fetchall()
+    operations: dict[str, list[tuple]] = {}
+    for row in release_rows:
+        local = conn.execute(
+            "SELECT content_key,state FROM archive_local_checks WHERE check_id=?",
+            (row[4],),
+        ).fetchone()
+        archive = conn.execute(
+            "SELECT content_key,state FROM archive_checks WHERE check_id=?",
+            (row[5],),
+        ).fetchone()
+        if (
+            local is None or tuple(local) != (row[3], "hash_match")
+            or archive is None or archive[0] != row[3]
+            or archive[1] not in {"user_returned_verified", "adapter_readback_verified"}
+        ):
+            raise ArchiveSchemaError("Release facts require matching verified local/archive checks")
+        operations.setdefault(row[1], []).append(tuple(row))
+    for rows in operations.values():
+        if rows[0][2] != 1 or rows[0][6] != "prepared":
+            raise ArchiveSchemaError("Release operation must start with prepared")
+        if any(tuple(row[3:6]) != tuple(rows[0][3:6]) for row in rows[1:]):
+            raise ArchiveSchemaError("Release operation mixes content or evidence checks")
+        for index, row in enumerate(rows):
+            if row[2] != index + 1:
+                raise ArchiveSchemaError("Release event sequence is not contiguous")
+            if index and rows[index - 1][6] in {"released", "failed", "cancelled"}:
+                raise ArchiveSchemaError("Release event follows a terminal event")
+            if row[6] == "prepared" and index != 0:
+                raise ArchiveSchemaError("Release operation prepares more than once")
+            if row[6] in {"released", "failed", "cancelled"} and index != len(rows) - 1:
+                raise ArchiveSchemaError("Release terminal event is not last")
 
 
 def ensure_archive_asset(
@@ -496,6 +773,8 @@ def ensure_archive_asset(
     source_kind: str, artifact_id: str | None = None,
 ) -> str:
     """Insert one immutable content/path mapping; never relabel a historical asset."""
+    if not isinstance(content, ContentVersion) or not isinstance(path, PathRef):
+        raise ContractError("Expected content and path facts")
     content_key = _content_key(content)
     if source_kind not in {"download_receipt", "observed_existing", "user_selected"}:
         raise ContractError("Invalid asset source")
@@ -510,17 +789,23 @@ def ensure_archive_asset(
             raise ContractError("Referenced download receipt does not exist")
         output_ref, size, digest, verification = receipt
         try:
-            if PathRef(**json.loads(output_ref)).target_key != path.target_key:
+            if PathRef(**json.loads(output_ref)).identity_key != path.identity_key:
                 raise ContractError("Download receipt path does not match this asset")
-        except (TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise ContractError("Download receipt path is invalid") from exc
         if verification != "structure_checked" or size != content.size_bytes or digest != content.sha256:
             raise ContractError("Download receipt does not prove this exact content")
     elif artifact_id is not None:
         raise ContractError("Only download receipt assets may reference artifacts")
-    content_values = (
-        content.asset_id, content.revision, content.size_bytes, content.sha256,
-    )
+
+    owners = conn.execute(
+        "SELECT DISTINCT asset_id FROM archive_assets WHERE path_key=?",
+        (path.identity_key,),
+    ).fetchall()
+    if any(row[0] != content.asset_id for row in owners):
+        raise ContractError("Path already belongs to a different asset")
+
+    content_values = _content_values(content)
     existing = conn.execute(
         "SELECT asset_id,revision,size_bytes,sha256 FROM archive_contents WHERE content_key=?",
         (content_key,),
@@ -530,18 +815,20 @@ def ensure_archive_asset(
             raise ContractError("Content identity already has different facts")
     else:
         conn.execute(
-            "INSERT INTO archive_contents VALUES (?,?,?,?,?)",
+            "INSERT INTO archive_contents (content_key,asset_id,revision,size_bytes,sha256) "
+            "VALUES (?,?,?,?,?)",
             (content_key, *content_values),
         )
+
     values = (
-        content_key, *content_values[:2], path.target_key, _path_json(path),
+        content_key, content.asset_id, content.revision, path.identity_key, _path_json(path),
         artifact_id, source_kind, content.size_bytes, content.sha256,
     )
     existing_asset = conn.execute(
         """SELECT content_key,asset_id,revision,path_key,path_json,artifact_id,
                   source_kind,size_bytes,sha256 FROM archive_assets
            WHERE asset_id=? AND revision=? AND path_key=?""",
-        (content.asset_id, content.revision, path.target_key),
+        (content.asset_id, content.revision, path.identity_key),
     ).fetchone()
     if existing_asset is not None:
         if tuple(existing_asset) != values:
@@ -555,6 +842,44 @@ def ensure_archive_asset(
     return content_key
 
 
+def bind_archive_path(
+    conn: sqlite3.Connection, content: ContentVersion, path: PathRef, *,
+    bound_at: str, expected_content_key: str | None = None,
+) -> None:
+    """Point a path at a new content revision only with an explicit expected old key."""
+    if not isinstance(bound_at, str) or not bound_at or len(bound_at) > 64:
+        raise ContractError("Invalid path binding time")
+    _require_asset_link(conn, content, path)
+    new_key = _content_key(content)
+    current = conn.execute(
+        "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
+        (path.identity_key,),
+    ).fetchone()
+    if current is None:
+        if expected_content_key is not None:
+            raise ContractError("First path binding cannot expect a previous content")
+        conn.execute(
+            "INSERT INTO archive_path_bindings (path_key,asset_id,revision,bound_at) "
+            "VALUES (?,?,?,?)",
+            (path.identity_key, content.asset_id, content.revision, bound_at),
+        )
+        return
+    current_key = conn.execute(
+        "SELECT content_key FROM archive_assets WHERE asset_id=? AND revision=? AND path_key=?",
+        (current[0], current[1], path.identity_key),
+    ).fetchone()
+    if current_key is None:
+        raise ContractError("Current path binding has no exact asset row")
+    if current_key[0] == new_key:
+        return
+    if expected_content_key is None or expected_content_key != current_key[0]:
+        raise ContractError("Path binding changed without the expected old content")
+    conn.execute(
+        "UPDATE archive_path_bindings SET asset_id=?, revision=?, bound_at=? WHERE path_key=?",
+        (content.asset_id, content.revision, bound_at, path.identity_key),
+    )
+
+
 def record_transfer_intent(
     conn: sqlite3.Connection, content: ContentVersion, path: PathRef, *,
     intent_id: str, root_revision: int, intent: RemovalIntent,
@@ -564,33 +889,59 @@ def record_transfer_intent(
         "user_reported", "program_observed", "excluded_scope"
     }:
         raise ContractError("Invalid transfer intent or provenance")
+    if not isinstance(content, ContentVersion) or not isinstance(path, PathRef):
+        raise ContractError("Expected content and path facts")
     if type(root_revision) is not int or root_revision < 0:
         raise ContractError("Invalid root revision")
+    if not isinstance(observed_at, str) or not observed_at or len(observed_at) > 64:
+        raise ContractError("Invalid transfer observation time")
     _token(intent_id, "intent ID")
+    _require_asset_link(conn, content, path)
     conn.execute(
         """INSERT INTO archive_transfer_intents (
             intent_id,content_key,asset_id,revision,path_key,root_revision,
             intent,source,observed_at,details_json
         ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (intent_id, _content_key(content), content.asset_id, content.revision,
-         path.target_key, root_revision, intent.value, source, observed_at, _json(details)),
+         path.identity_key, root_revision, intent.value, source, observed_at, _json(details)),
     )
 
 
-def record_local_observation(conn: sqlite3.Connection, evidence: LocalEvidence) -> None:
-    """Persist the exact immutable evidence; I/O completion is not inferred here."""
+def record_local_observation(
+    conn: sqlite3.Connection, evidence: LocalEvidence, *,
+    result: LocalObservation | None = None,
+) -> None:
+    """Persist exact evidence and, when supplied, its physical observation facts."""
     if not isinstance(evidence, LocalEvidence):
         raise ContractError("Expected LocalEvidence")
+    if result is not None and (
+        not isinstance(result, LocalObservation) or result.evidence != evidence
+    ):
+        raise ContractError("Local observation does not match its evidence")
     content, path = evidence.content, evidence.path
+    _require_content(conn, content)
+    _require_asset_link(conn, content, path)
+
+    physical = (None, None, None, None, None, None, None, None)
+    if result is not None:
+        identity = result.identity
+        physical = (
+            result.status.value, result.reason, int(result.digest_complete),
+            result.bytes_read, result.size_bytes, result.mtime_ns,
+            str(identity.device) if identity is not None else None,
+            str(identity.file_index) if identity is not None else None,
+        )
     conn.execute(
         """INSERT INTO archive_local_checks (
             check_id,content_key,asset_id,revision,path_key,root_revision,run_id,
-            checked_at,state,observed_size,observed_sha256,evidence_json
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            checked_at,state,observed_size,observed_sha256,evidence_json,
+            observation_status,observation_reason,digest_complete,bytes_read,
+            physical_size,physical_mtime_ns,file_device,file_index
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (evidence.check_id, _content_key(content), content.asset_id, content.revision,
-         path.target_key, evidence.root_revision, evidence.run_id, evidence.checked_at,
+         path.identity_key, evidence.root_revision, evidence.run_id, evidence.checked_at,
          evidence.state.value, evidence.observed_size, evidence.observed_sha256,
-         _json(asdict(evidence))),
+         _json(asdict(evidence)), *physical),
     )
 
 
@@ -611,19 +962,27 @@ def record_archive_observation(
         not isinstance(observed_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", observed_sha256)
     ):
         raise ContractError("Invalid observed archive digest")
-    if evidence.state.value in {"user_returned_verified", "adapter_readback_verified"} and (
+    verified = evidence.state.value in {"user_returned_verified", "adapter_readback_verified"}
+    if verified and content.sha256 is None:
+        raise ContractError("Verified archive observations require indexed content digest")
+    if observed_size is not None and observed_size != content.size_bytes:
+        raise ContractError("Observed archive size differs from indexed content")
+    if observed_sha256 is not None and observed_sha256 != content.sha256:
+        raise ContractError("Observed archive digest differs from indexed content")
+    if verified and (
         observed_size != content.size_bytes or observed_sha256 != content.sha256
     ):
         raise ContractError("Verified archive observations require exact size and digest")
-    linked = conn.execute(
-        """SELECT COUNT(*) FROM archive_members AS m
+    _require_content(conn, content)
+    rows = conn.execute(
+        """SELECT m.size_bytes,m.sha256 FROM archive_members AS m
         JOIN archive_objects AS o ON o.object_id=m.package_id
         JOIN archive_locations AS l ON l.object_id=o.object_id
             AND l.object_revision=o.object_revision
         WHERE m.content_key=? AND l.location_id=? AND o.object_kind='package'""",
         (_content_key(content), evidence.location_ref),
-    ).fetchone()[0]
-    if not linked:
+    ).fetchall()
+    if not any(tuple(row) == (content.size_bytes, content.sha256) for row in rows):
         raise ContractError("Archive location does not contain this exact content")
     conn.execute(
         """INSERT INTO archive_checks (
@@ -633,6 +992,82 @@ def record_archive_observation(
         (evidence.check_id, _content_key(content), content.asset_id, content.revision,
          evidence.location_ref, evidence.checked_at, evidence.state.value,
          observed_size, observed_sha256, _json(asdict(evidence))),
+    )
+
+
+def record_release_event(
+    conn: sqlite3.Connection, content: ContentVersion, *,
+    operation_id: str, event_id: str, sequence: int, event: str,
+    local_check_id: str, archive_check_id: str, observed_at: str,
+    evidence: object = None,
+) -> None:
+    """Append one release event after proving both evidence checks are verified."""
+    _token(operation_id, "release operation ID")
+    _token(event_id, "release event ID")
+    _token(local_check_id, "local check ID")
+    _token(archive_check_id, "archive check ID")
+    if type(sequence) is not int or sequence < 1:
+        raise ContractError("Invalid release sequence")
+    if event not in {"prepared", "released", "failed", "cancelled"}:
+        raise ContractError("Invalid release event")
+    if not isinstance(observed_at, str) or not observed_at or len(observed_at) > 64:
+        raise ContractError("Invalid release observation time")
+    content_key = _require_content(conn, content)
+    local = conn.execute(
+        "SELECT content_key,state FROM archive_local_checks WHERE check_id=?",
+        (local_check_id,),
+    ).fetchone()
+    archive = conn.execute(
+        "SELECT content_key,state FROM archive_checks WHERE check_id=?",
+        (archive_check_id,),
+    ).fetchone()
+    if local is None or tuple(local) != (content_key, "hash_match"):
+        raise ContractError("Release requires a matching full local hash check")
+    if archive is None or archive[0] != content_key or archive[1] not in {
+        "user_returned_verified", "adapter_readback_verified"
+    }:
+        raise ContractError("Release requires a matching verified archive check")
+
+    existing = conn.execute(
+        """SELECT operation_id,sequence,content_key,local_check_id,archive_check_id,
+                  event,observed_at,evidence_json FROM archive_releases WHERE event_id=?""",
+        (event_id,),
+    ).fetchone()
+    evidence_json = _json(evidence)
+    expected = (
+        operation_id, sequence, content_key, local_check_id, archive_check_id,
+        event, observed_at, evidence_json,
+    )
+    if existing is not None:
+        if tuple(existing) != expected:
+            raise ContractError("Release event ID already has different facts")
+        return
+    prior = conn.execute(
+        """SELECT sequence,event,content_key,local_check_id,archive_check_id
+           FROM archive_releases WHERE operation_id=? ORDER BY sequence""",
+        (operation_id,),
+    ).fetchall()
+    if prior:
+        last = prior[-1]
+        if last[0] != sequence - 1:
+            raise ContractError("Release events must be appended contiguously")
+        if last[1] in {"released", "failed", "cancelled"}:
+            raise ContractError("Release operation is already terminal")
+        if event == "prepared":
+            raise ContractError("A release operation may prepare only once")
+        if any(row[1] == event for row in prior):
+            raise ContractError("Release event type already exists for this operation")
+        if any(tuple(row[2:]) != (content_key, local_check_id, archive_check_id) for row in prior):
+            raise ContractError("Release events must bind one content and evidence pair")
+    elif event != "prepared" or sequence != 1:
+        raise ContractError("A release operation must start with prepared at sequence 1")
+    conn.execute(
+        """INSERT INTO archive_releases (
+            event_id,operation_id,sequence,content_key,local_check_id,
+            archive_check_id,event,observed_at,evidence_json
+        ) VALUES (?,?,?,?,?,?,?,?,?)""",
+        (event_id, operation_id, sequence, content_key, local_check_id,
+         archive_check_id, event, observed_at, evidence_json),
     )
 
 
@@ -658,10 +1093,10 @@ def _inspect_source(conn: sqlite3.Connection) -> str:
     if metadata.get("format") != "jpgpng-library":
         raise ArchiveSchemaError("Source belongs to a different product")
     version = metadata.get("schema_version")
-    if version == "2":
+    if version == ARCHIVE_SCHEMA_VERSION:
         _check_existing_objects(conn)
     elif version != "1":
-        raise ArchiveSchemaError("Unsupported/future source schema")
+        raise ArchiveSchemaError("Unsupported schema version; schema 2 is a draft and cannot migrate")
     return version
 
 
@@ -713,7 +1148,7 @@ def migrate_archive_copy(
                     # Keep a failed destination for diagnosis; never overwrite it.
                     raise
                 conn.execute("PRAGMA query_only=OFF")
-                if source_version == "2":
+                if source_version == ARCHIVE_SCHEMA_VERSION:
                     validate_archive_facts(conn)
                 else:
                     conn.execute("BEGIN IMMEDIATE")
@@ -737,7 +1172,7 @@ def migrate_archive_copy(
                         raise
                 digest = hashlib.sha256(backup.read_bytes()).hexdigest()
                 return ArchiveMigrationReport(
-                    "already_current" if source_version == "2" else "migrated",
+                    "already_current" if source_version == ARCHIVE_SCHEMA_VERSION else "migrated",
                     source_version, ARCHIVE_SCHEMA_VERSION, backup, digest,
                     tuple(sorted(ARCHIVE_TABLES)),
                 )
@@ -765,8 +1200,8 @@ def _inspect_source_for_migration(conn: sqlite3.Connection) -> str:
     if metadata.get("format") != "jpgpng-library":
         raise ArchiveSchemaError("Not a JpgPng library")
     version = metadata.get("schema_version")
-    if version == "2":
+    if version == ARCHIVE_SCHEMA_VERSION:
         _check_existing_objects(conn)
     elif version != "1":
-        raise ArchiveSchemaError("Unsupported/future schema")
+        raise ArchiveSchemaError("Unsupported schema version; schema 2 is a draft")
     return version

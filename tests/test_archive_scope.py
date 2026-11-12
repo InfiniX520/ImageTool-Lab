@@ -170,18 +170,33 @@ def test_windows_case_aliases_never_emit_two_paths(root):
     assert any(item.reason == "duplicate_selection" for item in result.exclusions)
 
 
-def test_duplicate_file_identity_is_not_two_releasable_copies(root):
-    file(root, "in_scope/a.bin")
+def test_hardlink_alias_keeps_every_path_and_counts_content_once(root):
+    """A1-03: a hardlink is not a second copy, but neither path may vanish.
+
+    The earlier assertion here (one entry, one duplicate_file_identity
+    exclusion) discarded the alias path while still reporting a complete
+    scope.  Restore needs every path, so the stronger rule keeps both paths,
+    shares one content identity, and records the alias relation explicitly.
+    """
+    payload = b"hardlink payload"
+    file(root, "in_scope/a.bin", payload)
     try:
         os.link(root / "in_scope" / "a.bin", root / "in_scope" / "b.bin")
     except OSError as exc:
         pytest.skip("Synthetic hardlink unavailable: " + type(exc).__name__)
     result = first(root)
-    assert paths(result) == ["in_scope/a.bin"]
-    duplicates = [item for item in result.exclusions if item.reason == "duplicate_file_identity"]
-    assert len(duplicates) == 1
-    assert duplicates[0].related_path == "in_scope/a.bin"
-    assert duplicates[0].identity.file_index > 0
+    assert paths(result) == ["in_scope/a.bin", "in_scope/b.bin"]
+    assert result.completion.full
+    # Shared content: one asset revision, so capacity/release counts it once.
+    identities = {(entry.content.asset_id, entry.content.revision) for entry in result.entries}
+    assert len(identities) == 1
+    assert {entry.content.size_bytes for entry in result.entries} == {len(payload)}
+    assert len(result.aliases) == 1
+    alias = result.aliases[0]
+    assert (alias.relative_path, alias.alias_of) == ("in_scope/b.bin", "in_scope/a.bin")
+    assert alias.asset_id == next(iter(identities))[0]
+    assert alias.identity.file_index > 0
+    assert not [item for item in result.exclusions if item.relative_path == "in_scope/b.bin"]
 
 
 def test_stable_paging_snapshot_boundary_and_immutability(root):

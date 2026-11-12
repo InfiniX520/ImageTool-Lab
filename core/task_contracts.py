@@ -117,6 +117,21 @@ class PathRef:
     def target_key(self) -> str:
         return hashlib.sha256(canonical_json([self.kind, self.root_id.casefold(), self.relative_path.casefold()]).encode()).hexdigest()
 
+    @property
+    def identity_key(self) -> str:
+        """Archive identity: ASCII case aliases fold, non-ASCII spelling stays exact.
+
+        Windows ASCII case aliases are one directory entry in normal use, while
+        NFC/NFD and other non-ASCII look-alikes can be distinct physical files.
+        """
+        spelling = (
+            self.relative_path.casefold()
+            if self.relative_path.isascii() else self.relative_path
+        )
+        return hashlib.sha256(canonical_json([
+            self.kind, self.root_id, spelling,
+        ]).encode("utf-8")).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class FilterSpec:

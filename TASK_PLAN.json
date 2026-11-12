@@ -297,7 +297,7 @@
   ],
   "current_plan": {
     "id": "JPGPNG-REFACTOR-20261023",
-    "updated_at": "2026-11-12T00:24:34+08:00",
+    "updated_at": "2026-11-12T13:57:39+08:00",
     "mainline": "P0-P8 completed",
     "cleanup": "completed",
     "progress": "docs/refactor/REFACTOR_PROGRESS.md",
@@ -346,22 +346,23 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-12",
-      "phase": "A1 audit blockers and unfinished writer draft",
-      "status": "audit_completed_findings_open_not_production_ready",
+      "phase": "A1 repair independently re-audited; boundary gaps open",
+      "status": "independent_regression_passed_eight_findings_open_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "R0 freeze and behavioral regressions; R1 facts/lifecycle; then R2 scope receipt, R3 bounded plan storage, R4 writer, R5 integration. R6 production integration requires a separate gate.",
+      "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-A1-AUDIT-20261111-01",
-      "foundation": "docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
-      "evidence": "../.runtime/jpgpng_a1_audit_20261111_01/audit_validation.json",
+      "latest_batch": "JPGPNG-A1-REAUDIT-20261112-01",
+      "foundation": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
+      "evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
       "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
-      "unfinished_draft": "core/archive_repository.py; ../.runtime/jpgpng_a1_writer_compat_20261111_01/README.md"
+      "unfinished_draft": "AR2-01 through AR2-08; no public require_receipt=False parameter exists",
+      "latest_repair_evidence": ".runtime/jpgpng_a1_repair_20261112_01/validation.json"
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
       "date": "2026-11-11",
-      "status": "implementation_partial_audit_findings_open",
+      "status": "independent_reaudit_findings_open_not_production_ready",
       "overview": "docs/archiving/README.md",
       "design": "docs/archiving/DESIGN.md",
       "acceptance": "docs/archiving/ACCEPTANCE.md",
@@ -390,14 +391,14 @@
       "first_transport": "Manual official Quark client; user attests origin, program verifies full bytes; not automated provider proof",
       "stages": {
         "A0": "design_ready",
-        "A1": "partial_implementation_requires_audit_fixes_before_production",
+        "A1": "partial_implementation_independently_reaudited_findings_open",
         "A2": "not_started",
         "A3": "not_started",
         "A4": "not_started",
         "A5": "not_started",
         "A6": "not_started"
       },
-      "next_step": "R0 freeze and behavioral regressions; R1 facts/lifecycle; then R2 scope receipt, R3 bounded plan storage, R4 writer, R5 integration. R6 production integration requires a separate gate.",
+      "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated.",
       "user_action_now": "No retrieval, password or account access needed",
       "later_user_action": "A4 upload and retrieve generated harmless test packages, approximately several hundred MiB to 2 GiB",
       "gates": [
@@ -407,14 +408,17 @@
         "Precise file identity and explicit batch release only after evidence gates",
         "Register archive_store as protected business data before creating it"
       ],
-      "scope_note": "Historical scope adapter checkpoint passed; current writer draft fails and audit cross-module findings are open. No real archive/readback/release.",
-      "current_foundation": "docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
-      "current_evidence": "../.runtime/jpgpng_a1_audit_20261111_01/audit_validation.json"
+      "scope_note": "Offline repair batch passed focused tests; production ArchiveLibraryRepository enforces ScopeReceipt, low-level synthetic compatibility and PathRef downstream collision remain open. No real archive/readback/release.",
+      "current_foundation": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
+      "current_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
+      "latest_batch": "JPGPNG-A1-REAUDIT-20261112-01",
+      "latest_overview": "docs/audits/2026-11-12-a1-recheck/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json"
     },
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
       "date": "2026-11-11",
-      "status": "a1_partial_implementation_audit_findings_open",
+      "status": "independent_reaudit_findings_open_not_production_ready",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
       "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
@@ -434,7 +438,7 @@
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
-        "U1-A_A1": "Fix A1-01 through A1-12 via R0-R5, then separately review production writer/migration/receipt reuse integration. Original J-01 remains unfixed.",
+        "U1-A_A1": "Independent full suite passed, but AR2-01..08 remain: read/reference closure, physical/version lifecycle, bounded parsing, actual directory IO and path identity; original J-01/production integration still pending.",
         "U1-B": "Shared dependency maintenance pending; separate governed environment change",
         "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
         "U2-A": "Coverage and pending-reason summaries pending",
@@ -447,15 +451,17 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-A1-AUDIT-20261111-01",
-      "latest_overview": "docs/audits/2026-11-12-a1/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_audit_20261111_01/audit_validation.json",
+      "latest_batch": "JPGPNG-A1-REAUDIT-20261112-01",
+      "latest_overview": "docs/audits/2026-11-12-a1-recheck/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
       "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_implementation_audit"
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
       "date": "2026-11-12",
-      "status": "completed_findings_unfixed",
+      "status": "historical_audit_baseline_superseded_by_repair",
+      "repair_batch": "JPGPNG-A1-REPAIR-20261112-01",
+      "repair_note": "9 fixed, 3 partial/open; see active_workstream and validation.json. Historical audit counts below are not current tree results.",
       "report": "docs/audits/2026-11-12-a1/README.md",
       "findings": "docs/audits/2026-11-12-a1/FINDINGS.md",
       "development_guide": "docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
@@ -463,7 +469,9 @@
         "P1": 8,
         "P2": 4,
         "total": 12,
-        "fixed": 0
+        "fixed": 0,
+        "fixed_at_repair": 9,
+        "partial_or_open": 3
       },
       "tests": {
         "total": 258,
@@ -505,8 +513,41 @@
       "scope_note": "Audit tag matches audited Python sources; WIP tag preserves existing schema-3 draft. Audit counts do not certify the WIP tree.",
       "current_working_tag": "checkpoint-2026-11-12-a1-wip",
       "unreviewed_since_audit": [
-        "core/archive_schema.py: schema 2 -> 3; existing edits preserved, not validated by this backup task"
+        "core/archive_schema.py: schema 3 validated only in the offline repair batch; no production migration or production wiring"
       ]
+    },
+    "a1_reaudit": {
+      "id": "JPGPNG-A1-REAUDIT-20261112-01",
+      "date": "2026-11-12",
+      "status": "completed_product_findings_open",
+      "overview": "docs/audits/2026-11-12-a1-recheck/README.md",
+      "findings": "docs/audits/2026-11-12-a1-recheck/FINDINGS.md",
+      "guide": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
+      "issues": {
+        "P1": 4,
+        "P2": 4,
+        "total": 8
+      },
+      "focused": {
+        "total": 348,
+        "passed": 345,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 3,
+        "report": "../.runtime/jpgpng_a1_reaudit_20261112_01/focused.xml"
+      },
+      "full": {
+        "total": 1313,
+        "passed": 1310,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 3,
+        "report": "../.runtime/jpgpng_a1_reaudit_20261112_01/full.xml"
+      },
+      "source_files_frozen": 174,
+      "product_source_changed": false,
+      "product_ready": false,
+      "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated."
     }
   }
 }

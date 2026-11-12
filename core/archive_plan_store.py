@@ -1,19 +1,24 @@
-"""Persist explicit archive inventories in an already-open temporary schema-2 DB.
+"""Persist explicit archive inventories in an already-open temporary schema-3 DB.
 
 This module is deliberately not a repository factory: it never discovers or opens a
 library.  A caller must provide a sqlite3 connection to an explicitly selected,
-isolated schema-2 copy.  Planned package indexes and their immutable JSON plans are
-not sealed objects, remote locations, verification evidence, or a completion ledger.
+isolated schema-3 copy.  A bounded, segmented inventory document is the single
+authoritative planned representation; planned package indexes are only an index.
+Plans are not sealed objects, remote locations, verification evidence, or a
+completion ledger.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 
+from core.archive_scope import ScopeReceipt, ScopeSelectionKind
 from core.archive_inventory import (
     ARCHIVE_INVENTORY_SCHEMA_VERSION,
     CAPACITY_PLAN_SCHEMA_VERSION,
@@ -39,15 +44,20 @@ from core.archive_schema import (
     ARCHIVE_SCHEMA_VERSION,
     ARCHIVE_TABLES,
     ArchiveSchemaError,
+    _check_existing_objects,
     _content_key,
+    bind_archive_path,
     ensure_archive_asset,
-    validate_archive_facts,
 )
+from core.local_observation import FileIdentity
 from core.preservation_policy import ContentVersion
 from core.task_contracts import ContractError, PathRef, canonical_json, normalize_json
 
 _ARCHIVE_PLAN_FORMAT = "jpgpng-archive-plan"
-_ARCHIVE_PLAN_VERSION = 1
+_ARCHIVE_PLAN_VERSION = 2
+_ARCHIVE_PLAN_SEGMENT_CHARS = 200_000
+ARCHIVE_PLAN_MAX_BYTES = 8 * 1024 * 1024
+ARCHIVE_PLAN_MAX_ENTRIES = 9_000
 _BATCH_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
@@ -58,6 +68,92 @@ class ArchivePlanStoreError(ArchiveSchemaError):
 
 class ArchivePlanConflictError(ArchivePlanStoreError):
     """An immutable batch or package already has different facts."""
+
+
+class ArchivePlanTooLargeError(ArchivePlanStoreError):
+    """The prepared plan exceeds the bounded command/document budget."""
+
+    def __init__(self, batch_id: str, payload_bytes: int):
+        self.batch_id = batch_id
+        self.payload_bytes = payload_bytes
+        super().__init__(
+            f"Archive plan for {batch_id} is {payload_bytes} bytes; "
+            f"the bounded plan budget is {ARCHIVE_PLAN_MAX_BYTES} bytes"
+        )
+
+
+class ArchivePlanEntryLimitError(ArchivePlanStoreError):
+    """The prepared plan has more paths than the explicit entry budget."""
+
+    def __init__(self, batch_id: str, entry_count: int):
+        self.batch_id = batch_id
+        self.entry_count = entry_count
+        super().__init__(
+            f"Archive plan for {batch_id} has {entry_count} entries; "
+            f"the bounded entry budget is {ARCHIVE_PLAN_MAX_ENTRIES}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PlanSegment:
+    index: int
+    payload: str
+    byte_length: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedArchivePlan:
+    """A frozen, bounded plan ready for one transaction or one queue command."""
+
+    batch_id: str
+    inventory: ArchiveInventory
+    capacity: CapacityPlan
+    scope_json: str
+    scope_receipt_json: str
+    segments: tuple[PlanSegment, ...]
+    capacity_json: str
+    header_json: str
+    payload_bytes: int
+
+    def __post_init__(self):
+        if not isinstance(self.batch_id, str) or _BATCH_ID.fullmatch(self.batch_id) is None:
+            raise ArchivePlanStoreError("Invalid prepared batch ID")
+        if not isinstance(self.inventory, ArchiveInventory) or not isinstance(self.capacity, CapacityPlan):
+            raise ArchivePlanStoreError("Prepared plan lacks inventory or capacity")
+        if not isinstance(self.scope_json, str):
+            raise ArchivePlanStoreError("Prepared plan scope is not text")
+        try:
+            if not isinstance(json.loads(self.scope_json), dict):
+                raise ValueError
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ArchivePlanStoreError("Prepared plan scope is not a JSON object") from exc
+        if (
+            type(self.payload_bytes) is not int
+            or not 0 <= self.payload_bytes <= ARCHIVE_PLAN_MAX_BYTES
+        ):
+            raise ArchivePlanStoreError("Prepared plan payload size is out of bounds")
+        if not isinstance(self.scope_receipt_json, str):
+            raise ArchivePlanStoreError("Prepared plan receipt is required text")
+        try:
+            receipt = ScopeReceipt.from_json(self.scope_receipt_json)
+            _receipt_json(receipt, self.inventory)
+        except (ContractError, TypeError, ValueError, UnicodeError, RecursionError) as exc:
+            raise ArchivePlanStoreError("Prepared plan receipt is invalid") from exc
+        if not isinstance(self.segments, tuple) or not self.segments:
+            raise ArchivePlanStoreError("Prepared plan has no segments")
+        total = len(self.header_json.encode("utf-8")) + len(self.capacity_json.encode("utf-8"))
+        for index, segment in enumerate(self.segments):
+            if not isinstance(segment, PlanSegment) or segment.index != index:
+                raise ArchivePlanStoreError("Prepared plan segments are not contiguous")
+            if not isinstance(segment.payload, str) or len(segment.payload.encode("utf-8")) != segment.byte_length:
+                raise ArchivePlanStoreError("Prepared plan segment length differs")
+            total += segment.byte_length
+        if total != self.payload_bytes:
+            raise ArchivePlanStoreError("Prepared plan payload size differs from its parts")
+
+    @property
+    def scope(self) -> dict[str, object]:
+        return json.loads(self.scope_json)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +181,7 @@ class StoredArchivePlan:
     scope: dict[str, object]
     created_at: str
     packages: tuple[StoredPackagePlan, ...]
+    scope_receipt: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +231,11 @@ def _path(value: object) -> PathRef:
 
 def _asset(value: object) -> InventoryAsset:
     raw = _exact(InventoryAsset, value, "inventory asset")
+    physical = raw["physical_identity"]
+    if physical is not None:
+        if not isinstance(physical, dict) or set(physical) != {"device", "file_index"}:
+            raise ContractError("Invalid inventory physical identity")
+        physical = FileIdentity(physical["device"], physical["file_index"])
     asset = InventoryAsset(
         content=_content(raw["content"]),
         path=_path(raw["path"]),
@@ -141,6 +243,7 @@ def _asset(value: object) -> InventoryAsset:
         page_index=raw["page_index"],
         path_key=raw["path_key"],
         content_key=raw["content_key"],
+        physical_identity=physical,
     )
     if _TOKEN.fullmatch(asset.work_id) is None:
         raise ContractError("Invalid artwork ID")
@@ -152,7 +255,7 @@ def _asset(value: object) -> InventoryAsset:
         None if asset.content.sha256 is None
         else asset.content.sha256 + ":" + str(asset.content.size_bytes)
     )
-    if (asset.path_key != asset.path.target_key
+    if (asset.path_key != asset.path.identity_key
             or asset.content_key != expected_content_key):
         raise ContractError("Inventory asset identity differs from its facts")
     return asset
@@ -199,7 +302,10 @@ def _phase(value: object) -> CapacityPhase:
     )
 
 
-def _inventory(raw_value: object, expected_batch_id: str | None = None) -> ArchiveInventory:
+def _inventory(
+    raw_value: object, expected_batch_id: str | None = None, *,
+    validate_consistency: bool = True,
+) -> ArchiveInventory:
     raw = _exact(ArchiveInventory, raw_value, "archive inventory")
     if raw.get("schema_version") != ARCHIVE_INVENTORY_SCHEMA_VERSION or type(raw.get("schema_version")) is not int:
         raise ArchivePlanStoreError("Unsupported archive inventory schema")
@@ -240,6 +346,9 @@ def _inventory(raw_value: object, expected_batch_id: str | None = None) -> Archi
         path_count=_integer(raw["path_count"], "path count"),
         unique_content_count=_integer(raw["unique_content_count"], "content count"),
         member_payload_bytes=_integer(raw["member_payload_bytes"], "member bytes"),
+        physical_member_payload_bytes=_integer(
+            raw["physical_member_payload_bytes"], "physical member bytes",
+        ),
         unique_content_bytes=_integer(raw["unique_content_bytes"], "unique bytes"),
         assets=assets,
         packages=tuple(packages),
@@ -253,7 +362,8 @@ def _inventory(raw_value: object, expected_batch_id: str | None = None) -> Archi
     if (_BATCH_ID.fullmatch(inventory.batch_id) is None
             or (expected_batch_id is not None and inventory.batch_id != expected_batch_id)):
         raise ContractError("Archive plan batch identity mismatch")
-    _validate_inventory(inventory)
+    if validate_consistency:
+        _validate_inventory(inventory)
     return inventory
 
 
@@ -267,7 +377,7 @@ def _validate_inventory(inventory: ArchiveInventory) -> None:
         # Valid neighbours may remain visible, but never contribute to a partial plan.
         if (inventory.packages or inventory.path_count or inventory.asset_count
                 or inventory.unique_content_count or inventory.member_payload_bytes
-                or inventory.unique_content_bytes
+                or inventory.physical_member_payload_bytes or inventory.unique_content_bytes
                 or "inventory_rejected_items" not in inventory.adjustment_codes):
             raise ContractError("Incomplete scope must not contain a package plan")
         return
@@ -276,7 +386,7 @@ def _validate_inventory(inventory: ArchiveInventory) -> None:
     by_work: dict[str, list[ArchiveEntry]] = {}
     for asset in inventory.assets:
         by_work.setdefault(asset.work_id, []).append(
-            ArchiveEntry(asset.content, asset.path, asset.page_index)
+            ArchiveEntry(asset.content, asset.path, asset.page_index, asset.physical_identity)
         )
     rebuilt = build_archive_inventory(
         (ArtworkGroup(work_id, tuple(entries)) for work_id, entries in by_work.items()),
@@ -347,28 +457,220 @@ def _strict_object(value: object, label: str) -> dict:
         raise ArchivePlanStoreError("Invalid stored " + label) from exc
 
 
-def _encode_scope(inventory: ArchiveInventory, scope: dict[str, object]) -> str:
-    return canonical_json({
+def _canonical_scope(scope: dict[str, object] | None) -> str:
+    if scope is None:
+        scope = {"kind": "explicit_inventory"}
+    if not isinstance(scope, dict):
+        raise ArchivePlanStoreError("Archive plan scope must be a JSON object")
+    try:
+        value = json.loads(normalize_json(canonical_json(scope), object_only=True))
+    except (ContractError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        raise ArchivePlanStoreError("Archive plan scope is not canonical JSON") from exc
+    if not isinstance(value, dict):
+        raise ArchivePlanStoreError("Archive plan scope must be a JSON object")
+    return canonical_json(value)
+
+
+def _scope_entries(inventory: ArchiveInventory) -> tuple[ArchiveEntry, ...]:
+    """Rebuild the scope-order entries for receipt comparison.
+
+    `ScopeEnumerator` orders by its display key (NFC casefold) and then the raw
+    relative path.  Plan assets are stored by artwork/page order, so they must be
+    re-sorted here rather than assumed to be in page-consumption order.
+    """
+    entries = (
+        ArchiveEntry(asset.content, asset.path, asset.page_index)
+        for asset in inventory.assets
+    )
+    return tuple(sorted(entries, key=lambda entry: (
+        unicodedata.normalize("NFC", entry.path.relative_path).casefold(),
+        entry.path.relative_path,
+    )))
+
+
+def _receipt_json(receipt: ScopeReceipt, inventory: ArchiveInventory) -> str:
+    if not isinstance(receipt, ScopeReceipt):
+        raise ArchivePlanStoreError("Expected a ScopeReceipt")
+    try:
+        receipt.verify()
+    except ContractError as exc:
+        raise ArchivePlanStoreError("ScopeReceipt failed its digest verification") from exc
+    if not receipt.consumption_complete:
+        raise ArchivePlanStoreError("ScopeReceipt is not a complete page consumption")
+    if receipt.selection_kind is ScopeSelectionKind.SNAPSHOT and not receipt.scope_complete:
+        raise ArchivePlanStoreError("A whole-snapshot plan requires scope_complete")
+    for asset in inventory.assets:
+        if asset.path.kind != receipt.kind or asset.path.root_id != receipt.root_id:
+            raise ArchivePlanStoreError(
+                "ScopeReceipt root does not match the plan paths"
+            )
+    entries = _scope_entries(inventory)
+    if receipt.consumed_entries != len(entries):
+        raise ArchivePlanStoreError("ScopeReceipt entry count differs from the plan")
+    if not receipt.matches_entries(entries):
+        raise ArchivePlanStoreError("ScopeReceipt entries differ from the plan")
+    try:
+        return receipt.to_json()
+    except (ContractError, TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        raise ArchivePlanStoreError("ScopeReceipt is not canonical JSON") from exc
+
+
+def _inventory_segments(
+    inventory: ArchiveInventory, raw_inventory: dict | None = None,
+) -> tuple[str, tuple[PlanSegment, ...]]:
+    try:
+        text = json.dumps(
+            inventory.to_dict() if raw_inventory is None else raw_inventory,
+            ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ArchivePlanStoreError("Archive plan inventory is not JSON serializable") from exc
+    encoded_size = len(text.encode("utf-8"))
+    if encoded_size > ARCHIVE_PLAN_MAX_BYTES:
+        raise ArchivePlanTooLargeError(inventory.batch_id, encoded_size)
+    segments = []
+    for index, start in enumerate(range(0, len(text), _ARCHIVE_PLAN_SEGMENT_CHARS)):
+        payload = text[start:start + _ARCHIVE_PLAN_SEGMENT_CHARS]
+        byte_length = len(payload.encode("utf-8"))
+        if byte_length > 1024 * 1024:
+            raise ArchivePlanStoreError("Archive plan segment exceeds its byte bound")
+        segments.append(PlanSegment(index, payload, byte_length))
+    return text, tuple(segments)
+
+
+def prepare_archive_plan(
+    inventory: ArchiveInventory,
+    capacity: CapacityPlan,
+    *,
+    scope: dict[str, object] | None = None,
+    receipt: ScopeReceipt | None = None,
+) -> PreparedArchivePlan:
+    """Freeze and bound a plan without opening a database or reading image bytes.
+
+    When a ScopeReceipt is supplied it must prove complete page consumption;
+    its entries are compared with this exact plan before any write.  A plan
+    without a complete ScopeReceipt is never prepared.
+    """
+    if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
+        raise ArchivePlanStoreError("Expected ArchiveInventory and CapacityPlan")
+    if inventory.batch_id != capacity.batch_id:
+        raise ArchivePlanStoreError("Inventory and capacity batch IDs differ")
+    entry_count = max(inventory.input_entry_count, len(inventory.assets))
+    if entry_count > ARCHIVE_PLAN_MAX_ENTRIES:
+        raise ArchivePlanEntryLimitError(inventory.batch_id, entry_count)
+    if receipt is None:
+        raise ArchivePlanStoreError("Archive plan requires a completed ScopeReceipt")
+    scope_json = _canonical_scope(scope)
+    try:
+        _validate_inventory(inventory)
+        raw_inventory = inventory.to_dict()
+        checked_inventory = _inventory(
+            raw_inventory, inventory.batch_id,
+            validate_consistency=False,
+        )
+        inventory_json, segments = _inventory_segments(inventory, raw_inventory)
+        receipt_json = None if receipt is None else _receipt_json(receipt, checked_inventory)
+        capacity_json = canonical_json(capacity.to_dict())
+        checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
+        if checked_inventory != inventory or checked_capacity != capacity:
+            raise ContractError("Archive plan does not survive strict serialization")
+    except ArchivePlanTooLargeError:
+        raise
+    except ArchivePlanStoreError:
+        raise
+    except (ContractError, ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise ArchivePlanStoreError("Invalid archive plan input") from exc
+    digest = hashlib.sha256(inventory_json.encode("utf-8")).hexdigest()
+    header_json = canonical_json({
         "format": _ARCHIVE_PLAN_FORMAT,
         "plan_schema_version": _ARCHIVE_PLAN_VERSION,
         "batch_id": inventory.batch_id,
-        "inventory": inventory.to_dict(),
-        "scope": scope,
+        "scope": json.loads(scope_json),
+        "inventory_sha256": digest,
+        "inventory_bytes": len(inventory_json.encode("utf-8")),
+        "segment_count": len(segments),
+        "scope_receipt": None if receipt_json is None else json.loads(receipt_json),
     })
+    payload_bytes = (
+        len(header_json.encode("utf-8")) + len(capacity_json.encode("utf-8"))
+        + sum(segment.byte_length for segment in segments)
+    )
+    if payload_bytes > ARCHIVE_PLAN_MAX_BYTES:
+        raise ArchivePlanTooLargeError(inventory.batch_id, payload_bytes)
+    return PreparedArchivePlan(
+        batch_id=inventory.batch_id,
+        inventory=inventory,
+        capacity=capacity,
+        scope_json=scope_json,
+        scope_receipt_json=receipt_json,
+        segments=segments,
+        capacity_json=capacity_json,
+        header_json=header_json,
+        payload_bytes=payload_bytes,
+    )
 
 
-def _decode_scope(value: object, expected_batch_id: str) -> tuple[ArchiveInventory, dict[str, object]]:
-    raw = _strict_object(value, "scope JSON")
+def _decode_scope(
+    conn: sqlite3.Connection, value: object, expected_batch_id: str,
+) -> tuple[ArchiveInventory, dict[str, object], dict[str, object] | None]:
+    raw = _strict_object(value, "scope_json")
     if raw.get("format") != _ARCHIVE_PLAN_FORMAT:
         raise ArchivePlanStoreError("Stored scope JSON is not an archive plan")
-    if raw.get("plan_schema_version") != _ARCHIVE_PLAN_VERSION or type(raw.get("plan_schema_version")) is not int:
+    if (
+        raw.get("plan_schema_version") != _ARCHIVE_PLAN_VERSION
+        or type(raw.get("plan_schema_version")) is not int
+    ):
         raise ArchivePlanStoreError("Unsupported stored archive plan version")
-    if set(raw) != {"format", "plan_schema_version", "batch_id", "inventory", "scope"}:
+    expected_keys = {
+        "format", "plan_schema_version", "batch_id", "scope",
+        "inventory_sha256", "inventory_bytes", "segment_count", "scope_receipt",
+    }
+    if set(raw) != expected_keys:
         raise ArchivePlanStoreError("Stored scope JSON has missing or unknown fields")
-    if raw["batch_id"] != expected_batch_id or not isinstance(raw["scope"], dict):
-        raise ArchivePlanStoreError("Stored scope identity or scope value is invalid")
-    inventory = _inventory(raw["inventory"], expected_batch_id)
-    return inventory, raw["scope"]
+    if (
+        raw["batch_id"] != expected_batch_id
+        or not isinstance(raw["scope"], dict)
+        or not isinstance(raw["inventory_sha256"], str)
+        or type(raw["inventory_bytes"]) is not int
+        or type(raw["segment_count"]) is not int
+        or raw["segment_count"] < 1
+        or (raw["scope_receipt"] is not None and not isinstance(raw["scope_receipt"], dict))
+    ):
+        raise ArchivePlanStoreError("Stored scope identity or bound is invalid")
+    rows = conn.execute(
+        """SELECT segment_index,payload,byte_length FROM archive_plan_segments
+           WHERE batch_id=? ORDER BY segment_index""",
+        (expected_batch_id,),
+    ).fetchall()
+    if len(rows) != raw["segment_count"]:
+        raise ArchivePlanStoreError("Stored plan segment count differs from its header")
+    pieces = []
+    for index, row in enumerate(rows):
+        if tuple(row[:1]) != (index,) or not isinstance(row[1], str):
+            raise ArchivePlanStoreError("Stored plan segments are not contiguous")
+        if len(row[1].encode("utf-8")) != row[2]:
+            raise ArchivePlanStoreError("Stored plan segment byte length differs")
+        pieces.append(row[1])
+    inventory_json = "".join(pieces)
+    if (
+        len(inventory_json.encode("utf-8")) != raw["inventory_bytes"]
+        or hashlib.sha256(inventory_json.encode("utf-8")).hexdigest()
+        != raw["inventory_sha256"]
+    ):
+        raise ArchivePlanStoreError("Stored plan document digest differs")
+    try:
+        inventory = _inventory(json.loads(inventory_json), expected_batch_id)
+    except (ValueError, TypeError, KeyError, ContractError) as exc:
+        raise ArchivePlanStoreError("Stored plan inventory is invalid") from exc
+    scope_receipt = raw["scope_receipt"]
+    if scope_receipt is not None:
+        try:
+            receipt = ScopeReceipt.from_json(canonical_json(scope_receipt))
+            _receipt_json(receipt, inventory)
+        except (ContractError, TypeError, ValueError, UnicodeError) as exc:
+            raise ArchivePlanStoreError("Stored scope receipt is invalid") from exc
+    return inventory, raw["scope"], scope_receipt
 
 
 def _expected_packages(inventory: ArchiveInventory) -> tuple[StoredPackagePlan, ...]:
@@ -409,15 +711,37 @@ def _check_assets(conn: sqlite3.Connection, inventory: ArchiveInventory) -> None
                 "root_id": asset.path.root_id,
                 "relative_path": asset.path.relative_path,
             }),
-            None, "user_selected", content.size_bytes, content.sha256,
+            content.size_bytes, content.sha256,
         )
         row = conn.execute(
-            """SELECT content_key,asset_id,revision,path_key,path_json,artifact_id,
-                      source_kind,size_bytes,sha256 FROM archive_assets WHERE path_key=?""",
-            (asset.path_key,),
+            """SELECT content_key,asset_id,revision,path_key,path_json,size_bytes,sha256,
+                      source_kind,artifact_id FROM archive_assets
+               WHERE asset_id=? AND revision=? AND path_key=?""",
+            (content.asset_id, content.revision, asset.path_key),
         ).fetchone()
-        if row is None or tuple(row) != expected:
+        if row is None or tuple(row[:7]) != expected:
             raise ArchivePlanStoreError("Content/path facts differ from the immutable plan JSON")
+        source_kind, artifact_id = row[7], row[8]
+        if source_kind == "download_receipt":
+            receipt = conn.execute(
+                "SELECT output_ref_json,size,sha256,verification FROM artifacts WHERE artifact_id=?",
+                (artifact_id,),
+            ).fetchone()
+            if artifact_id is None or receipt is None:
+                raise ArchivePlanStoreError("Download receipt asset has no exact artifact")
+            try:
+                receipt_path = PathRef(**json.loads(receipt[0]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ArchivePlanStoreError("Download receipt path is invalid") from exc
+            if (
+                receipt_path.identity_key != asset.path_key
+                or receipt[1] != content.size_bytes
+                or receipt[2] != content.sha256
+                or receipt[3] != "structure_checked"
+            ):
+                raise ArchivePlanStoreError("Download receipt does not prove this exact content")
+        elif artifact_id is not None or source_kind not in {"observed_existing", "user_selected"}:
+            raise ArchivePlanStoreError("Asset source or artifact binding is invalid")
 
 
 def _timestamp(value: object) -> str:
@@ -439,13 +763,14 @@ def _load_in_transaction(conn: sqlite3.Connection, batch_id: str) -> StoredArchi
     protocol, scope_json, capacity_json, state, pause_reason, created_at = row
     if protocol != ARCHIVE_PROTOCOL_VERSION or state != "planned" or pause_reason is not None:
         raise ArchivePlanConflictError("Existing batch is not an unchanged planned archive batch")
-    inventory, scope = _decode_scope(scope_json, batch_id)
-    capacity = _capacity(_strict_object(capacity_json, "capacity JSON"), inventory)
+    inventory, scope, scope_receipt = _decode_scope(conn, scope_json, batch_id)
+    capacity = _capacity(_strict_object(capacity_json, "capacity_json"), inventory)
     stored_packages = _packages(conn, batch_id)
     _check_package_index(stored_packages, _expected_packages(inventory))
     _check_assets(conn, inventory)
     return StoredArchivePlan(
         batch_id, inventory, capacity, scope, _timestamp(created_at), stored_packages,
+        scope_receipt,
     )
 
 
@@ -455,17 +780,18 @@ def _require_connection(conn: object) -> sqlite3.Connection:
     return conn
 
 
-def _require_schema2(conn: sqlite3.Connection) -> None:
+def _require_schema3(conn: sqlite3.Connection) -> None:
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
     if "schema_meta" not in tables or not ARCHIVE_TABLES <= tables:
-        raise ArchivePlanStoreError("Archive plan persistence requires the complete schema 2")
+        raise ArchivePlanStoreError("Archive plan persistence requires the complete schema 3")
     metadata = dict(conn.execute('SELECT "key","value" FROM schema_meta'))
     if metadata.get("format") != "jpgpng-library":
         raise ArchivePlanStoreError("Connection belongs to a different product")
     if metadata.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
-        raise ArchivePlanStoreError("Unsupported archive schema version; exactly schema 2 is required")
+        raise ArchivePlanStoreError("Unsupported archive schema version; exactly schema 3 is required")
+    _check_existing_objects(conn)
 
 
 @contextmanager
@@ -484,41 +810,143 @@ def _rollback(conn: sqlite3.Connection) -> None:
         conn.execute("ROLLBACK")
 
 
+def save_prepared_plan_in_transaction(
+    conn: sqlite3.Connection, prepared: PreparedArchivePlan,
+) -> ArchivePlanSaveResult:
+    """Execute only SQL inside a transaction owned by the caller or the wrapper."""
+    conn = _require_connection(conn)
+    if not isinstance(prepared, PreparedArchivePlan):
+        raise ArchivePlanStoreError("Expected a prepared archive plan")
+    if not conn.in_transaction:
+        raise ArchivePlanStoreError("Prepared plan save requires a caller-owned transaction")
+    _require_schema3(conn)
+    existing = conn.execute(
+        "SELECT 1 FROM archive_batches WHERE batch_id=?", (prepared.batch_id,),
+    ).fetchone()
+    if existing is not None:
+        stored = _load_in_transaction(conn, prepared.batch_id)
+        stored_receipt = (
+            None if stored.scope_receipt is None else canonical_json(stored.scope_receipt)
+        )
+        if (
+            stored.inventory != prepared.inventory
+            or stored.capacity != prepared.capacity
+            or stored.scope != prepared.scope
+            or stored_receipt != prepared.scope_receipt_json
+        ):
+            raise ArchivePlanConflictError("Batch ID already contains a different immutable plan")
+        return ArchivePlanSaveResult(stored, replayed=True)
+
+    expected_packages = _expected_packages(prepared.inventory)
+    package_ids = [package.package_id for package in expected_packages]
+    if package_ids:
+        placeholders = ",".join("?" for _ in package_ids)
+        collision = conn.execute(
+            "SELECT package_id FROM archive_packages WHERE package_id IN (" + placeholders + ") LIMIT 1",
+            package_ids,
+        ).fetchone()
+        if collision is not None:
+            raise ArchivePlanConflictError("A historical package ID cannot be overwritten or reused")
+
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO archive_batches (
+               batch_id,protocol_version,scope_json,capacity_json,state,pause_reason,created_at
+           ) VALUES (?,?,?,?,'planned',NULL,?)""",
+        (
+            prepared.batch_id, ARCHIVE_PROTOCOL_VERSION, prepared.header_json,
+            prepared.capacity_json, created_at,
+        ),
+    )
+    conn.executemany(
+        """INSERT INTO archive_plan_segments (
+               batch_id,segment_index,payload,byte_length
+           ) VALUES (?,?,?,?)""",
+        [
+            (prepared.batch_id, segment.index, segment.payload, segment.byte_length)
+            for segment in prepared.segments
+        ],
+    )
+    for asset in prepared.inventory.assets:
+        content = asset.content
+        existing_asset = conn.execute(
+            """SELECT 1 FROM archive_assets
+               WHERE asset_id=? AND revision=? AND path_key=? AND content_key=?
+                 AND path_json=? AND size_bytes=? AND sha256 IS ?""",
+            (
+                content.asset_id, content.revision, asset.path_key, _content_key(content),
+                canonical_json({
+                    "kind": asset.path.kind, "root_id": asset.path.root_id,
+                    "relative_path": asset.path.relative_path,
+                }),
+                content.size_bytes, content.sha256,
+            ),
+        ).fetchone()
+        if existing_asset is None:
+            ensure_archive_asset(
+                conn, content, asset.path, source_kind="user_selected", artifact_id=None,
+            )
+        current_binding = conn.execute(
+            "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
+            (asset.path_key,),
+        ).fetchone()
+        if current_binding is None:
+            bind_archive_path(conn, content, asset.path, bound_at=created_at)
+        else:
+            current_content = conn.execute(
+                """SELECT content_key,asset_id,revision FROM archive_assets
+                   WHERE asset_id=? AND revision=? AND path_key=?""",
+                (current_binding[0], current_binding[1], asset.path_key),
+            ).fetchone()
+            if current_content is None:
+                raise ArchivePlanConflictError("Current path binding has no exact asset")
+            new_key = _content_key(content)
+            if current_content[0] != new_key:
+                if (
+                    current_content[1] != content.asset_id
+                    or current_content[2] >= content.revision
+                ):
+                    raise ArchivePlanConflictError(
+                        "Path binding cannot move to a different asset or an older revision"
+                    )
+                bind_archive_path(
+                    conn, content, asset.path, bound_at=created_at,
+                    expected_content_key=current_content[0],
+                )
+    conn.executemany(
+        """INSERT INTO archive_packages (
+               package_id,batch_id,package_revision,format,tool_version,key_ref,
+               size_bytes,sha256,state
+           ) VALUES (?,?,?,?,?,?,?,?,?)""",
+        [(
+            package.package_id, package.batch_id, package.package_revision, package.format,
+            package.tool_version, package.key_ref, package.size_bytes, package.sha256, package.state,
+        ) for package in expected_packages],
+    )
+    stored = _load_in_transaction(conn, prepared.batch_id)
+    stored_receipt = None if stored.scope_receipt is None else canonical_json(stored.scope_receipt)
+    if (
+        (stored.inventory, stored.capacity, stored.scope, stored_receipt)
+        != (
+            prepared.inventory, prepared.capacity, prepared.scope,
+            prepared.scope_receipt_json,
+        )
+    ):
+        raise ArchivePlanStoreError("Persisted archive plan failed read-back verification")
+    return ArchivePlanSaveResult(stored, replayed=False)
+
+
 def save_archive_plan(
     conn: sqlite3.Connection,
     inventory: ArchiveInventory,
     capacity: CapacityPlan,
     *,
     scope: dict[str, object] | None = None,
+    receipt: ScopeReceipt | None = None,
 ) -> ArchivePlanSaveResult:
-    """Atomically insert or exactly replay one plan on a caller-owned schema-2 copy.
-
-    The connection must have foreign_keys=ON, query_only=OFF and no open transaction.
-    This function owns and commits/rolls back only the transaction it starts.  Package
-    members stay in scope_json: archive_members is reserved for sealed facts.
-    """
+    """Prepare outside any transaction, then save on this standalone connection."""
     conn = _require_connection(conn)
-    if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
-        raise ArchivePlanStoreError("Expected ArchiveInventory and CapacityPlan")
-    if scope is None:
-        scope = {"kind": "explicit_inventory"}
-    if not isinstance(scope, dict):
-        raise ArchivePlanStoreError("Archive plan scope must be a JSON object")
-    try:
-        scope_json = _encode_scope(inventory, scope)
-        # Round-trip caller objects too; dataclass construction alone is not validation.
-        checked_inventory, checked_scope = _decode_scope(scope_json, inventory.batch_id)
-        capacity_json = canonical_json(capacity.to_dict())
-        checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
-        if checked_inventory != inventory or checked_capacity != capacity or checked_scope != scope:
-            raise ContractError("Archive plan does not survive strict serialization")
-        if capacity.batch_id != inventory.batch_id:
-            raise ContractError("Capacity and inventory batch identities differ")
-    except ArchivePlanStoreError:
-        raise
-    except (ContractError, ValueError, TypeError, KeyError, OverflowError) as exc:
-        raise ArchivePlanStoreError("Invalid archive plan input") from exc
-
+    prepared = prepare_archive_plan(inventory, capacity, scope=scope, receipt=receipt)
     try:
         if conn.in_transaction:
             raise ArchivePlanStoreError("Archive plan save requires ownership of a new transaction")
@@ -528,69 +956,9 @@ def save_archive_plan(
             raise ArchivePlanStoreError("Archive plan save requires a writable explicit connection")
         conn.execute("BEGIN IMMEDIATE")
         try:
-            _require_schema2(conn)
-            try:
-                validate_archive_facts(conn)
-            except ArchiveSchemaError as exc:
-                raise ArchivePlanStoreError(
-                    f"Stored archive facts failed schema validation: {exc}"
-                ) from exc
-            existing = conn.execute(
-                "SELECT 1 FROM archive_batches WHERE batch_id=?", (inventory.batch_id,),
-            ).fetchone()
-            if existing is not None:
-                stored = _load_in_transaction(conn, inventory.batch_id)
-                if (stored.inventory != checked_inventory or stored.capacity != checked_capacity
-                        or stored.scope != checked_scope):
-                    raise ArchivePlanConflictError("Batch ID already contains a different immutable plan")
-                conn.execute("COMMIT")
-                return ArchivePlanSaveResult(stored, replayed=True)
-
-            expected_packages = _expected_packages(inventory)
-            package_ids = [package.package_id for package in expected_packages]
-            if package_ids:
-                placeholders = ",".join("?" for _ in package_ids)
-                collision = conn.execute(
-                    "SELECT package_id FROM archive_packages WHERE package_id IN (" + placeholders + ") LIMIT 1",
-                    package_ids,
-                ).fetchone()
-                if collision is not None:
-                    raise ArchivePlanConflictError("A historical package ID cannot be overwritten or reused")
-
-            created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            conn.execute(
-                """INSERT INTO archive_batches (
-                       batch_id,protocol_version,scope_json,capacity_json,state,pause_reason,created_at
-                   ) VALUES (?,?,?,?,'planned',NULL,?)""",
-                (inventory.batch_id, ARCHIVE_PROTOCOL_VERSION, scope_json, capacity_json, created_at),
-            )
-            for asset in inventory.assets:
-                ensure_archive_asset(
-                    conn, asset.content, asset.path, source_kind="user_selected", artifact_id=None,
-                )
-            conn.executemany(
-                """INSERT INTO archive_packages (
-                       package_id,batch_id,package_revision,format,tool_version,key_ref,
-                       size_bytes,sha256,state
-                   ) VALUES (?,?,?,?,?,?,?,?,?)""",
-                [(
-                    package.package_id, package.batch_id, package.package_revision, package.format,
-                    package.tool_version, package.key_ref, package.size_bytes, package.sha256, package.state,
-                ) for package in expected_packages],
-            )
-            try:
-                validate_archive_facts(conn)
-            except ArchiveSchemaError as exc:
-                raise ArchivePlanStoreError(
-                    f"Persisted archive facts failed schema validation: {exc}"
-                ) from exc
-            stored = _load_in_transaction(conn, inventory.batch_id)
-            if (stored.inventory, stored.capacity, stored.scope) != (
-                checked_inventory, checked_capacity, checked_scope,
-            ):
-                raise ArchivePlanStoreError("Persisted archive plan failed read-back verification")
+            result = save_prepared_plan_in_transaction(conn, prepared)
             conn.execute("COMMIT")
-            return ArchivePlanSaveResult(stored, replayed=False)
+            return result
         except BaseException:
             _rollback(conn)
             raise
@@ -598,6 +966,19 @@ def save_archive_plan(
         raise
     except (sqlite3.Error, ContractError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         raise ArchivePlanStoreError("Archive plan save failed; its transaction was rolled back") from exc
+
+
+def load_archive_plan_in_transaction(
+    conn: sqlite3.Connection, batch_id: str,
+) -> StoredArchivePlan:
+    """Reload one plan inside a caller-owned transaction without nested BEGIN/COMMIT."""
+    conn = _require_connection(conn)
+    if not isinstance(batch_id, str) or _BATCH_ID.fullmatch(batch_id) is None:
+        raise ArchivePlanStoreError("Invalid archive batch ID")
+    if not conn.in_transaction:
+        raise ArchivePlanStoreError("Archive plan reload requires a caller-owned transaction")
+    _require_schema3(conn)
+    return _load_in_transaction(conn, batch_id)
 
 
 def load_archive_plan(conn: sqlite3.Connection, batch_id: str) -> StoredArchivePlan:
@@ -619,13 +1000,7 @@ def load_archive_plan(conn: sqlite3.Connection, batch_id: str) -> StoredArchiveP
             conn.execute("PRAGMA query_only=ON")
             conn.execute("BEGIN")
             try:
-                _require_schema2(conn)
-                try:
-                    validate_archive_facts(conn)
-                except ArchiveSchemaError as exc:
-                    raise ArchivePlanStoreError(
-                    f"Stored archive facts failed schema validation: {exc}"
-                ) from exc
+                _require_schema3(conn)
                 return _load_in_transaction(conn, batch_id)
             except ArchivePlanStoreError:
                 raise

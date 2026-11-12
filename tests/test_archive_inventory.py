@@ -11,6 +11,7 @@ from core.archive_inventory import (
     InventoryIssueCode as Issue, InventoryPolicy, InventoryStatus,
     build_archive_inventory, plan_archive_capacity,
 )
+from core.local_observation import FileIdentity
 from core.preservation_policy import ContentVersion
 from core.task_contracts import ContractError, PathRef
 
@@ -59,6 +60,20 @@ def test_input_and_work_order_do_not_change_identity_packages_or_json():
     assert expected.split_work_ids == ()
 
 
+def test_nfc_nfd_same_content_are_two_paths_not_a_duplicate():
+    nfc = entry("library/\u00e9.png", asset_id="asset-1", page=0)
+    nfd = entry("library/e\u0301.png", asset_id="asset-1", page=0)
+    result = inventory(group("work-1", nfc, nfd))
+    assert result.scope_complete
+    assert result.duplicate_entry_count == 0
+    assert result.path_count == 2
+    assert result.asset_count == 1
+    assert {asset.path.relative_path for asset in result.assets} == {
+        "library/\u00e9.png", "library/e\u0301.png",
+    }
+    assert len({asset.path_key for asset in result.assets}) == 2
+
+
 def test_exact_duplicate_and_windows_aliases_collapse_to_one_path_identity():
     original = entry("library/Artist/1.PNG", page=0)
     aliases = [
@@ -73,6 +88,59 @@ def test_exact_duplicate_and_windows_aliases_collapse_to_one_path_identity():
     assert result.path_count == result.asset_count == 1
     assert result.member_payload_bytes == 100
     assert len(result.packages[0].members) == 1
+
+
+def test_identity_key_separates_download_casefold_from_archive_spelling():
+    nfc = PathRef(relative_path="library/\u00e9.png")
+    nfd = PathRef(relative_path="library/e\u0301.png")
+    assert nfc.target_key != nfd.target_key  # casefold does not normalize composition
+    assert nfc.identity_key != nfd.identity_key  # archive keeps spelling
+    upper = PathRef(relative_path="library/A.PNG")
+    lower = PathRef(relative_path="library/a.png")
+    assert upper.target_key == lower.target_key
+    assert upper.identity_key == lower.identity_key  # ASCII aliases fold
+    sharp = PathRef(relative_path="library/stra\u00dfe.png")
+    double_s = PathRef(relative_path="library/strasse.png")
+    assert sharp.target_key == double_s.target_key  # casefold expands ß
+    assert sharp.identity_key != double_s.identity_key  # archive preserves exact
+
+
+def test_invalid_physical_identity_fails_as_contract_error():
+    with pytest.raises(ContractError):
+        ArchiveEntry(content(), PathRef(relative_path="library/a.png"), 0,
+                     {"device": 1, "file_index": 2})
+
+
+def test_conflicting_physical_identity_for_one_path_is_order_independent():
+    content = ContentVersion("same", 1, 10, "a" * 64)
+    path = PathRef(relative_path="library/a.bin")
+    first = ArchiveEntry(content, path, 0, FileIdentity(1, 1))
+    second = ArchiveEntry(content, path, 0, FileIdentity(2, 2))
+    forward = inventory(group("work-1", first, second))
+    reverse = inventory(group("work-1", second, first))
+    assert not forward.scope_complete and not reverse.scope_complete
+    assert not forward.assets and not reverse.assets
+    assert {issue.code for issue in forward.issues} == {Issue.PATH_COLLISION}
+    assert {issue.code for issue in reverse.issues} == {Issue.PATH_COLLISION}
+    assert forward.physical_member_payload_bytes == reverse.physical_member_payload_bytes == 0
+
+
+def test_hardlink_alias_source_capacity_counts_once():
+    identity = FileIdentity(7, 11)
+    content = ContentVersion("hardlink-asset", 1, 100, "a" * 64)
+    result = inventory(group(
+        "work-1",
+        ArchiveEntry(content, PathRef(relative_path="library/a.png"), 0, identity),
+        ArchiveEntry(content, PathRef(relative_path="library/link.png"), 0, identity),
+    ))
+    assert result.path_count == 2
+    assert result.member_payload_bytes == 200
+    assert result.physical_member_payload_bytes == 100
+    plan = plan_archive_capacity(
+        result, available_additional_bytes=None,
+        policy=CapacityPolicy(control_bytes=0, safety_margin_bytes=0),
+    )
+    assert plan.source_member_bytes_excluded == 100
 
 
 def test_identical_bytes_at_two_paths_keep_both_members_but_report_unique_content():

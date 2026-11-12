@@ -57,3 +57,9 @@
 - [审计证据批次](../../.runtime/jpgpng_a1_audit_20261111_01/)保存源码摘要/快照、合成反例和失败报告，不能当作通过回执。
 - [writer 草稿批次](../../.runtime/jpgpng_a1_writer_compat_20261111_01/README.md)尚未完成；改前副本和失败 XML 保留，修复应新建批次并引用它。
 - 2026-11-11 的 foundation/scope_adapter 等完成批次保留原报告与检查点；旧通过数量只对应当时源码。当前审计未搬动模块，也未清理测试现场或业务数据。
+
+## A1 修复后复审接续
+
+最新报告仍统一从[联合实施](optimization/IMPLEMENTATION.md)进入，[复审三份材料](audits/2026-11-12-a1-recheck/README.md)集中结论、问题和开发步骤。本轮调查集中工作区上级 `.runtime/jpgpng_a1_reaudit_20261112_01/`，不在源码目录新增临时脚本。
+
+前序修复出现两级同名 runtime：项目内 `.runtime/jpgpng_a1_repair_20261112_01/` 保存原 XML/validation/检查点；工作区上级同名目录保存部分合成测试现场。两处均补 README 定位，保留原位，不将其合并覆盖。新批次一律使用工作区上级 runtime，准确记录运行 cwd 与相对路径。

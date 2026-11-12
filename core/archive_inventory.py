@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 
+from core.local_observation import FileIdentity
 from core.preservation_policy import ContentVersion
 from core.task_contracts import ContractError, PathRef, canonical_json
 
@@ -60,6 +61,17 @@ def _token(value: object, name: str) -> str:
     return value
 
 
+def _plain(value):
+    """Convert dataclass enums to JSON scalars without a full JSON round-trip."""
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, dict):
+        return {key: _plain(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(child) for child in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ArchiveEntry:
     """One path observation; None denotes unknown content identity/size."""
@@ -67,12 +79,15 @@ class ArchiveEntry:
     content: ContentVersion | None
     path: PathRef | str
     page_index: int | None = None
+    physical_identity: FileIdentity | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
         if self.content is not None and not isinstance(self.content, ContentVersion):
             raise ContractError("Invalid archive content")
         if not isinstance(self.path, (PathRef, str)):
             raise ContractError("Invalid archive path")
+        if self.physical_identity is not None and not isinstance(self.physical_identity, FileIdentity):
+            raise ContractError("Invalid archive physical identity")
         if self.page_index is not None:
             _integer(self.page_index, "archive page index")
             if self.page_index > 9999:
@@ -126,6 +141,7 @@ class InventoryAsset:
     page_index: int | None
     path_key: str
     content_key: str
+    physical_identity: FileIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +166,7 @@ class ArchiveInventory:
     path_count: int
     unique_content_count: int
     member_payload_bytes: int
+    physical_member_payload_bytes: int
     unique_content_bytes: int
     assets: tuple[InventoryAsset, ...]
     packages: tuple[PackagePlan, ...]
@@ -161,7 +178,7 @@ class ArchiveInventory:
     schema_version: int = ARCHIVE_INVENTORY_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
-        return json.loads(json.dumps(asdict(self)))
+        return _plain(asdict(self))
 
     def to_json(self) -> str:
         return canonical_json(self.to_dict())
@@ -223,7 +240,7 @@ class CapacityPlan:
     schema_version: int = CAPACITY_PLAN_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
-        return json.loads(json.dumps(asdict(self)))
+        return _plain(asdict(self))
 
     def to_json(self) -> str:
         return canonical_json(self.to_dict())
@@ -236,6 +253,7 @@ class _RawEntry:
     raw_path: str
     work_id: str
     page_index: int | None
+    physical_identity: FileIdentity | None
 
 
 def _content_key(content: ContentVersion) -> str:
@@ -244,19 +262,22 @@ def _content_key(content: ContentVersion) -> str:
 
 def _raw_identity(entry: _RawEntry) -> tuple:
     path_identity = (
-        entry.path.target_key if entry.path is not None
+        entry.path.identity_key if entry.path is not None
         else "invalid:" + entry.raw_path.replace("\\", "/").casefold()
     )
-    return path_identity, entry.work_id, entry.page_index, entry.content
+    return path_identity, entry.work_id, entry.page_index, entry.physical_identity, entry.content
 
 
 def _raw_sort_key(entry: _RawEntry) -> tuple:
     content = entry.content
     return (
         entry.work_id,
-        entry.path.target_key if entry.path is not None else "",
+        entry.path.identity_key if entry.path is not None else "",
         entry.raw_path.casefold(), entry.raw_path,
         -1 if entry.page_index is None else entry.page_index,
+        (-1, -1) if entry.physical_identity is None else (
+            entry.physical_identity.device, entry.physical_identity.file_index,
+        ),
         "" if content is None else content.asset_id,
         -1 if content is None else content.revision,
         -1 if content is None else content.size_bytes,
@@ -270,7 +291,7 @@ def _issue(
     return InventoryIssue(
         code=code,
         message=message,
-        path_key=entry.path.target_key if entry.path is not None else None,
+        path_key=entry.path.identity_key if entry.path is not None else None,
         path=entry.path.relative_path if entry.path is not None else entry.raw_path,
         asset_id=entry.content.asset_id if entry.content is not None else None,
         work_id=entry.work_id,
@@ -402,6 +423,7 @@ def build_archive_inventory(
                     normalized = None
             raw_entries.append(_RawEntry(
                 entry.content, normalized, raw_path, group.work_id, entry.page_index,
+                entry.physical_identity,
             ))
 
     # Exact repeat observations collapse. Case/slash aliases of one Windows
@@ -443,8 +465,9 @@ def build_archive_inventory(
             path=entry.path,
             work_id=entry.work_id,
             page_index=entry.page_index,
-            path_key=entry.path.target_key,
+            path_key=entry.path.identity_key,
             content_key=_content_key(entry.content),
+            physical_identity=entry.physical_identity,
         ))
 
     by_path: dict[str, list[InventoryAsset]] = {}
@@ -465,9 +488,11 @@ def build_archive_inventory(
         key for key, items in by_page.items()
         if len({item.content_key for item in items}) > 1
     }
-    raw_by_path_key = {entry.path.target_key: entry for entry in ordered_raw if entry.path is not None}
+    raw_by_path_key = {entry.path.identity_key: entry for entry in ordered_raw if entry.path is not None}
 
     assets = []
+    physical_identities: set[FileIdentity] = set()
+    physical_member_bytes = 0
     for asset in candidates:
         raw = raw_by_path_key[asset.path_key]
         asset_key = (asset.content.asset_id, asset.content.revision)
@@ -492,6 +517,11 @@ def build_archive_inventory(
             ))
         else:
             assets.append(asset)
+            identity = raw.physical_identity
+            if identity is None or identity not in physical_identities:
+                if identity is not None:
+                    physical_identities.add(identity)
+                physical_member_bytes += asset.content.size_bytes
 
     ordered_assets = tuple(sorted(assets, key=_asset_sort_key))
     ordered_issues = tuple(sorted(issues, key=_issue_sort_key))
@@ -508,6 +538,8 @@ def build_archive_inventory(
     # neighbours must not make a partial result look like the complete set.
     counted_assets = ordered_assets if scope_complete else ()
     member_bytes = sum(asset.content.size_bytes for asset in counted_assets)
+    if not scope_complete:
+        physical_member_bytes = 0
     unique_contents = {asset.content_key: asset.content.size_bytes for asset in counted_assets}
     adjustment_codes = []
     if not scope_complete:
@@ -526,6 +558,7 @@ def build_archive_inventory(
         path_count=len(counted_assets),
         unique_content_count=len(unique_contents),
         member_payload_bytes=member_bytes,
+        physical_member_payload_bytes=physical_member_bytes,
         unique_content_bytes=sum(unique_contents.values()),
         assets=ordered_assets,
         packages=packages,
@@ -575,7 +608,7 @@ def plan_archive_capacity(
             status=CapacityStatus.NEEDS_ADJUSTMENT,
             scope_complete=False,
             staging_mode=policy.staging_mode,
-            source_member_bytes_excluded=inventory.member_payload_bytes,
+            source_member_bytes_excluded=inventory.physical_member_payload_bytes,
             recovery_estimate_basis_points=policy.recovery_estimate_basis_points,
             peak_additional_bytes=None,
             available_additional_bytes=available_additional_bytes,
@@ -633,7 +666,7 @@ def plan_archive_capacity(
         status=status,
         scope_complete=True,
         staging_mode=policy.staging_mode,
-        source_member_bytes_excluded=payload,
+        source_member_bytes_excluded=inventory.physical_member_payload_bytes,
         recovery_estimate_basis_points=policy.recovery_estimate_basis_points,
         peak_additional_bytes=peak,
         available_additional_bytes=available_additional_bytes,
