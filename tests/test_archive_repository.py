@@ -129,6 +129,22 @@ def test_inherited_single_writer_saves_reloads_and_preserves_history(tmp_path):
             )
 
 
+def test_repository_root_revision_gate_is_wired(tmp_path):
+    path = tmp_path / "library.sqlite3"
+    migrated(path)
+    with open_repository(path) as repository:
+        inventory, capacity = make_plan()
+        receipt = make_receipt(inventory)
+        with pytest.raises(ArchivePlanStoreError, match="root mapping revision|root revision"):
+            repository.save_archive_plan(
+                inventory, capacity, receipt=receipt, root_revision=2,
+            )
+        saved = repository.save_archive_plan(
+            inventory, capacity, receipt=receipt, root_revision=1,
+        )
+        assert repository.load_archive_plan(inventory.batch_id) == saved.plan
+
+
 def test_concurrent_first_save_is_serialized_and_different_plan_cannot_replay(tmp_path):
     path = tmp_path / "library.sqlite3"
     migrated(path)

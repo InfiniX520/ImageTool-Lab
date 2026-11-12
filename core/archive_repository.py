@@ -109,6 +109,7 @@ class ArchiveLibraryRepository(LibraryRepository):
         self, inventory: ArchiveInventory, capacity: CapacityPlan, *,
         scope: dict[str, object] | None = None,
         receipt: ScopeReceipt | None = None,
+        root_revision: int | None = None,
     ) -> ArchivePlanSaveResult:
         """Enqueue one immutable plan; file hashing never enters this transaction."""
         if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
@@ -120,6 +121,7 @@ class ArchiveLibraryRepository(LibraryRepository):
         try:
             prepared = prepare_archive_plan(
                 inventory, capacity, scope=scope, receipt=receipt,
+                root_revision=root_revision,
             )
         except ContractError as exc:
             raise ArchiveLibraryError("Archive plan input was rejected") from exc
