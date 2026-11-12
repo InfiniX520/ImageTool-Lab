@@ -346,23 +346,25 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-12",
-      "phase": "A1 repair independently re-audited; boundary gaps open",
-      "status": "offline_f1_f6_complete_final_review_pending_not_production_ready",
+      "phase": "A1 latest implementation independently audited at 705a990",
+      "status": "independent_audit_eight_open_four_p1_four_p2_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "Final independent audit on HEAD f516bb1; close FR-02/03/04/05, rerun F5 2k on v2; production integration remains gated.",
+      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-A1-RECHECK-FIX-20261112-01",
-      "foundation": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
-      "evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
+      "latest_batch": "JPGPNG-A1-FINALAUDIT-20261112-01",
+      "foundation": "docs/audits/2026-11-12-a1-final/DEVELOPMENT_GUIDE.md",
+      "evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
       "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
-      "unfinished_draft": "AR2-01 through AR2-08; no public require_receipt=False parameter exists",
-      "latest_repair_evidence": ".runtime/jpgpng_a1_repair_20261112_01/validation.json"
+      "unfinished_draft": "AR3-01..06,09,10 open; AR3-07/08 repaired and independently closed",
+      "latest_repair_evidence": ".runtime/jpgpng_a1_repair_20261112_01/validation.json",
+      "latest_overview": "docs/audits/2026-11-12-a1-final/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json"
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
       "date": "2026-11-11",
-      "status": "offline_f1_f6_complete_final_review_pending_not_production_ready",
+      "status": "independent_audit_eight_open_four_p1_four_p2_not_production_ready",
       "overview": "docs/archiving/README.md",
       "design": "docs/archiving/DESIGN.md",
       "acceptance": "docs/archiving/ACCEPTANCE.md",
@@ -398,7 +400,7 @@
         "A5": "not_started",
         "A6": "not_started"
       },
-      "next_step": "Final independent audit on HEAD f516bb1; close FR-02/03/04/05, rerun F5 2k on v2; production integration remains gated.",
+      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet.",
       "user_action_now": "No retrieval, password or account access needed",
       "later_user_action": "A4 upload and retrieve generated harmless test packages, approximately several hundred MiB to 2 GiB",
       "gates": [
@@ -408,17 +410,17 @@
         "Precise file identity and explicit batch release only after evidence gates",
         "Register archive_store as protected business data before creating it"
       ],
-      "scope_note": "Offline repair batch passed focused tests; production ArchiveLibraryRepository enforces ScopeReceipt, low-level synthetic compatibility and PathRef downstream collision remain open. No real archive/readback/release.",
-      "current_foundation": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
-      "current_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
-      "latest_batch": "JPGPNG-A1-RECHECK-FIX-20261112-01",
-      "latest_overview": "docs/audits/2026-11-12-a1-recheck/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json"
+      "scope_note": "Receipt v2/plan v3, pure observed-plan converter and isolated writer available; four identity/transaction/handoff P1 issues open. No production migration or archive/readback/release.",
+      "current_foundation": "docs/audits/2026-11-12-a1-final/DEVELOPMENT_GUIDE.md",
+      "current_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
+      "latest_batch": "JPGPNG-A1-FINALAUDIT-20261112-01",
+      "latest_overview": "docs/audits/2026-11-12-a1-final/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json"
     },
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
       "date": "2026-11-11",
-      "status": "offline_f1_f6_complete_final_review_pending_not_production_ready",
+      "status": "independent_audit_eight_open_four_p1_four_p2_not_production_ready",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
       "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
@@ -451,10 +453,11 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-A1-RECHECK-FIX-20261112-01",
-      "latest_overview": "docs/audits/2026-11-12-a1-recheck/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
-      "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_implementation_audit"
+      "latest_batch": "JPGPNG-A1-FINALAUDIT-20261112-01",
+      "latest_overview": "docs/audits/2026-11-12-a1-final/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
+      "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_implementation_audit",
+      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet."
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
@@ -548,6 +551,44 @@
       "product_source_changed": false,
       "product_ready": false,
       "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated."
+    },
+    "a1_finalaudit": {
+      "id": "JPGPNG-A1-FINALAUDIT-20261112-01",
+      "date": "2026-11-12",
+      "status": "completed_scoped_to_705a990_product_findings_open",
+      "audited_commit": "705a99081cbf89e84033280c5f6b5930c7e08b1f",
+      "overview": "docs/audits/2026-11-12-a1-final/README.md",
+      "findings": "docs/audits/2026-11-12-a1-final/FINDINGS.md",
+      "guide": "docs/audits/2026-11-12-a1-final/DEVELOPMENT_GUIDE.md",
+      "evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
+      "full": {
+        "total": 1391,
+        "passed": 1388,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 3,
+        "report": "../.runtime/jpgpng_a1_finalaudit_20261112_01/latest_full02.xml"
+      },
+      "earlier_attempt": {
+        "passed": 1387,
+        "failed": 1,
+        "errors": 0,
+        "skipped": 3,
+        "note": "log view 8ms timing-dependent assertion; report retained"
+      },
+      "findings_open": {
+        "P1": 4,
+        "P2": 4,
+        "total": 8
+      },
+      "closed_this_audit": [
+        "AR3-07",
+        "AR3-08"
+      ],
+      "source_files": 183,
+      "product_source_changed_by_auditor": false,
+      "product_ready": false,
+      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet."
     }
   }
 }

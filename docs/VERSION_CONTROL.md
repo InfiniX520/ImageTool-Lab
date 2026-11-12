@@ -1,5 +1,7 @@
 # 版本留档与恢复
 
+**当前审计补充（2026-11-12）**：[705a990 后续实现审计](audits/2026-11-12-a1-final/README.md)已形成。下面两个早期标签继续保留，不是最新稳定发布；新开发先读当前联合入口及本轮 N0–N6。
+
 更新日期：2026-11-12。仓库：[InfiniX520/ImageTool-Lab](https://github.com/InfiniX520/ImageTool-Lab)，当前为用户自己的私有 GitHub 仓库。继续使用现有 origin 和登录，不改变仓库可见性。
 
 ## 当前检查点

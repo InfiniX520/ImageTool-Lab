@@ -1259,6 +1259,23 @@
       "overview": "docs/audits/2026-11-12-a1-recheck/README.md",
       "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated.",
       "git_work_branch": "audit/a1-recheck-20261112"
+    },
+    {
+      "session_date": "2026-11-12",
+      "id": "JPGPNG-A1-FINALAUDIT-20261112-01",
+      "summary": "独立审计后续 F1–F6/计划 v3 与 observed-plan 新入口；8 项开放、2 项修复关闭，详细 N0–N6 与三并发交接规范。",
+      "audited_commit": "705a99081cbf89e84033280c5f6b5930c7e08b1f",
+      "product_source_changed": false,
+      "tests": {
+        "full_passed": 1388,
+        "skipped": 3,
+        "first_attempt_failures": 1,
+        "first_attempt_note": "LogView real 8ms deadline; standalone 17 passed and full repeat green"
+      },
+      "evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
+      "report": "docs/audits/2026-11-12-a1-final/README.md",
+      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet.",
+      "business_data_changed": false
     }
   ]
 }
