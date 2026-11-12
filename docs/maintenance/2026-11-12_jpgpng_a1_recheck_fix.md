@@ -48,6 +48,18 @@
 - 繁忙目录可能 `directory_changed`；名称索引超限无降级；单次阻塞 OS 调用不可中断。
 - 未做真实图库、RSS、2,000 文件整链（F5）、崩溃/WAL。
 
+### F1/F2 独立复核追加（已转 F3）
+
+- **R1/P2**：全库审计只判断 receipt 非 null/只对 planned，load 则校验完整 receipt、根、段、摘要；审计与 load 不是同一协议。migrate_archive_copy 对 schema-3 源依赖该审计，迁移前校验不足。
+- **R2/P2**：prepare 允许 8 MiB plan header，审计 `_stored_json` 只允许 1 MiB；合法 1.5 MB scope 计划 save/load 成功但 audit 失败，schema-3 迁移可能永久变红。必须统一预算。
+- **R3/P2**：段读取先物化 payload 再检查 1 MiB/8 MiB；9 MiB 行在拒绝前已分配。应先查 `length(CAST(payload AS BLOB))`/计数。
+- **R4/P2**：receipt 与清单只有单向 snapshot⇒scope_complete；子批 receipt + 完整清单、完整 receipt + 不完整清单可互相矛盾。
+- **R5/P3**：资产校验未钉 source_kind，`observed_existing` 可改成 `user_selected` 仍通过；`output_ref_json` 未走严格 JSON。
+- **R6/P3**：receipt MAC 从不校验；snapshot_id/digest/root_revision 无对照物；不能把“凭据验证”说成“内容已验证”。
+- **R7/P3**：非法 `created_at` 在独立 load 被包装，仓库路径可能逃逸裸 ValueError。
+- **R8/P3**：9,000 条目上限只在 prepare，读取端未检查。
+- **R9/P3**：读取端不查 path bindings，旧计划仍可读；符合设计，但下游只能以计划内资产为准。
+
 ### F4 独立复审追加（pre-existing，已转 F3 修复）
 
 - P1：枚举期间父目录出现无关新条目被误判 `root_changed`、0 条目；祖先链不应比较完整 NodeState。
