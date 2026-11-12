@@ -111,7 +111,8 @@ root_id = root_id.casefold()  # 根 ID 注册契约只允许 ASCII 标识
 - NFC/NFD 的不同非 ASCII 拼写仍不同；
 - `straße` 与 `strasse` 仍不同；
 - 原始 `relative_path` 保留，身份键只用于比较，不用于显示/恢复。
-- 生产 `PathRef.target_key` 不直接改成同一规则；先做归档边界测试和影响分析。若后续统一，必须单独回归下载主线。
+- 生产 `PathRef.target_key` 不直接改成同一规则；本次只改 `PathRef.identity_key`，并增加“`target_key` 未变”的回归测试。若后续统一，必须单独回归下载主线。
+- 2026-11-12 F3 实现明确授权修改 `core/task_contracts.py` 的 `identity_key` 属性和相应测试；这是归档专用属性，不属于下载主线的 `target_key` 契约。
 
 ## 6. 测试矩阵
 
