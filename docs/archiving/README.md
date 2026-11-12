@@ -35,6 +35,7 @@
 | [ACCEPTANCE.md](ACCEPTANCE.md) | 离线异常测试、真实小样、工具核验、恢复演练、发布门槛 |
 | [IMPLEMENTATION_LOG.md](IMPLEMENTATION_LOG.md) | 归档专项接续、阶段台账和每批记录；总排期见联合实施 |
 | [A1 修复后复审](../audits/2026-11-12-a1-recheck/README.md) | 当前 8 项问题、实际测试、下一步 F0–F5 |
+| [候选→观察→内容代次交接设计](A1_IDENTITY_HANDOFF.md) | AR2-03/04/07 的四类身份、状态机、路径键与测试矩阵 |
 | [A1 修复维护记录](../maintenance/2026-11-12_jpgpng_a1_repair.md) | 本批实际修改、测试计数、检查点和未闭环项 |
 
 机器可读当前方向位于 [TASK_PLAN.json](../../TASK_PLAN.json) 的 `current_plan.active_workstream` 和 `current_plan.archiving_design`；[重构进度](../refactor/REFACTOR_PROGRESS.md)页首指向本目录；[LOG.json](../../LOG.json)追加本轮记录。原审计、原计划正文和旧验证报告保留。
