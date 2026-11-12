@@ -1,23 +1,14 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""哈希工具函数。"""
+"""Backward-compatible hash helper."""
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
+
+from utils.common_utils import calculate_file_sha256
 
 
 def file_sha256(file_path: str | Path, chunk_size: int = 1024 * 1024) -> str:
-    """计算文件 SHA-256。"""
-    hasher = hashlib.sha256()
-    path = Path(file_path)
+    return calculate_file_sha256(file_path, chunk_size=chunk_size)
 
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            hasher.update(chunk)
 
-    return hasher.hexdigest()
+__all__ = ["file_sha256"]

@@ -1,0 +1,34 @@
+# 项目工具链配置 —— 第五轮（P0-B）固化
+# 前 4 轮手工修复了 import 顺序（CQ-8）与代码风格，本文件将这些标准固化为
+# 可由 isort / black / flake8 自动校验的配置，防止未来提交回退。
+
+[tool.isort]
+profile = "black"
+line_length = 100
+# 已知第一方包：core / gui / utils（与 isort --profile black CQ-8 执行结果一致）
+known_first_party = ["core", "gui", "utils"]
+# 跳过自动生成的目录
+skip = [".gitnexus", "runtime_logs", ".pytest_cache", "build", "dist"]
+skip_glob = ["**/__pycache__/**"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+# 不格式化历史遗留的入口脚本与构建脚本（保持其独立风格）
+extend-exclude = """
+/(
+    \\.gitnexus
+  | runtime_logs
+  | \\.pytest_cache
+  | build
+  | dist
+)/
+"""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# 已有 90 个测试，保持收集快速
+filterwarnings = [
+    "ignore::DeprecationWarning:pixivpy3.*",
+]

@@ -1,16 +1,37 @@
 @echo off
 setlocal
+set "PYTHONNOUSERSITE=1"
+set "PYTHONDONTWRITEBYTECODE=1"
 cd /d "%~dp0"
+
+rem ============================================================
+rem  Launcher for JpgPng (Pixiv downloader)
+rem  Interpreter resolution order:
+rem    1) .venv-path in this project folder
+rem    2) .venv-path in the parent folder
+rem    3) %CONDA_PREFIX%\python.exe  (when a conda env is active)
+rem    4) python on PATH
+rem  Never hardcode an interpreter path here.
+rem  The .venv-path file must be plain text, LF, WITHOUT BOM.
+rem ============================================================
 
 set "PY_CMD="
 
-if defined CONDA_PREFIX (
-  if exist "%CONDA_PREFIX%\python.exe" set "PY_CMD=%CONDA_PREFIX%\python.exe"
+set "VENV_FILE=%~dp0.venv-path"
+if not defined PY_CMD if exist "%VENV_FILE%" (
+  for /f "usebackq delims=" %%P in ("%VENV_FILE%") do (
+    if not defined PY_CMD if exist "%%P" set "PY_CMD=%%P"
+  )
 )
 
-if not defined PY_CMD (
-  if exist "E:\Miniconda03\envs\JuiLiu0\python.exe" set "PY_CMD=E:\Miniconda03\envs\JuiLiu0\python.exe"
+set "VENV_FILE=%~dp0..\.venv-path"
+if not defined PY_CMD if exist "%VENV_FILE%" (
+  for /f "usebackq delims=" %%P in ("%VENV_FILE%") do (
+    if not defined PY_CMD if exist "%%P" set "PY_CMD=%%P"
+  )
 )
+
+if not defined PY_CMD if defined CONDA_PREFIX if exist "%CONDA_PREFIX%\python.exe" set "PY_CMD=%CONDA_PREFIX%\python.exe"
 
 if not defined PY_CMD (
   where python >nul 2>nul
@@ -18,34 +39,13 @@ if not defined PY_CMD (
 )
 
 if not defined PY_CMD (
-  where py >nul 2>nul
-  if %errorlevel%==0 set "PY_CMD=py -3"
-)
-
-echo [1/4] Resolve Python interpreter...
-if not defined PY_CMD (
-  echo [ERROR] Python not found.
-  echo [HINT] Run: conda activate JuiLiu0
+  echo [ERROR] Python not found. Run: conda activate JuiLiu
   pause
   exit /b 1
 )
 
-echo [OK] Using: %PY_CMD%
-
-echo [2/4] Install requirements...
-%PY_CMD% -m pip --disable-pip-version-check install -r requirements.txt
-if %errorlevel% neq 0 (
-  echo [ERROR] Dependency installation failed.
-  pause
-  exit /b 1
-)
-
-echo [3/4] Launch GUI...
-echo [INFO] If no window appears, check the taskbar first.
-%PY_CMD% main.py
-if %errorlevel% neq 0 (
-  echo [ERROR] Program exited with code %errorlevel%.
-  pause
-)
-
-endlocal
+echo [INFO] Using: %PY_CMD%
+"%PY_CMD%" -s -B -X utf8 "%~dp0main.py" %*
+set "JPGPNG_EXIT=%errorlevel%"
+if not "%JPGPNG_EXIT%"=="0" pause
+endlocal & exit /b %JPGPNG_EXIT%

@@ -1,38 +1,72 @@
-# Python cache
+# Python
 __pycache__/
-.pytest_cache/
 *.py[cod]
-*$py.class
+*.so
+.gitnexus/
 
-# Virtual environments
-.venv/
+# 虚拟环境
 venv/
 env/
 
-# Build and packaging
-build/
-dist/
-*.egg-info/
-
-# IDE and OS
-.vscode/
+# IDE
 .idea/
+.vscode/
+
+# 与本项目无关的本地 agent 技能副本
+.agents/
+.claude/skills/frontend-slides/
+
+# 用户配置（包含敏感信息）
+pixiv_config.json
+config/config.yaml
+www.pixiv.net_cookies.txt
+
+# 用户下载内容与断点记录（永不纳入版本库）
+downl_Pixiv/
+downloaded_ids.txt
+
+# 下载文件
+DL/
+download_logs/
+runtime_logs/
+record_backups/
+
+# 临时文件
+*.log
+*.tmp
+*.bak
+.pytest_cache/
+.runtime/
+准备下载.txt
+_cleanup_trash/
+_cleanup_reports/
+
+# 打包生成的文件
+dist/
+build/
+*.spec
+release/
+*.zip
+
+# 系统文件
 .DS_Store
 Thumbs.db
+# 机器专属：解释器指针，不应入库
+.venv-path
 
-# Logs
-*.log
+# New desktop preferences and local output mappings
+config/collection_v2.json
+config/output_roots_v1.json
 
-# Sensitive or local runtime config
-pixiv_config.json
+# Account organizer business records and visual evidence
+organizer_data/
+
+# Local-only credentials, preferences and future archive outputs
+/config/*
+!/config/default_config.yaml
+.claude/settings.local.json
 .env
-*.env
-
-# Local download/output folders (common names)
-images/
-downloads/
-output/
-DL/
-测试日志/
-download_logs/
-data/backup/
+.env.*
+!.env.example
+!.env.sample
+/archive_store/

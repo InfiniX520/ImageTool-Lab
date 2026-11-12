@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="5" skipped="3" tests="258" time="11.382" timestamp="2026-11-12T00:01:51.000201+08:00" hostname="DESKTOP-RD7D8L3"><testcase classname="tests.test_preservation_policy" name="test_intentional_offload_reuses_archive_without_claiming_local_file_exists" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_user_deleted_file_after_verified_archiving_does_not_require_fabricated_release_event" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_historical_transfer_or_upload_report_never_becomes_verified[None-offloaded]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_historical_transfer_or_upload_report_never_becomes_verified[evidence1-none]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_missing_without_transfer_evidence_requires_location_or_user_choice" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_local_copy_policy_offers_restore_without_marking_local_complete" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_excluded_missing_file_is_not_proposed_for_automatic_restore" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_modified_local_file_is_preserved_even_with_verified_archive[changed-review_conflict]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_modified_local_file_is_preserved_even_with_verified_archive[changed_during_check-wait_stable]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_inaccessible_root_is_not_missing_and_restore_is_not_scheduled[root_unavailable]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_inaccessible_root_is_not_missing_and_restore_is_not_scheduled[unreadable]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_quick_check_never_satisfies_full_hash_policy" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_matching_local_digest_and_manual_archive_are_independent_proofs" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_failed_latest_archive_access_does_not_hide_behind_offload_intent" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_local_evidence_from_another_run_root_path_or_content_cannot_be_reused[overrides0]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_local_evidence_from_another_run_root_path_or_content_cannot_be_reused[overrides1]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_local_evidence_from_another_run_root_path_or_content_cannot_be_reused[overrides2]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_local_evidence_from_another_run_root_path_or_content_cannot_be_reused[overrides3]" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_local_evidence_from_another_run_root_path_or_content_cannot_be_reused[overrides4]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_local_evidence_from_another_run_root_path_or_content_cannot_be_reused[overrides5]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_windows_case_and_slash_variations_do_not_create_another_path_identity" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_archive_evidence_must_match_exact_content_version[content0]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_archive_evidence_must_match_exact_content_version[content1]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_archive_evidence_must_match_exact_content_version[content2]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_archive_evidence_must_match_exact_content_version[content3]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_verified_archive_survives_local_directory_remapping" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_unknown_historical_hash_cannot_be_promoted_to_hash_match_or_verified_archive" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_same_size_different_hash_cannot_claim_matching_bytes" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_manual_and_adapter_provenance_remain_distinct" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;0]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;1]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;2]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;3]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;4]" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;5]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;6]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;7]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;8]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;9]" time="0.000" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;10]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;11]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;12]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_malformed_evidence_or_policy_fails_closed[&lt;lambda&gt;13]" time="0.001" /><testcase classname="tests.test_preservation_policy" name="test_decision_does_not_mutate_historical_facts_or_observations" time="0.000" /><testcase classname="tests.test_local_observation" name="test_real_hash_match_is_complete_and_directly_accepted_by_preservation_policy" time="0.015" /><testcase classname="tests.test_local_observation" name="test_real_read_is_bounded_and_complete_sha256_is_streamed" time="0.006" /><testcase classname="tests.test_local_observation" name="test_same_size_tampering_is_changed_not_a_hash_match" time="0.005" /><testcase classname="tests.test_local_observation" name="test_legacy_file_without_history_gets_complete_current_baseline_only" time="0.006" /><testcase classname="tests.test_local_observation" name="test_legacy_file_with_wrong_size_is_changed_without_a_digest" time="0.004" /><testcase classname="tests.test_local_observation" name="test_empty_regular_file_can_be_fully_hashed_with_zero_byte_budget" time="0.005" /><testcase classname="tests.test_local_observation" name="test_missing_target_is_not_read_or_treated_as_unreadable" time="0.004" /><testcase classname="tests.test_local_observation" name="test_missing_root_is_root_unavailable_not_missing_target" time="0.003" /><testcase classname="tests.test_local_observation" name="test_regular_file_cannot_be_an_observation_root" time="0.004" /><testcase classname="tests.test_local_observation" name="test_missing_or_non_directory_ancestor_is_a_missing_child" time="0.005" /><testcase classname="tests.test_local_observation" name="test_directory_target_is_rejected_not_hashed" time="0.003" /><testcase classname="tests.test_local_observation" name="test_observer_never_accepts_another_root_binding[path0]" time="0.003" /><testcase classname="tests.test_local_observation" name="test_observer_never_accepts_another_root_binding[path1]" time="0.003" /><testcase classname="tests.test_local_observation" name="test_external_root_itself_cannot_be_observed_as_a_file" time="0.003" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[../outside]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[a/../../outside]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[/absolute/path]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[C:\\outside.jpg]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[\\\\server\\share\\outside.jpg]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[\\\\?\\C:\\outside.jpg]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[\\\\.\\PhysicalDrive0]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[image.jpg:stream]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[NUL]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[con.jpg]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[trailing.]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[trailing ]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_existing_path_contract_rejects_escape_absolute_unc_device_ads_and_special_names[a//b.jpg]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_observer_requires_an_explicit_absolute_root[]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_observer_requires_an_explicit_absolute_root[.]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_observer_requires_an_explicit_absolute_root[relative/root]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_unc_or_device_root_is_rejected_before_open" time="0.003" /><testcase classname="tests.test_local_observation" name="test_fake_root_reparse_attribute_is_rejected_before_open" time="0.003" /><testcase classname="tests.test_local_observation" name="test_fake_ancestor_reparse_attribute_is_rejected_before_open" time="0.003" /><testcase classname="tests.test_local_observation" name="test_real_symlink_file_is_rejected_when_platform_supports_it" time="0.004"><skipped type="pytest.skip" message="real reparse point unavailable in isolated test directory: OSError">E:\Zero9\JuiLiu\JpgPng\tests\test_local_observation.py:191: real reparse point unavailable in isolated test directory: OSError</skipped></testcase><testcase classname="tests.test_local_observation" name="test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root" time="0.004"><skipped type="pytest.skip" message="real reparse point unavailable in isolated test directory: OSError">E:\Zero9\JuiLiu\JpgPng\tests\test_local_observation.py:191: real reparse point unavailable in isolated test directory: OSError</skipped></testcase><testcase classname="tests.test_local_observation" name="test_real_symlink_root_is_rejected" time="0.004"><skipped type="pytest.skip" message="real reparse point unavailable in isolated test directory: OSError">E:\Zero9\JuiLiu\JpgPng\tests\test_local_observation.py:191: real reparse point unavailable in isolated test directory: OSError</skipped></testcase><testcase classname="tests.test_local_observation" name="test_real_windows_junction_ancestor_is_rejected_in_isolated_directory" time="0.031" /><testcase classname="tests.test_local_observation" name="test_open_handle_must_match_path_identity_size_and_mtime[changes0]" time="0.005" /><testcase classname="tests.test_local_observation" name="test_open_handle_must_match_path_identity_size_and_mtime[changes1]" time="0.004" /><testcase classname="tests.test_local_observation" name="test_open_handle_must_match_path_identity_size_and_mtime[changes2]" time="0.004" /><testcase classname="tests.test_local_observation" name="test_handle_identity_size_and_mtime_are_rechecked_after_read[changes0]" time="0.005" /><testcase classname="tests.test_local_observation" name="test_handle_identity_size_and_mtime_are_rechecked_after_read[changes1]" time="0.004" /><testcase classname="tests.test_local_observation" name="test_handle_identity_size_and_mtime_are_rechecked_after_read[changes2]" time="0.005" /><testcase classname="tests.test_local_observation" name="test_final_path_identity_size_and_mtime_must_match_the_read_handle[changes0]" time="0.005" /><testcase classname="tests.test_local_observation" name="test_final_path_identity_size_and_mtime_must_match_the_read_handle[changes1]" time="0.005" /><testcase classname="tests.test_local_observation" name="test_final_path_identity_size_and_mtime_must_match_the_read_handle[changes2]" time="0.005" /><testcase classname="tests.test_local_observation" name="test_short_read_cannot_be_promoted_to_complete_digest" time="0.005" /><testcase classname="tests.test_local_observation" name="test_growth_during_read_cannot_be_promoted_to_complete_digest" time="0.004" /><testcase classname="tests.test_local_observation" name="test_disappearance_before_open_is_a_race_not_a_clean_missing_observation" time="0.003" /><testcase classname="tests.test_local_observation" name="test_disappearance_after_read_is_a_race_not_a_clean_missing_observation" time="0.006" /><testcase classname="tests.test_local_observation" name="test_ancestor_disappearance_after_read_is_a_race" time="0.006" /><testcase classname="tests.test_local_observation" name="test_reparse_introduced_during_read_is_rejected_without_a_digest" time="0.005" /><testcase classname="tests.test_local_observation" name="test_unavailable_path_or_handle_identity_fails_closed" time="0.005" /><testcase classname="tests.test_local_observation" name="test_read_permission_failure_is_unreadable" time="0.004" /><testcase classname="tests.test_local_observation" name="test_root_io_failure_is_not_misreported_as_missing_or_changed" time="0.004" /><testcase classname="tests.test_local_observation" name="test_open_permission_failure_is_unreadable" time="0.004" /><testcase classname="tests.test_local_observation" name="test_root_and_child_access_failures_remain_distinct" time="0.005" /><testcase classname="tests.test_local_observation" name="test_non_bytes_read_result_is_not_silently_accepted[text]" time="0.004" /><testcase classname="tests.test_local_observation" name="test_non_bytes_read_result_is_not_silently_accepted[bad_chunk1]" time="0.004" /><testcase classname="tests.test_local_observation" name="test_non_bytes_read_result_is_not_silently_accepted[None]" time="0.004" /><testcase classname="tests.test_local_observation" name="test_non_bytes_read_result_is_not_silently_accepted[bad_chunk3]" time="0.004" /><testcase classname="tests.test_local_observation" name="test_reader_returning_more_than_requested_is_rejected" time="0.004" /><testcase classname="tests.test_local_observation" name="test_close_failure_invalidates_otherwise_complete_observation" time="0.005" /><testcase classname="tests.test_local_observation" name="test_known_size_over_byte_budget_stops_before_open" time="0.004" /><testcase classname="tests.test_local_observation" name="test_actual_streamed_bytes_enforce_budget_even_if_metadata_was_smaller" time="0.005" /><testcase classname="tests.test_local_observation" name="test_exact_byte_budget_can_complete" time="0.005" /><testcase classname="tests.test_local_observation" name="test_time_budget_can_expire_before_any_root_io" time="0.003" /><testcase classname="tests.test_local_observation" name="test_time_budget_is_checked_after_every_chunk" time="0.004" /><testcase classname="tests.test_local_observation" name="test_already_cancelled_check_does_no_target_io" time="0.003" /><testcase classname="tests.test_local_observation" name="test_cancellation_after_first_chunk_discards_partial_hash" time="0.004" /><testcase classname="tests.test_local_observation" name="test_invalid_cancellation_or_clock_result_is_not_success" time="0.002" /><testcase classname="tests.test_local_observation" name="test_backwards_monotonic_clock_is_rejected" time="0.003" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;0]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;1]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;2]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;3]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;4]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;5]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;6]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_budgets_fail_closed[&lt;lambda&gt;7]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_invalid_file_identities_fail_closed[values0]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_invalid_file_identities_fail_closed[values1]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_file_identities_fail_closed[values2]" time="0.001" /><testcase classname="tests.test_local_observation" name="test_invalid_file_identities_fail_closed[values3]" time="0.000" /><testcase classname="tests.test_local_observation" name="test_invalid_observer_binding_or_adapter_fails_closed[kwargs0]" time="0.002" /><testcase classname="tests.test_local_observation" name="test_invalid_observer_binding_or_adapter_fails_closed[kwargs1]" time="0.003" /><testcase classname="tests.test_local_observation" name="test_invalid_observer_binding_or_adapter_fails_closed[kwargs2]" time="0.002" /><testcase classname="tests.test_local_observation" name="test_invalid_observer_binding_or_adapter_fails_closed[kwargs3]" time="0.003" /><testcase classname="tests.test_local_observation" name="test_invalid_observer_binding_or_adapter_fails_closed[kwargs4]" time="0.003" /><testcase classname="tests.test_local_observation" name="test_result_and_nested_data_contracts_are_immutable" time="0.005" /><testcase classname="tests.test_local_observation" name="test_cannot_manually_construct_incomplete_result_with_digest" time="0.006" /><testcase classname="tests.test_local_observation" name="test_unreadable_and_unstable_results_map_to_non_reuse_policy_outcomes" time="0.005" /><testcase classname="tests.test_archive_inventory" name="test_input_and_work_order_do_not_change_identity_packages_or_json" time="0.011" /><testcase classname="tests.test_archive_inventory" name="test_exact_duplicate_and_windows_aliases_collapse_to_one_path_identity" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_identical_bytes_at_two_paths_keep_both_members_but_report_unique_content" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[.]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[../outside.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/../../outside.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a//b.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/./b.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[/absolute.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[C:/absolute.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[C:relative.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[//server/share/a.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/file.jpg:stream]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/NUL.png]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/lpt1.jpg]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/trailing.]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/trailing ]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/bad?.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_invalid_relative_paths_ads_and_empty_names_are_explicitly_rejected[a/control\x00.png]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_external_directory_root_cannot_be_silently_treated_as_a_file" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_unknown_content_or_historical_missing_digest_is_not_archivable" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_windows_case_or_slash_collision_rejects_all_colliding_records" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_one_asset_revision_cannot_have_conflicting_byte_identity" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_artwork_page_cannot_point_to_two_content_versions" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_exact_target_boundary_is_allowed_without_oversize_marker" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_one_byte_over_target_creates_a_new_package_not_an_inflated_one" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_oversized_single_file_is_alone_and_clearly_marked" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_artwork_affinity_does_not_unintentionally_split_a_fitting_work" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_large_artwork_is_split_by_whole_file_with_explicit_exception" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_zero_byte_file_is_a_whole_member_and_does_not_create_empty_packages" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_empty_scope_and_explicit_empty_work_are_distinguished" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_batch_budget_overrun_is_explicit_without_changing_package_math" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_document_57_gib_example_components_and_conservative_peak" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_two_gib_packages_match_document_readback_example_without_large_io" time="0.002" /><testcase classname="tests.test_archive_inventory" name="test_capacity_exact_free_boundary_unknown_and_insufficient_states" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_recovery_estimate_rounds_up_and_stage_phases_expose_coexistence" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_serializable_immutable_versioned_contracts_copy_input_sequences" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;0]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;1]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;2]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;3]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;4]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;5]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;6]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;7]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;8]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;9]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;10]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;11]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;12]" time="0.000" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;13]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;14]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;15]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_malformed_configuration_or_contract_fails_closed[&lt;lambda&gt;16]" time="0.001" /><testcase classname="tests.test_archive_inventory" name="test_problematic_scope_and_issue_order_are_stable_across_permutations" time="0.009" /><testcase classname="tests.test_archive_inventory" name="test_same_relative_path_on_distinct_explicit_roots_is_not_a_collision" time="0.001" /><testcase classname="tests.test_archive_schema" name="test_explicit_copy_acknowledgement_and_backup_separation" time="0.173" /><testcase classname="tests.test_archive_schema" name="test_migration_preserves_old_rows_and_verified_backup" time="0.192" /><testcase classname="tests.test_archive_schema" name="test_idempotent_second_run_uses_new_backup_without_changes" time="0.207" /><testcase classname="tests.test_archive_schema" name="test_unknown_future_and_incomplete_schemas_are_refused_without_changes" time="0.514" /><testcase classname="tests.test_archive_schema" name="test_existing_archive_or_base_object_conflict_rolls_back" time="0.497" /><testcase classname="tests.test_archive_schema" name="test_active_writer_lock_prevents_any_migration_write" time="0.138" /><testcase classname="tests.test_archive_schema" name="test_archive_asset_and_intent_are_distinct_from_download_history" time="0.205" /><testcase classname="tests.test_archive_schema" name="test_local_evidence_round_trip_and_state_binding" time="0.169" /><testcase classname="tests.test_archive_schema" name="test_stale_or_conflicting_asset_and_evidence_are_rejected" time="0.188" /><testcase classname="tests.test_archive_schema" name="test_archive_upload_report_does_not_become_verified" time="0.172" /><testcase classname="tests.test_archive_schema" name="test_verified_archive_must_have_matching_readback_and_containing_package" time="0.211" /><testcase classname="tests.test_archive_schema" name="test_release_record_requires_verified_matching_facts_not_only_a_flag" time="0.199" /><testcase classname="tests.test_archive_schema" name="test_tampered_indexed_evidence_cannot_survive_validation" time="0.167" /><testcase classname="tests.test_archive_schema" name="test_synthetic_file_observation_inventory_and_persistence_work_together" time="0.230" /><testcase classname="tests.test_archive_schema" name="test_legacy_baseline_is_a_new_fact_not_a_historical_hash_match" time="0.178" /><testcase classname="tests.test_archive_schema" name="test_cancelled_or_exhausted_observation_can_be_saved_without_reuse" time="0.376" /><testcase classname="tests.test_archive_schema" name="test_migrated_copy_is_intentionally_not_accepted_by_unchanged_production" time="0.211" /><testcase classname="tests.test_archive_scope" name="test_bounded_prefix_deny_rules_and_compatible_entry_types" time="0.027" /><testcase classname="tests.test_archive_scope" name="test_explicit_file_sets_do_not_recursively_expand" time="0.009" /><testcase classname="tests.test_archive_scope" name="test_invalid_ads_traversal_and_wrong_root_are_issues_not_filesystem_privileges" time="0.016" /><testcase classname="tests.test_archive_scope" name="test_missing_file_explicit_prefix_and_directory_as_file" time="0.007" /><testcase classname="tests.test_archive_scope" name="test_unicode_case_alias_and_overlapping_selections_are_reported" time="0.010" /><testcase classname="tests.test_archive_scope" name="test_windows_case_aliases_never_emit_two_paths" time="0.007" /><testcase classname="tests.test_archive_scope" name="test_duplicate_file_identity_is_not_two_releasable_copies" time="0.010" /><testcase classname="tests.test_archive_scope" name="test_stable_paging_snapshot_boundary_and_immutability" time="0.013" /><testcase classname="tests.test_archive_scope" name="test_cursor_tampering_cross_enumerator_and_replay_are_rejected" time="0.011" /><testcase classname="tests.test_archive_scope" name="test_cursor_is_bound_to_root_mapping_policy_and_snapshot" time="0.021" /><testcase classname="tests.test_archive_scope" name="test_missing_root_does_not_fabricate_identity_snapshot_or_completion" time="0.003" /><testcase classname="tests.test_archive_scope" name="test_root_file_and_real_junction_root_are_rejected" time="0.030" /><testcase classname="tests.test_archive_scope" name="test_real_descendant_junction_is_not_followed" time="0.030" /><testcase classname="tests.test_archive_scope" name="test_fake_reparse_attribute_is_rejected_without_real_privilege" time="0.009" /><testcase classname="tests.test_archive_scope" name="test_fake_unreadable_metadata_and_directory_are_reported" time="0.011" /><testcase classname="tests.test_archive_scope" name="test_fake_non_regular_and_missing_identity_are_reported" time="0.012" /><testcase classname="tests.test_archive_scope" name="test_fake_file_metadata_race_is_not_a_complete_snapshot" time="0.008" /><testcase classname="tests.test_archive_scope" name="test_root_metadata_change_during_enumeration_is_not_complete" time="0.009" /><testcase classname="tests.test_archive_scope" name="test_root_disappearing_between_pages_stops_with_no_further_entries" time="0.011" /><testcase classname="tests.test_archive_scope" name="test_entry_directory_and_exclusion_budgets_are_bounded" time="0.014" /><testcase classname="tests.test_archive_scope" name="test_issue_budget_stops_and_keeps_terminal_reason" time="0.006" /><testcase classname="tests.test_archive_scope" name="test_fake_monotonic_clock_and_cancellation_are_not_full" time="0.007" /><testcase classname="tests.test_archive_scope" name="test_cancellation_after_first_page_invalidates_delivery" time="0.009" /><testcase classname="tests.test_archive_scope" name="test_selection_sequence_is_copied_and_request_is_validated" time="0.004" /><testcase classname="tests.test_archive_scope" name="test_single_use_page_and_malformed_cursor_fail_closed" time="0.009" /><testcase classname="tests.test_archive_scope" name="test_only_synthetic_fixture_files_are_created" time="0.012" /><testcase classname="tests.test_archive_plan_store" name="test_v1_migration_save_reload_and_exact_replay_preserve_history" time="0.200" /><testcase classname="tests.test_archive_plan_store" name="test_separate_batch_does_not_relabel_existing_path" time="0.184" /><testcase classname="tests.test_archive_plan_store" name="test_different_scope_same_batch_is_rejected_atomically" time="0.227" /><testcase classname="tests.test_archive_plan_store" name="test_package_collision_and_sealed_history_are_not_overwritten" time="0.181" /><testcase classname="tests.test_archive_plan_store" name="test_late_content_conflict_rolls_back_entire_new_batch" time="0.184" /><testcase classname="tests.test_archive_plan_store" name="test_schema_and_version_gates_reject_wrong_connections" time="0.266" /><testcase classname="tests.test_archive_plan_store" name="test_missing_batch_malformed_json_and_inconsistent_relations_fail_closed" time="0.224" /><testcase classname="tests.test_archive_plan_store" name="test_readonly_reload_does_not_leave_a_deferred_transaction" time="0.199" /><testcase classname="tests.test_archive_plan_store" name="test_readonly_reload_and_foreign_key_restoration" time="0.220" /><testcase classname="tests.test_archive_plan_store" name="test_caller_transaction_is_not_committed_or_rolled_back" time="0.182" /><testcase classname="tests.test_archive_plan_store" name="test_unknown_capacity_schema_fails_before_any_write" time="0.173" /><testcase classname="tests.test_archive_plan_store" name="test_incomplete_scope_cannot_have_partial_package_or_capacity" time="0.193" /><testcase classname="tests.test_archive_plan_store" name="test_multiple_packages_and_duplicates_round_trip" time="0.244" /><testcase classname="tests.test_archive_plan_store" name="test_path_fact_tamper_is_rejected_without_disabling_foreign_keys" time="0.184" /><testcase classname="tests.test_archive_plan_store" name="test_save_validation_failure_rolls_back_inserted_batch" time="0.190" /><testcase classname="tests.test_archive_plan_store" name="test_cross_batch_inventory_cannot_be_relabelled" time="0.227" /><testcase classname="tests.test_archive_repository" name="test_explicit_temporary_copy_gate_and_version_rejection" time="0.442" /><testcase classname="tests.test_archive_repository" name="test_inherited_single_writer_saves_reloads_and_preserves_history" time="0.303"><failure message="core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction">tmp_path = WindowsPath('E:/Zero9/JuiLiu/.runtime/jpgpng_a1_audit_20261111_01/test_tmp/test_inherited_single_writer_s0')
+
+    def test_inherited_single_writer_saves_reloads_and_preserves_history(tmp_path):
+        path = tmp_path / "library.sqlite3"
+        job = migrated(path)
+        with open_repository(path) as repository:
+            inventory, capacity = make_plan()
+            scope = {"kind": "synthetic_explicit"}
+&gt;           saved = repository.save_archive_plan(inventory, capacity, scope=scope)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_archive_repository.py:72: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+core\archive_repository.py:118: in save_archive_plan
+    return self._enqueue(
+core\library_repository.py:975: in _enqueue
+    return future.result()
+           ^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:401: in __get_result
+    raise self._exception
+core\library_repository.py:791: in _writer_main
+    result = self._dispatch(conn, command)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\archive_repository.py:86: in _dispatch
+    result = save_archive_plan(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = &lt;sqlite3.Connection object at 0x0000026DD8AFC400&gt;
+inventory = ArchiveInventory(batch_id='archive-batch', status=&lt;InventoryStatus.READY: 'ready'&gt;, scope_complete=True, input_entry_c...(), split_work_ids=(), adjustment_codes=(), target_package_bytes=128, batch_budget_bytes=21474836480, schema_version=1)
+capacity = CapacityPlan(batch_id='archive-batch', inventory_schema_version=1, status=&lt;CapacityStatus.INSUFFICIENT_SPACE: 'insuffi...head_must_be_rechecked_before_any_io', 'repair_drills_and_full_restores_need_a_separate_space_plan'), schema_version=1)
+scope = {'kind': 'synthetic_explicit'}
+
+    def save_archive_plan(
+        conn: sqlite3.Connection,
+        inventory: ArchiveInventory,
+        capacity: CapacityPlan,
+        *,
+        scope: dict[str, object] | None = None,
+    ) -&gt; ArchivePlanSaveResult:
+        """Atomically insert or exactly replay one plan on a caller-owned schema-2 copy.
+    
+        The connection must have foreign_keys=ON, query_only=OFF and no open transaction.
+        This function owns and commits/rolls back only the transaction it starts.  Package
+        members stay in scope_json: archive_members is reserved for sealed facts.
+        """
+        conn = _require_connection(conn)
+        if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
+            raise ArchivePlanStoreError("Expected ArchiveInventory and CapacityPlan")
+        if scope is None:
+            scope = {"kind": "explicit_inventory"}
+        if not isinstance(scope, dict):
+            raise ArchivePlanStoreError("Archive plan scope must be a JSON object")
+        try:
+            scope_json = _encode_scope(inventory, scope)
+            # Round-trip caller objects too; dataclass construction alone is not validation.
+            checked_inventory, checked_scope = _decode_scope(scope_json, inventory.batch_id)
+            capacity_json = canonical_json(capacity.to_dict())
+            checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
+            if checked_inventory != inventory or checked_capacity != capacity or checked_scope != scope:
+                raise ContractError("Archive plan does not survive strict serialization")
+            if capacity.batch_id != inventory.batch_id:
+                raise ContractError("Capacity and inventory batch identities differ")
+        except ArchivePlanStoreError:
+            raise
+        except (ContractError, ValueError, TypeError, KeyError, OverflowError) as exc:
+            raise ArchivePlanStoreError("Invalid archive plan input") from exc
+    
+        try:
+            if conn.in_transaction:
+&gt;               raise ArchivePlanStoreError("Archive plan save requires ownership of a new transaction")
+E               core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction
+
+core\archive_plan_store.py:524: ArchivePlanStoreError</failure></testcase><testcase classname="tests.test_archive_repository" name="test_concurrent_first_save_is_serialized_and_different_plan_cannot_replay" time="0.328"><failure message="core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction">tmp_path = WindowsPath('E:/Zero9/JuiLiu/.runtime/jpgpng_a1_audit_20261111_01/test_tmp/test_concurrent_first_save_is_0')
+
+    def test_concurrent_first_save_is_serialized_and_different_plan_cannot_replay(tmp_path):
+        path = tmp_path / "library.sqlite3"
+        migrated(path)
+        inventory, capacity = make_plan()
+        with open_repository(path) as repository:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+&gt;               results = list(pool.map(
+                    lambda _: repository.save_archive_plan(inventory, capacity), range(3),
+                ))
+
+tests\test_archive_repository.py:95: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:619: in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:317: in _result_or_cancel
+    return fut.result(timeout)
+           ^^^^^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:401: in __get_result
+    raise self._exception
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_archive_repository.py:96: in &lt;lambda&gt;
+    lambda _: repository.save_archive_plan(inventory, capacity), range(3),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\archive_repository.py:118: in save_archive_plan
+    return self._enqueue(
+core\library_repository.py:975: in _enqueue
+    return future.result()
+           ^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:401: in __get_result
+    raise self._exception
+core\library_repository.py:791: in _writer_main
+    result = self._dispatch(conn, command)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\archive_repository.py:86: in _dispatch
+    result = save_archive_plan(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = &lt;sqlite3.Connection object at 0x0000026DD8AFF2E0&gt;
+inventory = ArchiveInventory(batch_id='archive-batch', status=&lt;InventoryStatus.READY: 'ready'&gt;, scope_complete=True, input_entry_c...(), split_work_ids=(), adjustment_codes=(), target_package_bytes=128, batch_budget_bytes=21474836480, schema_version=1)
+capacity = CapacityPlan(batch_id='archive-batch', inventory_schema_version=1, status=&lt;CapacityStatus.INSUFFICIENT_SPACE: 'insuffi...head_must_be_rechecked_before_any_io', 'repair_drills_and_full_restores_need_a_separate_space_plan'), schema_version=1)
+scope = {'kind': 'explicit_inventory'}
+
+    def save_archive_plan(
+        conn: sqlite3.Connection,
+        inventory: ArchiveInventory,
+        capacity: CapacityPlan,
+        *,
+        scope: dict[str, object] | None = None,
+    ) -&gt; ArchivePlanSaveResult:
+        """Atomically insert or exactly replay one plan on a caller-owned schema-2 copy.
+    
+        The connection must have foreign_keys=ON, query_only=OFF and no open transaction.
+        This function owns and commits/rolls back only the transaction it starts.  Package
+        members stay in scope_json: archive_members is reserved for sealed facts.
+        """
+        conn = _require_connection(conn)
+        if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
+            raise ArchivePlanStoreError("Expected ArchiveInventory and CapacityPlan")
+        if scope is None:
+            scope = {"kind": "explicit_inventory"}
+        if not isinstance(scope, dict):
+            raise ArchivePlanStoreError("Archive plan scope must be a JSON object")
+        try:
+            scope_json = _encode_scope(inventory, scope)
+            # Round-trip caller objects too; dataclass construction alone is not validation.
+            checked_inventory, checked_scope = _decode_scope(scope_json, inventory.batch_id)
+            capacity_json = canonical_json(capacity.to_dict())
+            checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
+            if checked_inventory != inventory or checked_capacity != capacity or checked_scope != scope:
+                raise ContractError("Archive plan does not survive strict serialization")
+            if capacity.batch_id != inventory.batch_id:
+                raise ContractError("Capacity and inventory batch identities differ")
+        except ArchivePlanStoreError:
+            raise
+        except (ContractError, ValueError, TypeError, KeyError, OverflowError) as exc:
+            raise ArchivePlanStoreError("Invalid archive plan input") from exc
+    
+        try:
+            if conn.in_transaction:
+&gt;               raise ArchivePlanStoreError("Archive plan save requires ownership of a new transaction")
+E               core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction
+
+core\archive_plan_store.py:524: ArchivePlanStoreError</failure></testcase><testcase classname="tests.test_archive_repository" name="test_plan_precheck_conflict_does_not_overwrite_existing_batch" time="0.295"><failure message="core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction">tmp_path = WindowsPath('E:/Zero9/JuiLiu/.runtime/jpgpng_a1_audit_20261111_01/test_tmp/test_plan_precheck_conflict_do0')
+
+    def test_plan_precheck_conflict_does_not_overwrite_existing_batch(tmp_path):
+        path = tmp_path / "library.sqlite3"
+        migrated(path)
+        inventory, capacity = make_plan()
+        with open_repository(path) as repository:
+&gt;           repository.save_archive_plan(inventory, capacity)
+
+tests\test_archive_repository.py:114: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+core\archive_repository.py:118: in save_archive_plan
+    return self._enqueue(
+core\library_repository.py:975: in _enqueue
+    return future.result()
+           ^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:401: in __get_result
+    raise self._exception
+core\library_repository.py:791: in _writer_main
+    result = self._dispatch(conn, command)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\archive_repository.py:86: in _dispatch
+    result = save_archive_plan(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = &lt;sqlite3.Connection object at 0x0000026DD8AFD3F0&gt;
+inventory = ArchiveInventory(batch_id='archive-batch', status=&lt;InventoryStatus.READY: 'ready'&gt;, scope_complete=True, input_entry_c...(), split_work_ids=(), adjustment_codes=(), target_package_bytes=128, batch_budget_bytes=21474836480, schema_version=1)
+capacity = CapacityPlan(batch_id='archive-batch', inventory_schema_version=1, status=&lt;CapacityStatus.INSUFFICIENT_SPACE: 'insuffi...head_must_be_rechecked_before_any_io', 'repair_drills_and_full_restores_need_a_separate_space_plan'), schema_version=1)
+scope = {'kind': 'explicit_inventory'}
+
+    def save_archive_plan(
+        conn: sqlite3.Connection,
+        inventory: ArchiveInventory,
+        capacity: CapacityPlan,
+        *,
+        scope: dict[str, object] | None = None,
+    ) -&gt; ArchivePlanSaveResult:
+        """Atomically insert or exactly replay one plan on a caller-owned schema-2 copy.
+    
+        The connection must have foreign_keys=ON, query_only=OFF and no open transaction.
+        This function owns and commits/rolls back only the transaction it starts.  Package
+        members stay in scope_json: archive_members is reserved for sealed facts.
+        """
+        conn = _require_connection(conn)
+        if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
+            raise ArchivePlanStoreError("Expected ArchiveInventory and CapacityPlan")
+        if scope is None:
+            scope = {"kind": "explicit_inventory"}
+        if not isinstance(scope, dict):
+            raise ArchivePlanStoreError("Archive plan scope must be a JSON object")
+        try:
+            scope_json = _encode_scope(inventory, scope)
+            # Round-trip caller objects too; dataclass construction alone is not validation.
+            checked_inventory, checked_scope = _decode_scope(scope_json, inventory.batch_id)
+            capacity_json = canonical_json(capacity.to_dict())
+            checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
+            if checked_inventory != inventory or checked_capacity != capacity or checked_scope != scope:
+                raise ContractError("Archive plan does not survive strict serialization")
+            if capacity.batch_id != inventory.batch_id:
+                raise ContractError("Capacity and inventory batch identities differ")
+        except ArchivePlanStoreError:
+            raise
+        except (ContractError, ValueError, TypeError, KeyError, OverflowError) as exc:
+            raise ArchivePlanStoreError("Invalid archive plan input") from exc
+    
+        try:
+            if conn.in_transaction:
+&gt;               raise ArchivePlanStoreError("Archive plan save requires ownership of a new transaction")
+E               core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction
+
+core\archive_plan_store.py:524: ArchivePlanStoreError</failure></testcase><testcase classname="tests.test_archive_repository" name="test_corrupt_archive_facts_are_rejected_without_leaving_read_transaction" time="0.287"><failure message="core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction">tmp_path = WindowsPath('E:/Zero9/JuiLiu/.runtime/jpgpng_a1_audit_20261111_01/test_tmp/test_corrupt_archive_facts_are0')
+
+    def test_corrupt_archive_facts_are_rejected_without_leaving_read_transaction(tmp_path):
+        path = tmp_path / "library.sqlite3"
+        migrated(path)
+        inventory, capacity = make_plan()
+        with open_repository(path) as repository:
+&gt;           repository.save_archive_plan(inventory, capacity)
+
+tests\test_archive_repository.py:129: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+core\archive_repository.py:118: in save_archive_plan
+    return self._enqueue(
+core\library_repository.py:975: in _enqueue
+    return future.result()
+           ^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+D:\Miniconda3\envs\JuiLiu\Lib\concurrent\futures\_base.py:401: in __get_result
+    raise self._exception
+core\library_repository.py:791: in _writer_main
+    result = self._dispatch(conn, command)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\archive_repository.py:86: in _dispatch
+    result = save_archive_plan(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = &lt;sqlite3.Connection object at 0x0000026DD8B55210&gt;
+inventory = ArchiveInventory(batch_id='archive-batch', status=&lt;InventoryStatus.READY: 'ready'&gt;, scope_complete=True, input_entry_c...(), split_work_ids=(), adjustment_codes=(), target_package_bytes=128, batch_budget_bytes=21474836480, schema_version=1)
+capacity = CapacityPlan(batch_id='archive-batch', inventory_schema_version=1, status=&lt;CapacityStatus.INSUFFICIENT_SPACE: 'insuffi...head_must_be_rechecked_before_any_io', 'repair_drills_and_full_restores_need_a_separate_space_plan'), schema_version=1)
+scope = {'kind': 'explicit_inventory'}
+
+    def save_archive_plan(
+        conn: sqlite3.Connection,
+        inventory: ArchiveInventory,
+        capacity: CapacityPlan,
+        *,
+        scope: dict[str, object] | None = None,
+    ) -&gt; ArchivePlanSaveResult:
+        """Atomically insert or exactly replay one plan on a caller-owned schema-2 copy.
+    
+        The connection must have foreign_keys=ON, query_only=OFF and no open transaction.
+        This function owns and commits/rolls back only the transaction it starts.  Package
+        members stay in scope_json: archive_members is reserved for sealed facts.
+        """
+        conn = _require_connection(conn)
+        if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
+            raise ArchivePlanStoreError("Expected ArchiveInventory and CapacityPlan")
+        if scope is None:
+            scope = {"kind": "explicit_inventory"}
+        if not isinstance(scope, dict):
+            raise ArchivePlanStoreError("Archive plan scope must be a JSON object")
+        try:
+            scope_json = _encode_scope(inventory, scope)
+            # Round-trip caller objects too; dataclass construction alone is not validation.
+            checked_inventory, checked_scope = _decode_scope(scope_json, inventory.batch_id)
+            capacity_json = canonical_json(capacity.to_dict())
+            checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
+            if checked_inventory != inventory or checked_capacity != capacity or checked_scope != scope:
+                raise ContractError("Archive plan does not survive strict serialization")
+            if capacity.batch_id != inventory.batch_id:
+                raise ContractError("Capacity and inventory batch identities differ")
+        except ArchivePlanStoreError:
+            raise
+        except (ContractError, ValueError, TypeError, KeyError, OverflowError) as exc:
+            raise ArchivePlanStoreError("Invalid archive plan input") from exc
+    
+        try:
+            if conn.in_transaction:
+&gt;               raise ArchivePlanStoreError("Archive plan save requires ownership of a new transaction")
+E               core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction
+
+core\archive_plan_store.py:524: ArchivePlanStoreError</failure></testcase><testcase classname="tests.test_archive_repository" name="test_inherited_v1_job_commands_remain_available_on_archive_copy" time="0.301"><failure message="AssertionError: assert False&#10; +  where False = settle_stop('6b8abbcedb0649a98954b9b4fee7fec2')&#10; +    where settle_stop = &lt;core.archive_repository.ArchiveLibraryRepository object at 0x0000026DD6F296A0&gt;.settle_stop">tmp_path = WindowsPath('E:/Zero9/JuiLiu/.runtime/jpgpng_a1_audit_20261111_01/test_tmp/test_inherited_v1_job_commands0')
+
+    def test_inherited_v1_job_commands_remain_available_on_archive_copy(tmp_path):
+        path = tmp_path / "library.sqlite3"
+        with LibraryRepository(path) as repository:
+            repository.submit(CollectionRequest("request", "synthetic"), "submit")
+        migrate_archive_copy(path, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
+        with open_repository(path) as repository:
+            second = repository.submit(CollectionRequest("request-2", "synthetic"), "submit-2")
+            assert second["job_id"]
+            repository.activate_next()
+            repository.request_stop(second["job_id"], "stop-2")
+&gt;           assert repository.settle_stop(second["batch_id"])
+E           AssertionError: assert False
+E            +  where False = settle_stop('6b8abbcedb0649a98954b9b4fee7fec2')
+E            +    where settle_stop = &lt;core.archive_repository.ArchiveLibraryRepository object at 0x0000026DD6F296A0&gt;.settle_stop
+
+tests\test_archive_repository.py:150: AssertionError</failure></testcase></testsuite></testsuites>

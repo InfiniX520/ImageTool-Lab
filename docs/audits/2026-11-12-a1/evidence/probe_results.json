@@ -1,0 +1,268 @@
+{
+  "scope": "Synthetic audit evidence, NOT acceptance",
+  "cases": [
+    {
+      "case": "sensitive_explicit_bypass",
+      "completed": true,
+      "result": {
+        "recursive_root": {
+          "entries": [],
+          "exclusions": [
+            {
+              "path": "archive_store",
+              "reason": "excluded_directory"
+            },
+            {
+              "path": "my-cookie.txt",
+              "reason": "excluded_file"
+            },
+            {
+              "path": "pixiv_config.json",
+              "reason": "excluded_file"
+            }
+          ],
+          "issues": [],
+          "full": true,
+          "snapshot_count": 0,
+          "has_next": false
+        },
+        "explicit_files": {
+          "entries": [
+            "archive_store/nested/package.7z",
+            "my-cookie.txt",
+            "pixiv_config.json"
+          ],
+          "exclusions": [],
+          "issues": [],
+          "full": true,
+          "snapshot_count": 3,
+          "has_next": false
+        },
+        "nested_output_prefix": {
+          "entries": [
+            "archive_store/nested/package.7z"
+          ],
+          "exclusions": [],
+          "issues": [],
+          "full": true,
+          "snapshot_count": 1,
+          "has_next": false
+        }
+      }
+    },
+    {
+      "case": "unicode_distinct_files",
+      "completed": true,
+      "result": {
+        "actual_files": [
+          {
+            "name": "é.png",
+            "inode": 1125899907758448,
+            "sha256": "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+          },
+          {
+            "name": "é.png",
+            "inode": 1125899907758447,
+            "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+          }
+        ],
+        "enumerated": {
+          "entries": [
+            "é.png"
+          ],
+          "exclusions": [
+            {
+              "path": "é.png",
+              "reason": "duplicate_candidate"
+            }
+          ],
+          "issues": [],
+          "full": true,
+          "snapshot_count": 1,
+          "has_next": false
+        }
+      }
+    },
+    {
+      "case": "unrelated_ancestor_change",
+      "completed": true,
+      "result": {
+        "root_unchanged": true,
+        "first": {
+          "entries": [
+            "0.png"
+          ],
+          "exclusions": [],
+          "issues": [],
+          "full": true,
+          "snapshot_count": 3,
+          "has_next": true
+        },
+        "second": {
+          "entries": [],
+          "exclusions": [],
+          "issues": [
+            "root_changed"
+          ],
+          "full": false,
+          "snapshot_count": 3,
+          "has_next": false
+        }
+      }
+    },
+    {
+      "case": "partial_page_saved_as_complete",
+      "completed": true,
+      "result": {
+        "page": {
+          "entries": [
+            "0.png"
+          ],
+          "exclusions": [],
+          "issues": [],
+          "full": true,
+          "snapshot_count": 3,
+          "has_next": true
+        },
+        "persisted_plan_complete": true,
+        "persisted_plan_count": 1
+      }
+    },
+    {
+      "case": "same_content_second_batch",
+      "completed": true,
+      "result": {
+        "second_saved": false,
+        "error": [
+          {
+            "type": "ArchivePlanStoreError",
+            "message": "Archive plan save failed; its transaction was rolled back"
+          },
+          {
+            "type": "IntegrityError",
+            "message": "UNIQUE constraint failed: archive_assets.path_key"
+          }
+        ],
+        "preserved_batch_count": 1
+      }
+    },
+    {
+      "case": "sqlite_row_factory_alias",
+      "completed": true,
+      "result": {
+        "alias_saved": false,
+        "error": [
+          {
+            "type": "ContractError",
+            "message": "Content identity already has different facts"
+          }
+        ]
+      }
+    },
+    {
+      "case": "new_revision_same_path",
+      "completed": true,
+      "result": {
+        "revision_saved": false,
+        "error": [
+          {
+            "type": "IntegrityError",
+            "message": "UNIQUE constraint failed: archive_assets.path_key"
+          }
+        ]
+      }
+    },
+    {
+      "case": "two_thousand_file_plan",
+      "completed": true,
+      "result": {
+        "saved": false,
+        "error": [
+          {
+            "type": "ArchivePlanStoreError",
+            "message": "Persisted archive facts failed schema validation: Stored scope_json exceeds its bound"
+          },
+          {
+            "type": "ArchiveSchemaError",
+            "message": "Stored scope_json exceeds its bound"
+          }
+        ],
+        "input_files": 2000,
+        "scope_json_bytes": 1660226,
+        "elapsed_seconds": 0.4135143000003154,
+        "remaining_batches": 0
+      }
+    },
+    {
+      "case": "null_hash_verified_fact",
+      "completed": true,
+      "result": {
+        "unknown_content_digest": null,
+        "accepted_verified_state": "user_returned_verified",
+        "validator_accepts": true,
+        "error": null
+      }
+    },
+    {
+      "case": "release_event_append",
+      "completed": true,
+      "result": {
+        "same_operation_append": false,
+        "error": [
+          {
+            "type": "IntegrityError",
+            "message": "UNIQUE constraint failed: archive_releases.release_id"
+          }
+        ]
+      }
+    },
+    {
+      "case": "receipt_without_artifact",
+      "completed": true,
+      "result": {
+        "accepted": true,
+        "source_and_receipt": [
+          "download_receipt",
+          null
+        ]
+      }
+    },
+    {
+      "case": "scope_identity_comparison_growth",
+      "completed": true,
+      "result": [
+        {
+          "files": 200,
+          "identity_comparisons": 20115,
+          "elapsed_seconds": 0.0645408000000316,
+          "complete": true
+        },
+        {
+          "files": 400,
+          "identity_comparisons": 80215,
+          "elapsed_seconds": 0.14108870000018214,
+          "complete": true
+        },
+        {
+          "files": 800,
+          "identity_comparisons": 320415,
+          "elapsed_seconds": 0.3328531999995903,
+          "complete": true
+        }
+      ]
+    },
+    {
+      "case": "original_v1_stop_fixture",
+      "completed": true,
+      "result": {
+        "settle_stop_second": false,
+        "stop_return": {
+          "job_id": "f4900cc3a0a7450faaaae8ca1f78d7a3",
+          "batch_id": "d827155c9c4941cf995da7de0ba694d8",
+          "phase": "paused"
+        },
+        "first_and_second_distinct": true
+      }
+    }
+  ]
+}

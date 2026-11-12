@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -36,11 +39,51 @@ def read_yaml(path: str | Path, default: dict[str, object] | None = None) -> dic
 
 
 def write_yaml(path: str | Path, data: dict[str, object]) -> None:
-    """写入 YAML（自动创建父目录）。"""
+    """原子写入 YAML（自动创建父目录）。"""
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{file_path.name}.", suffix=".tmp", dir=file_path.parent
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, file_path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def write_json(path: str | Path, data: object) -> None:
+    """Atomically persist a JSON document using the app's stable formatting."""
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{file_path.name}.", suffix=".tmp", dir=file_path.parent
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file_obj:
+            json.dump(data, file_obj, ensure_ascii=False, indent=2)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        os.replace(temp_path, file_path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def deep_merge_dict(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:

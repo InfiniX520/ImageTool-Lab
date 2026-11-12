@@ -1,0 +1,22 @@
+# flake8 配置 —— 与 black/isort 联动（line-length=100）
+# black 不检查的 E203/W503（与 black 冲突）需忽略
+[flake8]
+max-line-length = 100
+extend-ignore = E203, W503
+# 与 isort skip 一致；pixiv_auth.py 为第三方派生的大文件，单独排除
+exclude =
+    .gitnexus,
+    runtime_logs,
+    .pytest_cache,
+    __pycache__,
+    build,
+    dist,
+    utils/pixiv_auth.py
+# per-file-ignores：门面模块的 re-export 与 seam 导入是合法的
+per-file-ignores =
+    # 兼容门面：显式 re-export 全部符号，F401 是设计意图
+    core/pixiv_utils.py:F401
+    # 下载引擎：requests 作为 monkeypatch seam 保留（request_get 委托检查）
+    core/download_engine.py:F401
+    # 测试文件允许未使用导入（fixture 风格）
+    tests/*:F401,F811

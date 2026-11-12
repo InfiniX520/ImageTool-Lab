@@ -1,0 +1,187 @@
+{
+  "id": "JPGPNG-A1-AUDIT-20261111-01",
+  "completed_date": "2026-11-12",
+  "timezone": "Asia/Shanghai",
+  "scope_note": "Seven new modules read; 173 Python files hashed, not all individually audited",
+  "python": "3.12.14",
+  "sqlite": "3.53.4",
+  "source_baseline_count": 173,
+  "new_module_lines": 3911,
+  "previous_source_checkpoint_comparisons": [
+    {
+      "checkpoint": "foundation",
+      "path": "JpgPng/core/local_observation.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "foundation",
+      "path": "JpgPng/core/archive_inventory.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "foundation",
+      "path": "JpgPng/core/archive_schema.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "foundation",
+      "path": "JpgPng/tests/test_local_observation.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "foundation",
+      "path": "JpgPng/tests/test_archive_inventory.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "foundation",
+      "path": "JpgPng/tests/test_archive_schema.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "scope_adapter",
+      "path": "JpgPng/core/archive_scope.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "scope_adapter",
+      "path": "JpgPng/core/archive_plan_store.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "scope_adapter",
+      "path": "JpgPng/tests/test_archive_scope.py",
+      "unchanged": true
+    },
+    {
+      "checkpoint": "scope_adapter",
+      "path": "JpgPng/tests/test_archive_plan_store.py",
+      "unchanged": true
+    }
+  ],
+  "prior_reports_preserved": [
+    {
+      "path": ".runtime/jpgpng_unified_implementation_20261111_01/tests01.xml",
+      "sha256": "a2078bd218e177e2bd6a3179b0da7473101a64f44893ebe9ca70dc83c001eb0b",
+      "counts": {
+        "tests": 93,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_unified_implementation_20261111_01/tests02.xml",
+      "sha256": "6061b0e161aa30730e674e6946812a9197988d2f883dfb69395711b68ea63342",
+      "counts": {
+        "tests": 93,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_unified_implementation_20261111_01/validation.json",
+      "sha256": "e623d0953702066c8e3da7bc010c2a2f2fda3ef2eff069965db1861500402dc9"
+    },
+    {
+      "path": ".runtime/jpgpng_a1_foundation_20261111_01/checkpoint/manifest.json",
+      "sha256": "0d69b36f1cb63117ee32500369567be5b37c2738e476004129cd42264ecb8498"
+    },
+    {
+      "path": ".runtime/jpgpng_a1_foundation_20261111_01/integration/tests-final03.xml",
+      "sha256": "a0484601e17799e6441345f8e0c9257ea7619d69b57c3e947ffc4612af0b388c",
+      "counts": {
+        "tests": 259,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 3
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_a1_foundation_20261111_01/integration/existing_library.xml",
+      "sha256": "46a1685bda32cf8b04d0c8338b0d8dd0d2b9c30848dc21897ebbcc260853b3ff",
+      "counts": {
+        "tests": 65,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_a1_foundation_20261111_01/full/tests02.xml",
+      "sha256": "101aac969adee03f43c0af480a3e242c092c77fcf347c36768cf4e880f09f22e",
+      "counts": {
+        "tests": 1175,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 3
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_a1_foundation_20261111_01/validation.json",
+      "sha256": "3694603d3c548064f5235baf2516fba907139098169ac40d8908bd117e81dcdf"
+    },
+    {
+      "path": ".runtime/jpgpng_a1_scope_adapter_20261111_01/checkpoint/manifest.json",
+      "sha256": "f133035c90761b404264f2cc9bf2ac6a45a8a9b9b5e4c3ee2e7bfcc1a5d3aecc"
+    },
+    {
+      "path": ".runtime/jpgpng_a1_scope_adapter_20261111_01/integration/tests-final03.xml",
+      "sha256": "5e40cccfc67b444c72a8be05d1ea15763e43c1fca844f24b97587d8f7870bd99",
+      "counts": {
+        "tests": 42,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_a1_scope_adapter_20261111_01/full/tests.xml",
+      "sha256": "0e610e8b34a05599c1728cff56923137ce86d2c339175d9609168908f9602a88",
+      "counts": {
+        "tests": 1217,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 3
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_a1_scope_adapter_20261111_01/validation.json",
+      "sha256": "e93d48456df676abf4ddd9ca460c96d2299d6b9487a7cb0fe06ab418c872de96"
+    },
+    {
+      "path": ".runtime/jpgpng_a1_writer_compat_20261111_01/integration/tests01.xml",
+      "sha256": "ea957c12775eae8544254b7839ac1e5ae05e38d864eb1c4cc158f97aebcdf3ba",
+      "counts": {
+        "tests": 6,
+        "failures": 6,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "path": ".runtime/jpgpng_a1_writer_compat_20261111_01/integration/tests02.xml",
+      "sha256": "3b782c42bd1ecd92c0243361d00b22f64066be2a818f39ab7ced9a79ed49090e",
+      "counts": {
+        "tests": 6,
+        "failures": 5,
+        "errors": 0,
+        "skipped": 0
+      }
+    }
+  ],
+  "graph": {
+    "validate_archive_facts": {
+      "risk": "LOW",
+      "direct": 3,
+      "processes": 0
+    },
+    "_enqueue": {
+      "risk": "HIGH",
+      "direct": 9,
+      "processes": 3
+    },
+    "limitation": "Index does not include all new archive_repository references; direct source review required"
+  }
+}

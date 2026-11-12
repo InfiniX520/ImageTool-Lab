@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.app_paths import get_app_paths
 from core.config_manager import ConfigManager
 from gui.main_view import MainView
 
@@ -19,15 +20,21 @@ class MainController:
     """主控制器。"""
 
     def __init__(self, project_root: str | Path | None = None) -> None:
-        self.project_root = Path(project_root) if project_root else Path(__file__).resolve().parents[1]
+        self.project_root = get_app_paths(project_root).project_root
         self.config_manager = ConfigManager(self.project_root)
         self.config = self.config_manager.load().data
 
         app_cfg = self._dict_value(self.config.get("app"))
         title = str(app_cfg.get("title", "Pixiv 图片下载器"))
-        geometry = str(app_cfg.get("geometry", "850x750"))
+        geometry = str(app_cfg.get("geometry", "1100x860"))
 
         self.view = MainView(title=title, geometry=geometry)
+        self._gui_options = {
+            "title": title,
+            "geometry": geometry,
+            "project_root": self.project_root,
+        }
+        self.gui = None
 
     def run(self) -> None:
         """启动应用。"""
@@ -38,7 +45,7 @@ class MainController:
         """挂载重构后的主 GUI。"""
         if PixivDownloaderGUI is None:
             raise RuntimeError("无法导入主 GUI，请检查 gui/pixiv_downloader_gui.py")
-        self.view.mount_legacy_gui(PixivDownloaderGUI)
+        self.gui = self.view.mount_main_gui(PixivDownloaderGUI, **self._gui_options)
 
     @staticmethod
     def _dict_value(value: object) -> dict[str, object]:

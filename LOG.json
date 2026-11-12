@@ -1,0 +1,1172 @@
+{
+  "project": "PiDL/ImageTool-Lab",
+  "description": "Python+Tkinter Pixiv 原图下载器",
+  "last_updated": "2026-11-12",
+  "sessions": [
+    {
+      "session_date": "2026-07-30",
+      "summary": "GUI 交互三大 Bug 修复 + 诊断日志 + 性能优化",
+      "changes": [
+        {
+          "category": "bugfix",
+          "id": "BUG-001",
+          "title": "DualScrollText config 未委托给内部 tk.Text（根因）",
+          "severity": "critical",
+          "symptom": "日志不显示 + 点击下载空转",
+          "root_cause": "DualScrollText 继承 tk.Frame，__getattr__ 只对 Frame MRO 中不存在的属性生效。config/configure/cget/yview/see 都是 tk.Misc 上的方法，永远不触发 __getattr__ 委托。tk.Frame 不接受 state 选项，config(state='normal') 抛 TclError，导致 append_log_lines 无法插入日志、_clear_log 崩溃使 _start_download 在创建下载线程前就失败",
+          "files": [
+            "gui/ui_fx.py"
+          ],
+          "fix": "在 DualScrollText 中显式定义 configure/config/cget/yview/see 方法，直接委托给 self.text",
+          "verification": "诊断脚本确认 config(state='normal') OK，日志正常显示"
+        },
+        {
+          "category": "bugfix",
+          "id": "BUG-002",
+          "title": "_process_log_queue 无异常保护且 ok=False 终止调度",
+          "severity": "high",
+          "symptom": "日志轮询循环一次性死亡后永久不显示日志",
+          "root_cause": "append_log_lines 返回 ok=False 时直接 return 不再调度 after；函数体无 try/except，任何异常都会让 Tkinter 不再重新调度",
+          "files": [
+            "gui/pixiv_downloader_layout_mixin.py"
+          ],
+          "fix": "函数体包 try/except（TclError + Exception），ok=False 时继续调度而非 return；Exception 限流打印 stderr（最多3次）"
+        },
+        {
+          "category": "bugfix",
+          "id": "BUG-003",
+          "title": "_download_task join(timeout=None) 永久阻塞",
+          "severity": "high",
+          "symptom": "下载线程卡在 iter_content 时 _finish 永远不执行，running 永远为 True",
+          "root_cause": "正常完成时 join_timeout=None 无限等待；close_current_http_session 只关本线程 session 不关 downloader 线程的 per-thread session",
+          "files": [
+            "gui/pixiv_downloader_runtime_mixin.py"
+          ],
+          "fix": "join_timeout 永远有限（停止 2s / 正常 30s）；停止时改用 close_http_sessions() 关闭全部 session；join 超时后 force-close + 二次回收"
+        },
+        {
+          "category": "bugfix",
+          "id": "BUG-004",
+          "title": "download_file 不可取消，停止按钮无效",
+          "severity": "medium",
+          "symptom": "点击停止后正在传输的下载不中断，需等 60s 超时 × 3 次重试",
+          "root_cause": "download_file 的 iter_content 循环不检查 stop_event",
+          "files": [
+            "core/download_engine.py",
+            "core/download_service.py"
+          ],
+          "fix": "download_file 新增 stop_event 参数，iter_content 中检查并抛 RuntimeError('任务已停止')；异常处理中 stop_event set 时不重试直接 raise；download_image 传入 stop_event"
+        },
+        {
+          "category": "diagnostic-logging",
+          "id": "LOG-001",
+          "title": "下载任务关键节点诊断日志",
+          "files": [
+            "gui/pixiv_downloader_runtime_mixin.py",
+            "core/download_engine.py",
+            "gui/pixiv_downloader_layout_mixin.py"
+          ],
+          "details": [
+            "_download_task join 前：日志线程数+超时值",
+            "join 超时有线程存活：警告+N+force close 提示",
+            "force-close 后仍存活：警告将以 daemon 回收",
+            "downloader except：区分用户中止([*]) vs 真实失败([-])，用户中止不计 failed",
+            "download_file iter_content：检测到停止信号时记录 info",
+            "_process_log_queue except：限流 stderr 最多 3 次打印 traceback"
+          ]
+        },
+        {
+          "category": "performance",
+          "id": "PERF-001",
+          "title": "日志显示上限 3000 → 512 行",
+          "files": [
+            "gui/pixiv_downloader_layout_mixin.py",
+            "gui/pixiv_multi_filter_ui_mixin.py"
+          ],
+          "detail": "MAX_UI_LOG_LINES=512，_log_lines deque maxlen 同步降低，内存占用降 ~83%。完整日志仍通过 SessionLogQueue 分卷落盘"
+        },
+        {
+          "category": "performance",
+          "id": "PERF-002",
+          "title": "移除蓝色旋转进度条（indeterminate Progressbar）",
+          "files": [
+            "gui/pixiv_downloader_layout_mixin.py",
+            "gui/pixiv_downloader_runtime_mixin.py",
+            "gui/pixiv_downloader_config_mixin.py"
+          ],
+          "detail": "删除 ttk.Progressbar 控件创建、start(12)/stop()/config(mode=...) 全部引用。status_label 文本状态显示保留"
+        },
+        {
+          "category": "performance",
+          "id": "PERF-003",
+          "title": "移除无意义颜色动画",
+          "files": [
+            "gui/ui_fx.py"
+          ],
+          "detail": "set_pill 改为即时 config（不再 140ms animate_color 过渡）；bind_hover_highlight 改为即时 config（不再 100ms/160ms 动画）。Cookie 徽章/悬停高亮的颜色和文本仍正常切换，只是无过渡帧。animate_color/ColorAnimator 函数保留但不再被调用"
+        }
+      ],
+      "files_modified": [
+        "gui/ui_fx.py",
+        "gui/pixiv_downloader_layout_mixin.py",
+        "gui/pixiv_downloader_runtime_mixin.py",
+        "gui/pixiv_downloader_config_mixin.py",
+        "gui/pixiv_multi_filter_ui_mixin.py",
+        "core/download_engine.py",
+        "core/download_service.py"
+      ],
+      "tests": "80 passed (pytest tests/ -q)",
+      "diagnostic_verified": "GUI 启动 OK, config(state) OK, 日志显示 OK, progress_bar 已移除, status_label 保留, MAX_UI_LOG_LINES=512"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "审计问题修复：4代理联合审计 → 系统性规划 → 自主执行7项修复",
+      "audit_source": "docs/AUDIT_REPORT.md (24 findings, 综合评分 7.6/10)",
+      "plan": "TASK_PLAN.json",
+      "changes": [
+        {
+          "category": "bugfix",
+          "id": "CQ-1",
+          "title": "删除死代码 animate_color/ColorAnimator/_build_frames/_ANIMATOR_ATTR",
+          "severity": "critical",
+          "files": [
+            "gui/ui_fx.py"
+          ],
+          "fix": "删除 ColorAnimator 类、animate_color 函数、_build_frames 辅助、_ANIMATOR_ATTR 常量；移除 hex_blend 导入（仅 _build_frames 使用）；更新模块 docstring",
+          "verification": "assert not hasattr(ui_fx, 'animate_color') 等断言通过"
+        },
+        {
+          "category": "bugfix",
+          "id": "CQ-7",
+          "title": "用 DownloadStopped 异常类替代字符串匹配",
+          "severity": "medium",
+          "files": [
+            "core/download_engine.py",
+            "core/download_service.py",
+            "gui/pixiv_downloader_runtime_mixin.py"
+          ],
+          "fix": "新增 class DownloadStopped(Exception)；6处 raise RuntimeError('任务已停止') → raise DownloadStopped()；downloader 的 isinstance(exc, RuntimeError) and '任务已停止' in str(exc) → isinstance(exc, DownloadStopped)"
+        },
+        {
+          "category": "security",
+          "id": "SE-1",
+          "title": "清理 config.json 中残留的旧版明文 Cookie",
+          "severity": "medium",
+          "files": [
+            "gui/pixiv_downloader_config_mixin.py"
+          ],
+          "fix": "_load_cookie_file 成功加载 Netscape 后，主动从 config.json 删除 cookie 字段并写回（原来仅 _save_config 在关闭时清理，进程被杀则残留）"
+        },
+        {
+          "category": "security",
+          "id": "SE-2",
+          "title": "GUI 数值输入添加范围校验上限",
+          "severity": "medium",
+          "files": [
+            "gui/pixiv_downloader_runtime_mixin.py"
+          ],
+          "fix": "_validate_download_request_inputs 新增 delay>300 和 api_delay>60 上限校验（原已有 max_workers≤32、delay≥0 等校验）"
+        },
+        {
+          "category": "codequality",
+          "id": "CQ-2",
+          "title": "审查 26 处 except Exception，业务逻辑加日志",
+          "severity": "medium",
+          "files": [
+            "core/follow_crawl_service.py",
+            "gui/pixiv_downloader_runtime_mixin.py"
+          ],
+          "fix": "分类审查全部 26 处：13处清理/资源代码 pass 合理；6处数据解析 return default 合理；2处 rollback+raise 正确；2处业务逻辑 pass 改为 log_warning（follow_crawl mark_artist_swept 失败 + downloader mark_failed 失败）"
+        },
+        {
+          "category": "codequality",
+          "id": "CQ-6",
+          "title": "魔法数字提取为类级常量",
+          "severity": "low",
+          "files": [
+            "gui/pixiv_downloader_runtime_mixin.py"
+          ],
+          "fix": "新增 JOIN_TIMEOUT_STOP=2.0 / JOIN_TIMEOUT_NORMAL=30.0 类常量，替换硬编码的 2.0 和 30.0"
+        },
+        {
+          "category": "skipped",
+          "id": "CQ-3",
+          "title": "拆分 _download_task 函数（跳过）",
+          "reason": "250行函数重构风险高，无人确认时不宜执行"
+        },
+        {
+          "category": "skipped",
+          "id": "CQ-4",
+          "title": "移除 pixiv_utils.py 兼容门面 hack（跳过）",
+          "reason": "需确认无外部脚本依赖，无人确认时不宜执行"
+        }
+      ],
+      "files_modified": [
+        "gui/ui_fx.py",
+        "gui/pixiv_downloader_config_mixin.py",
+        "gui/pixiv_downloader_runtime_mixin.py",
+        "core/download_engine.py",
+        "core/download_service.py",
+        "core/follow_crawl_service.py"
+      ],
+      "tests": "80 passed (pytest tests/ -q)",
+      "diagnostic_verified": "DownloadStopped is Exception subclass, dead code removed, set_pill works, JOIN_TIMEOUT constants exist, log display works, MAX_UI_LOG_LINES=512, no progress_bar — ALL CHECKS PASSED",
+      "runtime_verified": "2026-07-30 GUI 启动运行流畅，无启动错误，窗口交互正常，日志显示正常"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第二轮重构：CQ-4 移除门面 hack + CQ-3 拆分 _download_task",
+      "changes": [
+        {
+          "category": "refactor",
+          "id": "CQ-4",
+          "title": "移除 pixiv_utils.py _CompatibilityModule 模块替换 hack",
+          "severity": "medium",
+          "files": [
+            "core/pixiv_utils.py",
+            "tests/test_core_services.py"
+          ],
+          "fix": "删除 _CompatibilityModule 类和 _sys.modules __class__ 替换；删除未使用的 sys/types 导入；更新测试 test_legacy_debug_flag_stays_synchronized → test_debug_mode_toggle_via_function_api（用 set_debug_mode() 替代直接赋值 DEBUG_MODE）",
+          "verification": "80 passed，测试不再依赖 _CompatibilityModule 同步 hack"
+        },
+        {
+          "category": "refactor",
+          "id": "CQ-3",
+          "title": "拆分 _download_task 函数（337行→231行+3个提取方法）",
+          "severity": "medium",
+          "files": [
+            "gui/pixiv_downloader_runtime_mixin.py"
+          ],
+          "fix": "提取3个方法：_setup_download_context(27行) 创建队列/统计/加载ID；_join_download_threads(30行) 有限超时join+force-close；_report_download_completion(40行) 格式化最终统计。downloader闭包(106行)因捕获15+变量保持内联。_download_task从337行降至231行(-31%)",
+          "verification": "80 passed，GUI启动正常"
+        }
+      ],
+      "files_modified": [
+        "core/pixiv_utils.py",
+        "tests/test_core_services.py",
+        "gui/pixiv_downloader_runtime_mixin.py"
+      ],
+      "tests": "80 passed (pytest tests/ -q)",
+      "runtime_verified": "GUI 启动正常，无错误，用户交互后正常退出"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第三轮重构：CQ-8 isort 统一 import 顺序",
+      "changes": [
+        {
+          "category": "style",
+          "id": "CQ-8",
+          "title": "isort 统一 import 顺序（black profile）",
+          "severity": "low",
+          "files": [
+            "core/",
+            "gui/",
+            "utils/",
+            "main.py",
+            "tests/"
+          ],
+          "fix": "安装 isort 8.0.1；以 `isort --profile black --diff` 预览后批量执行；共修正 32 个文件的 import 分组（stdlib / third-party / first-party 严格分离，组内字母序）",
+          "verification": "80 passed，import 顺序全项目一致"
+        }
+      ],
+      "files_modified_count": 32,
+      "tests": "80 passed (pytest tests/ -q)",
+      "tool_version": "isort 8.0.1 (profile=black)"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第四轮重构：AR-1 Mixin 依赖文档化 + LA-2 docstring 补全 + LA-4 历史记录",
+      "changes": [
+        {
+          "category": "docs",
+          "id": "AR-1",
+          "title": "10 个 Mixin 类添加 Host contract docstring",
+          "severity": "low",
+          "files": [
+            "core/pixiv_fetcher_path_mixin.py",
+            "core/pixiv_fetcher_ranking_mixin.py",
+            "core/pixiv_fetcher_follow_mixin.py",
+            "core/pixiv_fetcher_queue_mixin.py",
+            "core/pixiv_fetcher_search_mixin.py",
+            "gui/pixiv_downloader_config_mixin.py",
+            "gui/pixiv_downloader_layout_mixin.py",
+            "gui/pixiv_downloader_runtime_mixin.py",
+            "gui/pixiv_multi_filter_ui_mixin.py",
+            "gui/pixiv_multi_filter_runtime_mixin.py"
+          ],
+          "fix": "为每个 Mixin 的类 docstring 增加「Host contract」段，列出该 Mixin 期望宿主类提供的属性/方法及其来源（宿主直接提供 / 其他 Mixin 提供），降低隐式 self 耦合带来的维护困惑",
+          "verification": "80 passed，docstring 纯文档无运行时影响"
+        },
+        {
+          "category": "docs",
+          "id": "LA-2",
+          "title": "补充 layout_mixin 8 个 _build_* / _configure_theme 方法 docstring",
+          "severity": "low",
+          "files": [
+            "gui/pixiv_downloader_layout_mixin.py"
+          ],
+          "fix": "为 _configure_theme/_build_header_ui/_build_login_ui/_build_mode_ui/_build_params_ui/_build_options_ui/_build_buttons_ui/_build_log_ui 添加单行中文 docstring。验证发现 core/ 公开函数 docstring 覆盖率已近 100%（审计报告 40-50% 估计偏低，实际仅私有 helper 有缺口）",
+          "verification": "80 passed"
+        },
+        {
+          "category": "docs",
+          "id": "LA-4",
+          "title": "CLEANUP_HISTORY.md 追加 2026-07-30 三轮修复记录",
+          "severity": "low",
+          "files": [
+            "docs/maintenance/CLEANUP_HISTORY.md"
+          ],
+          "fix": "追加「2026-07-30 维护收口」章节，结构化记录 BUG-001~004/LOG-001/PERF-001~003/CQ-1/CQ-2/CQ-6/CQ-7/SE-1/SE-2/CQ-3/CQ-4/CQ-8 全部变更与验证结果，并列出未完成跳过项（LA-1/AR-2/AR-3/AR-4）及理由",
+          "verification": "Markdown 链接检查通过"
+        },
+        {
+          "category": "skipped",
+          "id": "LA-3",
+          "title": "重新运行 gitnexus analyze + 同步 AGENTS.md 符号数（阻塞）",
+          "reason": "node .gitnexus/run.cjs analyze 失败：EPERM: operation not permitted, open 'C:\\Users\\Administrator\\.gitnexus\\registry.json'。系统权限问题，非项目问题，需用户在终端以管理员身份重跑或修复 ~/.gitnexus 目录权限"
+        },
+        {
+          "category": "skipped",
+          "id": "LA-1",
+          "title": "根目录文件归类（pixiv_get_token.py / build_exe.py / 启动脚本 → scripts/ tools/）",
+          "reason": "评估后跳过：移动入口脚本会破坏用户 `python pixiv_get_token.py` 使用习惯；需联动 scripts/cleanup_project.py 的 PROTECTED_FILES 与启动脚本 cd 路径；收益小风险高"
+        }
+      ],
+      "files_modified": [
+        "core/pixiv_fetcher_path_mixin.py",
+        "core/pixiv_fetcher_ranking_mixin.py",
+        "core/pixiv_fetcher_follow_mixin.py",
+        "core/pixiv_fetcher_queue_mixin.py",
+        "core/pixiv_fetcher_search_mixin.py",
+        "gui/pixiv_downloader_config_mixin.py",
+        "gui/pixiv_downloader_layout_mixin.py",
+        "gui/pixiv_downloader_runtime_mixin.py",
+        "gui/pixiv_multi_filter_ui_mixin.py",
+        "gui/pixiv_multi_filter_runtime_mixin.py",
+        "docs/maintenance/CLEANUP_HISTORY.md"
+      ],
+      "tests": "80 passed (pytest tests/ -q)",
+      "audit_progress": "已完成 13/24 findings（CQ-1/2/3/4/6/7/8 + SE-1/2 + AR-1 + LA-2/4），跳过 4（LA-1/AR-2/AR-3/AR-4），阻塞 1（LA-3），剩余 6 为低优先级观察项"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第五轮：测试覆盖率量化 + 工具链固化 + 回归测试 + 死代码/复杂度扫描",
+      "changes": [
+        {
+          "category": "test-coverage",
+          "id": "P0-A",
+          "title": "安装 pytest-cov 并量化覆盖率基线",
+          "severity": "info",
+          "baseline": "TOTAL 55% (5711 stmts, 2580 miss)。关键缺口：http_client 45%、download_engine 68%（BUG-004/CQ-7 修复路径无测试）、ui_fx 14%（BUG-001 DualScrollText 无测试）、pixiv_fetcher_search/ranking_mixin 7%"
+        },
+        {
+          "category": "test",
+          "id": "P0-C",
+          "title": "新增 10 个回归测试覆盖 BUG-003/004 与 CQ-7 修复路径",
+          "severity": "high",
+          "files": [
+            "tests/test_download_engine_regression.py"
+          ],
+          "coverage": [
+            "test_download_stopped_is_exception_subclass — DownloadStopped 是 Exception 子类且非 RuntimeError",
+            "test_download_file_raises_download_stopped_when_stop_event_set_during_transfer — BUG-004 iter_content 中 stop_event 触发 DownloadStopped",
+            "test_download_file_stop_event_set_in_exception_handler_reraises_without_retry — CQ-7 异常处理中 stop_event set 立即 raise 不重试",
+            "test_download_file_no_stop_event_retries_on_failure — 无 stop_event 时重试 retries 次",
+            "test_download_file_resume_returns_true_when_local_size_matches_expected — 断点续传本地完整直接返回",
+            "test_download_file_size_validation_failure_returns_false — 大小校验失败重试后返回 False",
+            "test_get_remote_content_length_returns_none_on_failure — 异常返回 None",
+            "test_http_client_close_all_closes_all_sessions — BUG-003 close_all 关闭全部 session",
+            "test_http_client_close_current_only_closes_calling_thread_session — BUG-003 close_current 只关本线程",
+            "test_http_client_per_thread_session_isolation — per-thread 隔离"
+          ],
+          "coverage_gain": "http_client 45%→88%，download_engine 68%→72%，测试 80→90"
+        },
+        {
+          "category": "toolchain",
+          "id": "P0-B",
+          "title": "安装 isort/black/flake8 并创建工具链配置文件",
+          "severity": "medium",
+          "files_created": [
+            "pyproject.toml",
+            ".flake8"
+          ],
+          "files_modified": [
+            "requirements-dev.txt"
+          ],
+          "config": "line-length=100（匹配现有 p99 风格），isort profile=black，flake8 忽略 E203/W503，per-file-ignores 处理 pixiv_utils.py/download_engine.py 的合法 F401 re-export，排除 utils/pixiv_auth.py（第三方派生大文件）",
+          "violations_remaining": "200（E501 长行 111 + W293 空白 63 + 其他 26），属增量清理债务",
+          "fixes_applied": "修复 isort 在新测试文件的排序 + 1 处 F541 f-string（pixiv_fetcher_follow_mixin.py:173）"
+        },
+        {
+          "category": "dead-code",
+          "id": "P1-A-vulture",
+          "title": "vulture 扫描发现并清理 3 处死代码",
+          "severity": "low",
+          "files": [
+            "gui/ui_fx.py",
+            "core/download_service.py"
+          ],
+          "findings": [
+            "gui/ui_fx.py:12 — set_pill 的 animate 参数（PERF-003 移除动画后遗留，无调用方使用）→ 删除参数",
+            "core/download_service.py:29,31 — check_user_folder_exists/get_existing_user_folders 导入未使用 → 删除导入",
+            "core/pixiv_utils.py 3 处 — facade re-export 误报，保留"
+          ],
+          "verification": "vulture --min-confidence 80 仅剩 pixiv_utils.py facade 误报"
+        },
+        {
+          "category": "complexity",
+          "id": "P1-A-radon",
+          "title": "radon 复杂度扫描定位下一轮重构目标",
+          "severity": "info",
+          "top_targets": [
+            "download_service.py:71 download_image — F(45) 最高优先级",
+            "download_engine.py:329 fetch_original_meta — D(24)",
+            "download_engine.py:483 download_file — D(24)",
+            "fetch_strategies.py:25 _search — D(23)",
+            "follow_crawl_service.py:385 _reconcile_snapshot — D(22)",
+            "follow_crawl_service.py:646 _sweep_artist — C(18)",
+            "download_task_store.py:66 _deserialize — C(16)"
+          ],
+          "next_refactor": "download_image F(45) 是 _download_task(CQ-3) 之后的下一个重大重构目标"
+        }
+      ],
+      "files_modified": [
+        "pyproject.toml (新)",
+        ".flake8 (新)",
+        "requirements-dev.txt",
+        "tests/test_download_engine_regression.py (新)",
+        "gui/ui_fx.py",
+        "core/download_service.py",
+        "core/pixiv_fetcher_follow_mixin.py"
+      ],
+      "tests": "90 passed (+10 回归测试)",
+      "coverage": "TOTAL 55%→55% (http_client 45%→88%, download_engine 68%→72%)"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第六轮重构 —— 复杂度削减与质量债务清理（R6-1 ~ R6-7）",
+      "plan": "TASK_PLAN.json 系统性规划：状态流(待处理/进行中/已完成/阻塞/已跳过) + 质量控制(pre-check/per-fix-verify/post-all-verify) + 三阶段(P0/P1/P2)",
+      "changes": [
+        {
+          "category": "refactor",
+          "id": "R6-1",
+          "title": "拆分 download_image F(45) → C(19)",
+          "file": "core/download_service.py",
+          "strategy": "提取2个嵌套函数：_resolve_original_target(元数据+多页扇出) + _perform_download(下载执行)，主函数降为编排器。闭包 report_page/record_event/note_retry 保持内联",
+          "complexity_before": "F(45)",
+          "complexity_after": "C(19)",
+          "reduction": "-58%",
+          "risk": "高（递归自调用 + 闭包捕获 + 7处调用方）",
+          "stop_reason": "C(19)为合理停止点，进一步降至B需模块级函数传20+参数"
+        },
+        {
+          "category": "refactor",
+          "id": "R6-2",
+          "title": "拆分 fetch_original_meta D(24) → C(14)",
+          "file": "core/download_engine.py",
+          "strategy": "提取3个模块级 helper：_interruptible_sleep(可中断sleep) + _parse_ajax_response_body(JSON解析) + _handle_429_if_needed(429退避)，主函数聚焦重试循环编排",
+          "complexity_before": "D(24)",
+          "complexity_after": "C(14)",
+          "reduction": "-42%"
+        },
+        {
+          "category": "refactor",
+          "id": "R6-3",
+          "title": "拆分 _search D(23) → A(5)",
+          "file": "core/fetch_strategies.py",
+          "strategy": "提取3段模块级 helper + 1判定函数：_is_popular_high_quality_mode(魔法表达式去重) + _search_web_popular_fallback(B(6)) + _search_main_query(A(4)) + _search_keyword_fallback_chain(B(6))，主函数降为编排器",
+          "complexity_before": "D(23)",
+          "complexity_after": "A(5)",
+          "reduction": "-78%",
+          "impact_analysis": "仅 MODE_STRATEGIES 字典注册，无直接调用方，风险低"
+        },
+        {
+          "category": "refactor",
+          "id": "R6-4",
+          "title": "拆分 _reconcile_snapshot D(22) → C(11)",
+          "file": "core/follow_crawl_service.py",
+          "strategy": "提取4个模块级 helper：_revive_refollowed_artists(复活重新关注 A级) + _append_new_following_artists(追加新关注 A级) + _mark_unfollowed_artists(取消关注清理 B(6)) + _log_unfollowed_summary(末尾 if/elif 日志分支)，主函数降为编排器",
+          "complexity_before": "D(22)",
+          "complexity_after": "C(11)",
+          "reduction": "-50%",
+          "target_achieved": "达成 C(≤11) 目标"
+        },
+        {
+          "category": "lint",
+          "id": "R6-5",
+          "title": "flake8 违规增量清理 200 → 113 (-43.5%)",
+          "files": [
+            "core/download_service.py",
+            "core/pixiv_fetcher.py",
+            "gui/pixiv_downloader_gui.py",
+            "core/models.py",
+            "core/pixiv_fetcher_search_mixin.py",
+            "core/pixiv_utils.py",
+            "core/record_manager.py",
+            "gui/pixiv_downloader_config_mixin.py",
+            "gui/pixiv_downloader_gui.py",
+            "gui/pixiv_downloader_runtime_mixin.py",
+            "gui/pixiv_multi_filter.py",
+            "utils/logger.py",
+            "gui/pixiv_multi_filter_runtime_mixin.py",
+            "core/pixiv_fetcher_path_mixin.py",
+            "core/pixiv_fetcher_ranking_mixin.py",
+            "gui/pixiv_multi_filter_ui_mixin.py",
+            "utils/pixiv_auth.py",
+            "core/pixiv_fetcher_follow_mixin.py"
+          ],
+          "breakdown": {
+            "F401": "11 → 0 (7 facade re-export 加 noqa + 2 legacy seam 加 noqa + 1 queue 死代码删除 + 1 random 加 noqa)",
+            "W293": "63 → 0 (脚本批量清理 109 行行尾空白)",
+            "E302_E303_E305_E306": "13 → 0 (8文件手动补/删空行)",
+            "E501": "113 保留 (需逐行手动判断，留作后续低优先级)"
+          }
+        },
+        {
+          "category": "security",
+          "id": "R6-6",
+          "title": "pip-audit 依赖 CVE 扫描",
+          "result": "No known vulnerabilities found",
+          "verification": "pip-audit -r requirements.txt 通过"
+        },
+        {
+          "category": "test_coverage",
+          "id": "R6-7",
+          "title": "覆盖率提升：search/ranking mixin 7% → 30%/37%",
+          "file": "tests/test_search_ranking_mixins.py (新)",
+          "new_tests": 19,
+          "covered_functions": [
+            "_is_popular_preview_below_threshold (4 tests: 阈值0/空结果/max比较/缺属性)",
+            "_build_keyword_aliases (3 tests: 预定义角色/未知词/包含扩展)",
+            "_match_keyword_aliases (6 tests: 空别名/字符串标签/对象标签/.tags子列表/标题回退/异常容忍)",
+            "_get_ranking_step (3 tests: month/week/day 分支)",
+            "_log_search_preview (3 tests: 空结果/阈值警告/阈值0静默)"
+          ],
+          "coverage_before": {
+            "ranking_mixin": "7%",
+            "search_mixin": "7%",
+            "TOTAL": "52%"
+          },
+          "coverage_after": {
+            "ranking_mixin": "37%",
+            "search_mixin": "30%",
+            "TOTAL": "53%"
+          }
+        }
+      ],
+      "files_modified": [
+        "core/download_service.py",
+        "core/download_engine.py",
+        "core/fetch_strategies.py",
+        "core/follow_crawl_service.py",
+        "core/download_service.py",
+        "core/pixiv_fetcher.py",
+        "core/models.py",
+        "core/pixiv_fetcher_search_mixin.py",
+        "core/pixiv_utils.py",
+        "core/record_manager.py",
+        "gui/pixiv_downloader_gui.py",
+        "gui/pixiv_downloader_config_mixin.py",
+        "gui/pixiv_downloader_runtime_mixin.py",
+        "gui/pixiv_multi_filter.py",
+        "utils/logger.py",
+        "tests/test_search_ranking_mixins.py (新)",
+        "TASK_PLAN.json"
+      ],
+      "tests": "109 passed (+19 单元测试)",
+      "radon_summary": "4个 D/F 级函数全部降至 A-C 级：F(45)→C(19)、D(24)→C(14)、D(23)→A(5)、D(22)→C(11)。剩余最高为 _sweep_artist C(18)，留待后续",
+      "flake8_summary": "200 → 113 (-43.5%)。F401/W293/E302-E306 全清零，剩余 E501(113) 保留后续"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第七轮重构 —— 收尾复杂度债务 + E501 长行清零（R7-1 ~ R7-2）",
+      "plan": "TASK_PLAN.json phases_R7：P0 拆分 _sweep_artist + P1 E501 长行修复 + P2 日志更新",
+      "changes": [
+        {
+          "category": "refactor",
+          "id": "R7-1",
+          "title": "拆分 _sweep_artist C(18) → B(7)",
+          "file": "core/follow_crawl_service.py:722",
+          "strategy": "提取3个 helper：_find_sweep_cutoff(模块级，cutoff位置查找 A级) + _queue_sweep_items(方法，作品入队 A级) + _advance_sweep_cursor(方法，翻页/终止判定 B(7))，主函数降为循环编排器",
+          "complexity_before": "C(18)",
+          "complexity_after": "B(7)",
+          "reduction": "-61%",
+          "target_achieved": "超 C(≤11) 目标达 B 级",
+          "impact_analysis": "仅 _sweep_candidates 单点调用，风险低"
+        },
+        {
+          "category": "lint",
+          "id": "R7-2",
+          "title": "E501 长行修复 113 → 0（flake8 总数首次归零）",
+          "files": [
+            "core/record_manager.py",
+            "core/follow_crawl_state.py",
+            "core/legacy_record_utils.py",
+            "core/pixiv_fetcher_queue_mixin.py",
+            "core/sqlite_record_repository.py"
+          ],
+          "strategy": "black 自动修复 100 处（line-length=100）+ 手动修复 13 处：8处 markdown 表格加 noqa(保持可读性) + 4处 SQL 字符串拼接拆分 + 1处 log f-string 拆分",
+          "breakdown": {
+            "black_auto": "100 处自动修复",
+            "markdown_noqa": "8 处 (record_manager.py 表头/分隔线/6行数据行模板)",
+            "sql_split": "4 处 (follow_crawl_state.py×2 UPDATE + sqlite_record_repository.py INSERT + legacy_record_utils.py 表格行)",
+            "log_split": "1 处 (pixiv_fetcher_queue_mixin.py 收藏不足日志)"
+          },
+          "milestone": "flake8 --count 自项目审计以来首次归零"
+        }
+      ],
+      "files_modified": [
+        "core/follow_crawl_service.py",
+        "core/record_manager.py",
+        "core/follow_crawl_state.py",
+        "core/legacy_record_utils.py",
+        "core/pixiv_fetcher_queue_mixin.py",
+        "core/sqlite_record_repository.py",
+        "TASK_PLAN.json"
+      ],
+      "tests": "109 passed",
+      "radon_summary": "_sweep_artist C(18)→B(7)。follow_crawl_service.py 当前最高 _sweep_completed_artists C(12)，全文件 A-C 级",
+      "flake8_summary": "113 → 0 (-100%)。E501 全清零，flake8 总数首次归零"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第七轮 mock 测试 + 核心分支诊断日志（R7-3 ~ R7-6）",
+      "plan": "构造 mock 数据本地验证 R7-1 重构逻辑 + 在 _sweep_artist/download_image/_reconcile_snapshot 核心分支添加 logger 日志",
+      "changes": [
+        {
+          "category": "test",
+          "id": "R7-3",
+          "title": "mock 测试覆盖 _sweep_artist 5核心分支 + helper 单元",
+          "file": "tests/test_sweep_artist_mock.py (新)",
+          "new_tests": 17,
+          "covered_branches": [
+            "分支1: 空响应立即终止",
+            "分支2: cutoff首页命中不翻页",
+            "分支3: legacy无cutoff仅探测首页",
+            "分支4: 多页翻页+cutoff后续页命中",
+            "分支5: cutoff未匹配+无next_url终止",
+            "newest_seen记录验证",
+            "SWEEP_MAX_PAGES上限验证",
+            "_find_sweep_cutoff 5个单元(空cutoff/命中/未匹配/空illusts/缺id属性)",
+            "_advance_sweep_cursor 5个单元(覆盖范围/无cutoff/无next_url/全条件/parse_qs空)"
+          ],
+          "fakes": "_FakeApi支持多页响应+next_url自动生成+parse_qs解析",
+          "verify": "17 passed + 全量 126 passed (109+17)"
+        },
+        {
+          "category": "logging",
+          "id": "R7-4",
+          "title": "_sweep_artist/helper 添加诊断日志",
+          "file": "core/follow_crawl_service.py",
+          "log_points": [
+            "_sweep_artist 入口(run/artist/cutoff)",
+            "每页空响应终止",
+            "每页 illusts数/stop_at/cutoff命中状态",
+            "_queue_sweep_items 每项入队(index/illust_id/delta/total)",
+            "_advance_sweep_cursor 4个终止分支原因(覆盖范围/legacy/无next_url/parse_qs空)",
+            "翻页决策(page N→N+1/cursor)",
+            "_sweep_artist 完成(artist/queued/newest_seen)"
+          ],
+          "log_level": "self.log [D] 前缀（debug 风格）",
+          "complexity_impact": "_sweep_artist B(7)→B(10), _advance_sweep_cursor B(7) 保持",
+          "verify": "126 passed + flake8 0"
+        },
+        {
+          "category": "logging",
+          "id": "R7-5",
+          "title": "download_image/_resolve_original_target 添加诊断日志",
+          "file": "core/download_service.py",
+          "log_points": [
+            "download_image 入口(illust_id/page/original/multi/expand)",
+            "原图元数据未预置请求Ajax",
+            "原图元数据结果(page_count/source)",
+            "多页扇出开始(page_count)与完成(success/N)",
+            "download_image 早返回(early_return)",
+            "download_image 执行下载(target截断80字符)"
+          ],
+          "log_level": "log_message 'debug' 级别（仅 DEBUG_MODE 时输出）",
+          "complexity_impact": "download_image C(19)→C(20)",
+          "verify": "126 passed + flake8 0"
+        },
+        {
+          "category": "logging",
+          "id": "R7-6",
+          "title": "_reconcile_snapshot 添加诊断日志",
+          "file": "core/follow_crawl_service.py",
+          "log_points": [
+            "reconcile_snapshot 快照获取(snapshots/complete/run)",
+            "tracked/current/intersection 统计",
+            "unfollowed_marked 数量",
+            "刷新 totals 决策(revived/added/complete)",
+            "无变更沿用原 run"
+          ],
+          "log_level": "self.log [D] 前缀（debug 风格）",
+          "complexity_impact": "_reconcile_snapshot C(11)→C(12)",
+          "verify": "126 passed + flake8 0"
+        }
+      ],
+      "files_modified": [
+        "tests/test_sweep_artist_mock.py (新)",
+        "core/follow_crawl_service.py",
+        "core/download_service.py",
+        "TASK_PLAN.json"
+      ],
+      "tests": "126 passed (+17 mock 测试)",
+      "radon_summary": "日志添加后复杂度小幅上升但仍达标：_sweep_artist B(7)→B(10)、_reconcile_snapshot C(11)→C(12)、download_image C(19)→C(20)。全部仍在 B/C 级目标内",
+      "flake8_summary": "保持 0（日志添加未引入新违规）",
+      "diagnostic_log_convention": "[D] 前缀用于 follow_crawl_service 的 self.log；download_service 用 log_message('debug') 仅 DEBUG_MODE 输出"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "第八轮重构 —— 消除最后 2 个 E 级复杂度函数（R8-1 ~ R8-2）",
+      "plan": "TASK_PLAN.json phases_R8：P0 拆分 _process_illust E(37) + _validate_download_request_inputs E(34) + P1 验证收尾",
+      "changes": [
+        {
+          "category": "refactor",
+          "id": "R8-1",
+          "title": "拆分 _validate_download_request_inputs E(34) → A(3)",
+          "file": "gui/pixiv_downloader_runtime_mixin.py:314",
+          "strategy": "按校验职责提取5个方法：_validate_numeric_bounds(数值范围 B(7)) + _validate_mode_inputs(模式分发 B(10)) + _validate_ranking_dates(排行榜日期 B(6)) + _validate_follow_all_params(关注全量参数 B(7)) + _validate_name_template(命名模板 B(9))。主函数降为顺序编排器，返回首个非空错误",
+          "complexity_before": "E(34)",
+          "complexity_after": "A(3)",
+          "reduction": "-91%",
+          "target_achieved": "超 C(≤11) 目标达 A 级，5 helpers 全 B 级",
+          "impact_analysis": "2处调用方（_start_download 内部 + test_gui_validation/test_follow_gui_options 测试），签名/返回值不变",
+          "test_fix": "test_follow_gui_options.py 的 SimpleNamespace mock 需用 MethodType 绑定5个新 helper（SimpleNamespace 不触发描述符协议）"
+        },
+        {
+          "category": "refactor",
+          "id": "R8-2",
+          "title": "拆分 _process_illust E(37) → B(7)",
+          "file": "core/pixiv_fetcher_queue_mixin.py:167",
+          "strategy": "按流水线阶段提取3个方法：_handle_legacy_skip_check(已下载审计/缺页重排 B(8)) + _fetch_illust_detail_with_timing(详情请求+耗时告警+异常分类 C(12)) + _build_and_enqueue_pages(URL提取+逐页构造DownloadTask入队 C(14))。主函数降为编排器，两次 _filter_and_record_skip 守卫保持内联。顺手清理：移除内联 import time as _time，复用模块级 time",
+          "complexity_before": "E(37)",
+          "complexity_after": "B(7)",
+          "reduction": "-81%",
+          "target_achieved": "超 C(≤11) 目标达 B 级。2个 helper C(12)/C(14) 为合理停止点（进一步拆分致参数爆炸）",
+          "impact_analysis": "2处调用方（_fetch_and_queue 同模块 + _get_following_users follow_mixin），签名/返回值(_IllustOutcome)不变"
+        }
+      ],
+      "files_modified": [
+        "gui/pixiv_downloader_runtime_mixin.py",
+        "core/pixiv_fetcher_queue_mixin.py",
+        "tests/test_follow_gui_options.py",
+        "TASK_PLAN.json"
+      ],
+      "tests": "126 passed",
+      "radon_summary": "2个 E 级函数全部消除：_validate_download_request_inputs E(34)→A(3)、_process_illust E(37)→B(7)。项目当前无 E 级函数，剩余 D 级 7 个（非本轮目标）",
+      "flake8_summary": "保持 0"
+    },
+    {
+      "session_date": "2026-07-30",
+      "summary": "文档全面更新与清理 —— 审计报告状态化 + 维护历史补全 S5-S8 + 测试产物清理",
+      "changes": [
+        {
+          "category": "docs",
+          "id": "DOC-1",
+          "title": "AUDIT_REPORT.md 添加修复状态总览表 + 优先级表状态列",
+          "files": [
+            "docs/AUDIT_REPORT.md"
+          ],
+          "details": [
+            "新增「修复状态总览」表：12 已修复 / 8 保持现状 / 3 跳过 / 1 阻塞",
+            "优先级表新增「状态」列，每个 finding 标注 ✅/⏭️",
+            "新增「超出原审计的额外重构 S5-S8」表",
+            "测试基线更新：80 passed → 126 passed",
+            "修复新加链接 ../../LOG.json → ../LOG.json（相对路径错误）"
+          ]
+        },
+        {
+          "category": "docs",
+          "id": "DOC-2",
+          "title": "CLEANUP_HISTORY.md 追加第四至第八轮重构记录",
+          "files": [
+            "docs/maintenance/CLEANUP_HISTORY.md"
+          ],
+          "details": [
+            "S4: AR-1 Mixin Host contract + LA-2 docstring + LA-4 历史追加 + LA-3 阻塞 + LA-1 跳过",
+            "S5: 覆盖率基线 55% + 10 回归测试 + pyproject.toml/.flake8 工具链 + vulture 清理",
+            "S6: 4 个 D/F 级函数降至 A-C + flake8 200→113 + pip-audit 无 CVE + 19 单元测试",
+            "S7: _sweep_artist C(18)→B(7) + E501 113→0 flake8 首次归零 + 17 mock 测试 + 诊断日志",
+            "S8: _validate E(34)→A(3) + _process_illust E(37)→B(7) E 级清零里程碑"
+          ]
+        },
+        {
+          "category": "cleanup",
+          "id": "DOC-3",
+          "title": "清理 .coverage 测试产物",
+          "files": [
+            ".coverage"
+          ],
+          "detail": "pytest 覆盖率产物，可再生成，已删除节省空间"
+        }
+      ],
+      "files_modified": [
+        "docs/AUDIT_REPORT.md",
+        "docs/maintenance/CLEANUP_HISTORY.md",
+        "LOG.json"
+      ],
+      "files_deleted": [
+        ".coverage"
+      ],
+      "verification": "126 passed + 12 md 文件链接检查全通过 + 文档内容与 LOG.json/TASK_PLAN.json 一致",
+      "backup_location": "record_backups/docs_cleanup_20260730/（验证通过后已删除）"
+    },
+    {
+      "id": "JPGPNG-REFACTOR-20261023",
+      "session_date": "2026-10-24",
+      "summary": "P0—P8 下载器主线完成，正式入口切换、测试材料可恢复归档和文档同步",
+      "status": "completed",
+      "verification": "906 passed; full continuous 7200s; idle production startup, 5 sources and restore acceptance passed",
+      "changes": [
+        "统一原图全页、任务/游标/成果单库与筛选名单",
+        "主代理实现白蓝原生界面、文件弹窗及全部来源",
+        "保留旧入口/旧库，按清单合入 67 个变化文件",
+        "归档移除 22652 个生成测试文件，净回收约 3.39 GiB"
+      ],
+      "evidence": "../docs/maintenance/2026-10-23_jpgpng_release_and_cleanup.md",
+      "backup_location": "record_backups/refactor_20261023_release01",
+      "archive": "../_archives/jpgpng_refactor_20261023",
+      "remaining": [
+        "E1 正式账号整理 CLI / 分类小样 / 分批写回",
+        "可选旧历史导入未选择、未发布"
+      ]
+    },
+    {
+      "id": "JPGPNG-E1-2-20261024",
+      "session_date": "2026-10-24",
+      "summary": "独立关注整理 CLI 实现、恢复测试、真实账号小样与文档发布",
+      "status": "completed",
+      "changes": [
+        "新增 organize.cmd/organizer：快照、分组成员、样图、查看交接、计划、写回、核对与补偿",
+        "修正控制台历史扫描造成的通信性能下降；样图复用既有请求头",
+        "保护 organizer_data，导入核验账号与 602 位关注快照；技术写入与图片保留隔离记录"
+      ],
+      "verification": "89 related offline tests; 15 page protocol checks; 602 public/0 private inventory; 4 images viewed, zero-request cache reuse; 2 account writes compensated and website verified; original 154 sources and 4 configuration fingerprints unchanged",
+      "dsh": "failed before tools (0 calls, 0 changes); implemented and verified by main agent",
+      "evidence": "../docs/maintenance/2026-10-24_jpgpng_organizer_cli.md",
+      "remaining": [
+        "E1-3 多图分类小样及规则校准",
+        "E1-4 分批整理、按组下载联测和长批性能验证"
+      ]
+    },
+    {
+      "id": "JPGPNG-TIDY-20261024",
+      "session_date": "2026-10-24",
+      "summary": "JpgPng 全面目录整理、开发副本可恢复归档与文档导航更新",
+      "status": "completed",
+      "changes": [
+        "70 项、6074 文件逐项核验归档并移除重复原件",
+        "统一目录说明、当前指南和历史资料入口",
+        "归档旧清理脚本，保留源码、启动器、业务资料和最终验收证据"
+      ],
+      "verification": {
+        "status": "passed",
+        "completed_at": "2026-10-24T17:55:55+08:00",
+        "scope": "JpgPng and named JpgPng development artifacts only",
+        "source_entry_dependency_files_unchanged": 178,
+        "protected_files_members_size_mtime_unchanged": 396,
+        "protected_files_sha256_unchanged": 36,
+        "historical_documents_unchanged": 6,
+        "frozen_release_evidence_files_unchanged": 337,
+        "historical_version_section_unchanged": true,
+        "zip_entries_verified": 6074,
+        "zip_hash_verified_at_closeout": true,
+        "archived_targets_removed": 70,
+        "current_markdown_links_checked": 229,
+        "changed_document_link_errors": 0,
+        "unchanged_document_link_issues": [],
+        "utf8_lf_documents_verified": 12,
+        "network_requests": 0,
+        "dependencies_installed": 0,
+        "functional_tests_rerun": false,
+        "validation_reason": "Documentation and recoverable archive only; production code and entry hashes unchanged"
+      },
+      "evidence": "../docs/maintenance/2026-10-24_jpgpng_directory_tidy.md",
+      "archive": "../_archives/jpgpng_tidy_20261024",
+      "remaining": [
+        "E1-3 分类小样",
+        "E1-4 分批整理与联测"
+      ]
+    },
+    {
+      "id": "JPGPNG-OPEN-SOURCE-COMPARISON-20261111",
+      "session_date": "2026-11-11",
+      "summary": "核对成熟开源 Pixiv 下载工具，评估替代与保留价值",
+      "status": "research_completed_no_migration",
+      "changes": [
+        "对照 PPD v19.6.1、gallery-dl v1.32.19 及主线、PixivUtil2 主线官方文档与核心源码",
+        "确认 gallery-dl 默认较小图 fallback、PPD 默认有损动图，纠正零风险保证",
+        "记录现有 JpgPng 优势及可信收据复用未重新检查磁盘文件等边界；给出独立对照方案"
+      ],
+      "evidence": "docs/OPEN_SOURCE_COMPARISON_2026-11-11.md",
+      "local_evidence": "../.runtime/jpgpng_comparison_20261111_01",
+      "verification": "58 official text sources hashed; static review only; no third-party code executed, installs, Pixiv account requests, or business-data writes",
+      "recommendation": "Prioritize gallery-dl evaluation for AI-operated long-term collection; PPD for browser use; retain only useful JpgPng quality/management/organizer features",
+      "remaining": [
+        "有界同条件功能与故障对照尚未实施",
+        "E1-3/E1-4 仍待实施，未自动改为迁移项目"
+      ]
+    },
+    {
+      "id": "JPGPNG-UPSTREAM-SOURCES-20261111",
+      "session_date": "2026-11-11",
+      "status": "download_completed_audit_not_started",
+      "summary": "从官方来源下载 gallery-dl、PixivUtil2 完整固定提交源码并核验",
+      "source_directory": "../references/pixiv_downloaders/2026-11-11",
+      "verification": "985 files match official Git blobs; ZIP CRC and extracted SHA-256 verified; no source execution or dependency installations",
+      "evidence": "../docs/maintenance/2026-11-11_jpgpng_upstream_sources.md",
+      "remaining": [
+        "下一阶段开展源码与依赖审计，本轮未开始"
+      ]
+    },
+    {
+      "id": "JPGPNG-THREE-PROJECT-AUDIT-20261111-01",
+      "session_date": "2026-11-11",
+      "status": "audit_completed_findings_unfixed",
+      "summary": "JpgPng、gallery-dl、PixivUtil2 三项目源码、依赖与受控离线行为审计",
+      "changes": [
+        "新增三份正常技术文档，区分功能、质量、性能、安全、维护、默认策略和未验证范围",
+        "985 上游文件与当前 178 文件范围建基线，全部 Python AST 及源码风险模式搜索",
+        "保留原始失败、复现工具与观察；更新文档索引和接续入口，未修改生产代码"
+      ],
+      "verification": {
+        "JpgPng": "208 passed, 3 deselected",
+        "gallery_dl": "112 passed, 8 Windows/POSIX path expectation failures",
+        "probes": "22 assertions, including confirmed limitations",
+        "dependency_queries": "52 entries / 50 distinct package-version pairs / 5 unique GHSA",
+        "production_and_upstream_unchanged": "See final closeout.json"
+      },
+      "evidence": "docs/audits/2026-11-11/README.md",
+      "local_evidence": "../.runtime/jpgpng_audit_20261111_01",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_three_project_audit.md",
+      "remaining": [
+        "审计问题尚未修复",
+        "共用环境依赖维护另做可回滚批次",
+        "固定稳定版严格配置的真实同条件对照未执行",
+        "E1-3/E1-4 状态不变"
+      ]
+    },
+    {
+      "id": "JPGPNG-OPTIMIZATION-DESIGN-20261111-01",
+      "session_date": "2026-11-11",
+      "status": "design_ready_not_implemented",
+      "summary": "结合三项目审计与成熟工具形成优化拓展设计，追加 yt-dlp 适用性核对",
+      "changes": [
+        "新增三份讨论稿：优先级与决策、详细设计、验证与接续",
+        "区分历史交付与当前文件完整性，提出有界核验及明确修复范围",
+        "评估 gallery-dl 的提取/整套引擎接入成本；yt-dlp 仅作架构参考",
+        "更新文档导航与进度，历史记录和冻结审计不覆盖"
+      ],
+      "verification": {
+        "source_baseline": "833 gallery-dl + 152 PixivUtil2 + 178 JpgPng files match prior audit at start",
+        "closeout": "../.runtime/jpgpng_optimization_design_20261111_01/validation.json",
+        "product_tests": "Not run: documentation-only changes"
+      },
+      "evidence": "docs/optimization/2026-11-11/README.md",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_optimization_design.md",
+      "remaining": [
+        "U1-A 核验/修复尚未编码",
+        "共用依赖维护未实施",
+        "外部引擎真实对照与选型未实施",
+        "E1-3/E1-4 状态不变"
+      ]
+    },
+    {
+      "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
+      "session_date": "2026-11-11",
+      "status": "design_ready_not_implemented",
+      "summary": "根据主动腾空间与夸克留档需求修订方向，完成归档详细设计和实施接续记录",
+      "changes": [
+        "新增需求总览、详细设计、验收清单、实施日志四份文档",
+        "区分本地可用、历史下载、归档证据、恢复能力和主动释放，不默认补下主动删除的图片",
+        "设计独立加密包、按块证明的纠错、全部对象回读和成员摘要校验、可脱离程序恢复的目录",
+        "首版由官方客户端人工传输，如实标注用户确认来源与程序内容核验的边界",
+        "更新当前工作指针与导航；原优化三稿只追加修订提示，旧计划正文及日志保留"
+      ],
+      "verification": {
+        "baseline": "../.runtime/jpgpng_archive_design_20261111_01/baseline.json",
+        "closeout": "../.runtime/jpgpng_archive_design_20261111_01/validation.json",
+        "scope": "Document links/encoding/JSON, append-only history, production-source and frozen-report digests",
+        "product_tests": "Not run: documentation-only changes",
+        "business_data": "Not scanned, read or changed"
+      },
+      "evidence": "docs/archiving/README.md",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_archive_design.md",
+      "remaining": [
+        "A1 离线契约、清单、容量和 schema 副本设计尚未编码",
+        "安全密码交接、正式工具来源、纠错与夸克往返均待实际验证",
+        "当前无需取回 500 GB；后续按小样操作卡配合",
+        "现有审计缺陷和共用依赖维护未修复；E1-3/E1-4 状态不变"
+      ]
+    },
+    {
+      "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
+      "session_date": "2026-11-11",
+      "status": "partial_offline_passed_not_integrated",
+      "summary": "优化、功能与归档统一执行；开始 U1-A/A1 共同保存状态策略实现",
+      "changes": [
+        "新增纯保存状态策略及测试，旧生产调用方未修改",
+        "统一原 U1-U4 与 A1-A6 排期；保留 E1 状态和可选扩展边界",
+        "更新接续指针、文档入口与归档专项日志"
+      ],
+      "verification": {
+        "passed": 93,
+        "failed": 0,
+        "skipped": 0,
+        "by_file": {
+          "tests.test_preservation_policy": 44,
+          "tests.test_task_contracts": 49
+        },
+        "report": "../.runtime/jpgpng_unified_implementation_20261111_01/tests02.xml",
+        "first_attempt": "92 passed; one test-construction error, corrected without changing production logic; tests01.xml retained",
+        "closeout": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json"
+      },
+      "evidence": "docs/optimization/IMPLEMENTATION.md",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
+      "limitations": [
+        "新模块未接入主线，J-01 未修复",
+        "稳定文件读取、迁移、工具和云端试验未完成",
+        "未访问图库/凭据/账号，未安装、上传、下载或删除"
+      ],
+      "next_step": "Bounded stable file verification, explicit-scope inventory/capacity and unified schema on test copies"
+    },
+    {
+      "id": "JPGPNG-A1-FOUNDATION-20261111-01",
+      "session_date": "2026-11-11",
+      "status": "offline_foundation_passed_not_production_integrated",
+      "summary": "两子代理并行完成观察器与清单/容量；主线完成临时库统一 schema、冻结复核与接续留档",
+      "changes": [
+        "新增有界本地文件观察、显式范围确定性分包和额外空间计划；不自动补下载或释放",
+        "新增临时库 v1-v2 迁移与事实约束；生产库及现有下载入口未修改",
+        "更新联合总表、归档专项日志和文档导航；保留历史计划、日志与既有未提交修改",
+        "保存六份新源码/测试快照、共享文档修改前摘要及索引前规则/元数据"
+      ],
+      "verification": {
+        "focused_report": "../.runtime/jpgpng_a1_foundation_20261111_01/integration/tests-final03.xml",
+        "focused_total": 259,
+        "focused_passed": 256,
+        "focused_skipped": 3,
+        "focused_failed_or_errors": 0,
+        "existing_library_report": "../.runtime/jpgpng_a1_foundation_20261111_01/integration/existing_library.xml",
+        "existing_library_passed": 65,
+        "existing_library_failed": 0,
+        "full_suite": "full/tests02.xml: 1172 passed, 3 skipped, 0 failures/errors; initial basetemp setup failure retained in full/tests.xml",
+        "static_quality": "flake8/radon unavailable; not installed solely for checks",
+        "skip_reason": "Three real Windows symlink tests unavailable for current test user; isolated junction rejection passed"
+      },
+      "evidence": "docs/archiving/A1_FOUNDATION.md",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_a1_foundation.md",
+      "checkpoint": "../.runtime/jpgpng_a1_foundation_20261111_01/checkpoint/manifest.json",
+      "remaining": [
+        "生产下载/唯一写入者未接线，J-01 未修复",
+        "范围枚举、真实迁移、A2 工具/密码、封包纠错与真实夸克回读未实施",
+        "跨平台、原子防对抗读取及真实大目录性能未宣称已验证",
+        "U1-B/U1-C/U2/U3/U4 和 E1-3/4 状态保持独立"
+      ],
+      "next_step": "Bounded scope enumeration and explicit single-writer adaptation; independent A2 tool/password validation"
+    },
+    {
+      "id": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
+      "session_date": "2026-11-11",
+      "status": "offline_scope_adapter_passed_not_production_integrated",
+      "summary": "实现有界范围枚举、稳定游标与临时计划保存/重载，保留生产边界并建立检查点",
+      "changes": [
+        "新增显式范围元数据枚举、敏感排除、嵌套目录处理、预算取消和 HMAC 游标",
+        "新增临时库计划 JSON 与 planned 包索引、幂等重放、冲突拒绝、事务回滚和 query_only 重载",
+        "子代理异常后主线修复中间态，历史失败报告保留；共享基础模块与生产 _enqueue/_dispatch 未改",
+        "更新联合总表、专项日志和文档导航；追加日志不覆盖历史"
+      ],
+      "verification": {
+        "focused_report": "../.runtime/jpgpng_a1_scope_adapter_20261111_01/integration/tests-final03.xml",
+        "focused_passed": 42,
+        "focused_failed_or_errors": 0,
+        "focused_skipped": 0,
+        "full_report": "../.runtime/jpgpng_a1_scope_adapter_20261111_01/full/tests.xml",
+        "full_total": 1217,
+        "full_passed": 1214,
+        "full_failed_or_errors": 0,
+        "full_skipped": 3,
+        "impact": "New scope and adapter symbols LOW; no production execution flows; production _enqueue HIGH not modified",
+        "static_quality": "flake8/radon unavailable; not installed for this batch"
+      },
+      "evidence": "docs/archiving/A1_SCOPE_ADAPTER.md",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_a1_scope_adapter.md",
+      "checkpoint": "../.runtime/jpgpng_a1_scope_adapter_20261111_01/checkpoint/manifest.json",
+      "remaining": [
+        "生产唯一写入者接入与 schema 2 发布未完成，旧收据复用缺陷未修复",
+        "真实大目录/性能基准、A2 工具密码和真实封包/回读/恢复/释放未实施",
+        "U1-B/U1-C/U2/U3/U4 和 E1-3/4 状态保持独立"
+      ],
+      "next_step": "Design single-writer production integration with schema compatibility; optional bounded synthetic full-chain benchmark"
+    },
+    {
+      "id": "JPGPNG-A1-AUDIT-20261111-01",
+      "session_date": "2026-11-12",
+      "status": "audit_completed_findings_unfixed_no_production_changes",
+      "summary": "审计 A1 新增七模块与未收尾 writer，复现跨模块问题并给出逐步修复指导；统一当前入口与历史状态",
+      "changes": [
+        "新增三份审计文档：总览、12 项问题明细、R0-R6 开发指导；不另起产品计划",
+        "当前导航/联合总表/专项日志/机器状态明确先修 A1，保留历史通过报告与其他优化待办",
+        "writer 未收尾草稿增加状态说明；不搬动源码、不删除失败证据或业务资料",
+        "冻结 173 个 Python 文件摘要、14 份源码/测试副本及八份改前文档；本批源码未修改"
+      ],
+      "verification": {
+        "focused_report": "../.runtime/jpgpng_a1_audit_20261111_01/existing_tests.xml",
+        "total": 258,
+        "passed": 250,
+        "failed": 5,
+        "skipped": 3,
+        "failure_attribution": "Four nested-transaction failures; one incorrect queued-task stop test, reproduced on unchanged v1",
+        "audit_probes_executed": 13,
+        "probe_meaning": "Counterexamples, not acceptance passes",
+        "full_suite": "Not rerun; no production code edited. Historical 1214/3 belongs to previous checkpoint.",
+        "document_validation": "../.runtime/jpgpng_a1_audit_20261111_01/audit_validation.json"
+      },
+      "findings": {
+        "P1": 8,
+        "P2": 4,
+        "fixed": 0
+      },
+      "evidence": "docs/audits/2026-11-12-a1/README.md",
+      "development_guide": "docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
+      "maintenance": "../docs/maintenance/2026-11-12_jpgpng_a1_audit.md",
+      "remaining": [
+        "A1 audit findings and unfinished writer draft; production integration gated by R0-R5",
+        "Original J-01, shared dependencies, quality/coverage/filter/performance improvements remain pending",
+        "A2-A6 tools, archive/recovery/readback/release and E1-3/E1-4 remain separately tracked"
+      ],
+      "next_step": "R0 freeze and behavioral regressions; R1 facts/lifecycle; then R2 scope receipt, R3 bounded plan storage, R4 writer, R5 integration. R6 production integration requires a separate gate."
+    },
+    {
+      "id": "JPGPNG-GIT-CHECKPOINT-20261112-01",
+      "session_date": "2026-11-12",
+      "status": "checkpoint_prepared_push_verified_in_external_receipt",
+      "summary": "按用户要求将当前重构及 A1 审计后修复前状态保存为私有 Git 检查点；不修改功能源码",
+      "changes": [
+        "完善忽略规则，停止跟踪本机配置与下载名单但保留原件",
+        "保存源码/测试/设计/审计/CLI 与现有工作树改动，追加版本保全与恢复说明",
+        "复制五份小型审计证据用于离线取回核对，原报告不变",
+        "发现审计之后已有 schema 3 修改：分别保存审计基线和当前 WIP，工作树不回退"
+      ],
+      "checkpoint_tag": "checkpoint-2026-11-12-a1-audit",
+      "repository": "https://github.com/InfiniX520/ImageTool-Lab",
+      "visibility": "private",
+      "verification": {
+        "code_changes_in_this_batch": false,
+        "known_a1_tests": {
+          "passed": 250,
+          "failed": 5,
+          "skipped": 3
+        },
+        "functional_tests_repeated": false,
+        "reason": "Version checkpoint and documentation only; current known failures preserved, not a stable release",
+        "final_push_receipt": "../.runtime/jpgpng_git_checkpoint_20261112_01/result.json",
+        "known_a1_tests_scope": "Audit tag only; current archive_schema.py has pre-existing unreviewed schema-3 changes"
+      },
+      "evidence": "docs/maintenance/2026-11-12_version_checkpoint.md",
+      "next_step": "A1 repair R0/R1 on a new work branch; follow docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
+      "working_copy_tag": "checkpoint-2026-11-12-a1-wip"
+    }
+  ]
+}

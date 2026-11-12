@@ -1,0 +1,512 @@
+{
+  "plan_name": "第七轮重构规划 —— 收尾复杂度债务 + E501 长行清理",
+  "created": "2026-07-30",
+  "source": "第六轮 R6-7 收尾后剩余最高复杂度 _sweep_artist C(18) + flake8 E501 残留 113 处",
+  "status_flow": [
+    "待处理",
+    "进行中",
+    "已完成",
+    "阻塞",
+    "已跳过"
+  ],
+  "progress_marking": {
+    "frequency": "每个子任务完成后立即更新本文件 status 字段 + LOG.json",
+    "evidence": "每个任务必须附 verification 字段记录 pytest 输出 + radon 复扫复杂度",
+    "rollback_rule": "任何测试失败必须回滚该任务，标记为阻塞并记录原因"
+  },
+  "quality_control": {
+    "pre_check": "每个重构前用 grep 扫描调用方（impact 分析替代），评估 blast radius",
+    "per_fix_verify": "每个重构后运行 pytest tests/ -q + radon cc <file> -s -n B",
+    "post_all_verify": "全部完成后运行 pytest + coverage + radon 全量 + GUI 启动",
+    "regression_rule": "任何测试失败必须回滚该重构",
+    "complexity_target": "每个重构目标降至 C 级（≤11）或 B 级（≤6）；无法降低时在 docstring 说明原因",
+    "no_new_files": "除非提取为新模块，不创建新文件；新模块需在 plan 中预批准"
+  },
+  "phases": [
+    {
+      "phase": "P0-最高优先级",
+      "goal": "拆分 download_image F(45)，降低至 C 级以下",
+      "tasks": [
+        {
+          "id": "R6-1",
+          "title": "拆分 download_image（F(45) → C(19)）",
+          "file": "core/download_service.py",
+          "complexity_before": "F(45)",
+          "complexity_after": "C(19)",
+          "strategy": "提取2个嵌套函数：_resolve_original_target(元数据+多页扇出) + _perform_download(下载执行)，主函数降为编排器。闭包 report_page/record_event/note_retry 保持内联",
+          "risk": "高（递归自调用 + 闭包捕获 + 7处调用方）",
+          "status": "已完成",
+          "verify": "90 passed + radon F(45)→C(19)，-58%。C(19)为合理停止点，进一步降至B需模块级函数传20+参数"
+        }
+      ]
+    },
+    {
+      "phase": "P1-高优先级",
+      "goal": "拆分其余 D 级复杂度函数（D(22-24)）",
+      "tasks": [
+        {
+          "id": "R6-2",
+          "title": "拆分 fetch_original_meta D(24) → C(14)",
+          "file": "core/download_engine.py:329",
+          "complexity_before": "D(24)",
+          "complexity_after": "C(14)",
+          "strategy": "提取3个模块级 helper：_interruptible_sleep(可中断sleep) + _parse_ajax_response_body(JSON解析) + _handle_429_if_needed(429退避)，主函数聚焦重试循环编排",
+          "risk": "中",
+          "status": "已完成",
+          "verify": "90 passed + radon D(24)→C(14)，-42%，+3 helpers all A/B grade"
+        },
+        {
+          "id": "R6-3",
+          "title": "拆分 _search D(23) → A(5)",
+          "file": "core/fetch_strategies.py:25",
+          "complexity_before": "D(23)",
+          "complexity_after": "A(5)",
+          "strategy": "提取3段模块级 helper + 1判定函数：_is_popular_high_quality_mode(魔法表达式去重) + _search_web_popular_fallback(网页热门兜底 B(6)) + _search_main_query(App API 主搜索 A(4)) + _search_keyword_fallback_chain(推荐/排行榜回退 B(6))，主函数降为编排器",
+          "risk": "低（仅 MODE_STRATEGIES 字典注册，无直接调用方）",
+          "status": "已完成",
+          "verify": "90 passed + radon D(23)→A(5)，-78%。4 helpers 全 A/B 级，远超 C(≤11) 目标"
+        },
+        {
+          "id": "R6-4",
+          "title": "拆分 _reconcile_snapshot D(22) → C(11)",
+          "file": "core/follow_crawl_service.py:385",
+          "complexity_before": "D(22)",
+          "complexity_after": "C(11)",
+          "strategy": "提取4个模块级 helper：_revive_refollowed_artists(复活重新关注 A级) + _append_new_following_artists(追加新关注 A级) + _mark_unfollowed_artists(取消关注清理 B(6)) + _log_unfollowed_summary(末尾 if/elif 日志分支)，主函数降为编排器",
+          "risk": "低（仅 _prepare_run 单点调用）",
+          "status": "已完成",
+          "verify": "90 passed + radon D(22)→C(11)，-50%，达成 C(≤11) 目标。4 helpers 全 A/B 级"
+        }
+      ]
+    },
+    {
+      "phase": "P2-中优先级",
+      "goal": "flake8 债务清理 + 覆盖率提升 + 依赖审计",
+      "tasks": [
+        {
+          "id": "R6-5",
+          "title": "flake8 违规增量清理（200 → 113，-43.5%）",
+          "files": [
+            "core/",
+            "gui/",
+            "utils/"
+          ],
+          "categories": "F401(11→0) + W293(63→0) + E302/E303/E305/E306(13→0)；E501(113) 保留后续",
+          "strategy": "11处F401加 noqa(7 facade re-export + 2 legacy seam + 1 queue死代码删除 + 1随机)；63处W293用脚本批量清理行尾空白；13处E302/E303/E305/E306手动补/删空行",
+          "risk": "低",
+          "status": "已完成",
+          "verify": "90 passed + flake8 200→113。E501(113处)需逐行手动判断，保留后续低优先级处理"
+        },
+        {
+          "id": "R6-6",
+          "title": "pip-audit 依赖 CVE 扫描",
+          "files": [
+            "requirements.txt"
+          ],
+          "risk": "低",
+          "status": "已完成",
+          "verify": "pip-audit -r requirements.txt → No known vulnerabilities found"
+        },
+        {
+          "id": "R6-7",
+          "title": "覆盖率提升：search/ranking mixin 7% → 30%/37%",
+          "files": [
+            "tests/test_search_ranking_mixins.py"
+          ],
+          "strategy": "新增19个单元测试覆盖5个纯逻辑函数：_is_popular_preview_below_threshold(阈值判定4个) + _build_keyword_aliases(别名构建3个) + _match_keyword_aliases(标签匹配6个含分支) + _get_ranking_step(步长判定3个) + _log_search_preview(首屏预览3个)",
+          "risk": "低",
+          "status": "已完成",
+          "verify": "109 passed。ranking_mixin 7%→37%(+30pp)，search_mixin 7%→30%(+23pp)，TOTAL 52%→53%"
+        }
+      ]
+    }
+  ],
+  "round_history": {
+    "S6_plan": "复杂度削减 R6-1~R6-7 已完成：4个 D/F 级函数降至 A-C 级 + flake8 200→113 + 覆盖率提升",
+    "S5_scan": "radon/vulture 扫描定位本规划全部目标"
+  },
+  "phases_R7": [
+    {
+      "phase": "P0-最高优先级",
+      "goal": "拆分 _sweep_artist C(18)，降低至 C(≤11)",
+      "tasks": [
+        {
+          "id": "R7-1",
+          "title": "拆分 _sweep_artist C(18) → B(7)",
+          "file": "core/follow_crawl_service.py:722",
+          "complexity_before": "C(18)",
+          "complexity_after": "B(7)",
+          "strategy": "提取3个 helper：_find_sweep_cutoff(模块级，cutoff位置查找 A级) + _queue_sweep_items(方法，作品入队 A级) + _advance_sweep_cursor(方法，翻页/终止判定 B(7))，主函数降为循环编排器",
+          "risk": "低（仅 _sweep_candidates 单点调用）",
+          "status": "已完成",
+          "verify": "109 passed + radon C(18)→B(7)，-61%，超 C(≤11) 目标达 B 级"
+        }
+      ]
+    },
+    {
+      "phase": "P1-中优先级",
+      "goal": "E501 长行批量修复（113 处）",
+      "tasks": [
+        {
+          "id": "R7-2",
+          "title": "E501 长行修复 113 → 0",
+          "files": [
+            "core/record_manager.py",
+            "core/follow_crawl_state.py",
+            "core/legacy_record_utils.py",
+            "core/pixiv_fetcher_queue_mixin.py",
+            "core/sqlite_record_repository.py"
+          ],
+          "strategy": "black 自动修复 100 处（line-length=100）+ 手动修复 13 处：8处 markdown 表格加 noqa(保持可读性) + 4处 SQL 字符串拼接拆分 + 1处 log f-string 拆分",
+          "risk": "低（仅格式调整，无逻辑变更）",
+          "status": "已完成",
+          "verify": "109 passed + flake8 --count 0（E501: 113→0，flake8 总数首次归零）"
+        }
+      ]
+    },
+    {
+      "phase": "P2-验证与可观测性",
+      "goal": "mock 测试验证 R7-1 重构逻辑 + 核心分支诊断日志",
+      "tasks": [
+        {
+          "id": "R7-3",
+          "title": "mock 测试覆盖 _sweep_artist 5核心分支 + helper 单元",
+          "file": "tests/test_sweep_artist_mock.py (新)",
+          "new_tests": 17,
+          "strategy": "_FakeApi 支持多页响应+next_url自动生成+parse_qs 解析；覆盖5个 _sweep_artist 分支(空响应/cutoff首页命中/legacy无cutoff/多页翻页+cutoff后续页命中/cutoff未匹配+无next_url) + _find_sweep_cutoff 5单元 + _advance_sweep_cursor 5单元 + newest_seen/SWEEP_MAX_PAGES 验证",
+          "risk": "低（纯新增测试，无生产代码变更）",
+          "status": "已完成",
+          "verify": "126 passed (109+17)。全量 5 分支 + 10 单元逻辑覆盖"
+        },
+        {
+          "id": "R7-4",
+          "title": "_sweep_artist/helper 添加诊断日志",
+          "file": "core/follow_crawl_service.py",
+          "log_points": [
+            "_sweep_artist 入口(run/artist/cutoff)",
+            "每页空响应终止",
+            "每页 illusts数/stop_at/cutoff命中状态",
+            "_queue_sweep_items 每项入队(index/illust_id/delta/total)",
+            "_advance_sweep_cursor 4个终止分支原因(覆盖范围/legacy/无next_url/parse_qs空)",
+            "翻页决策(page N→N+1/cursor)",
+            "_sweep_artist 完成(artist/queued/newest_seen)"
+          ],
+          "log_level": "self.log [D] 前缀（debug 风格）",
+          "complexity_impact": "_sweep_artist B(7)→B(10), _advance_sweep_cursor B(7) 保持",
+          "risk": "低（仅添加日志，无控制流变更）",
+          "status": "已完成",
+          "verify": "126 passed + flake8 0"
+        },
+        {
+          "id": "R7-5",
+          "title": "download_image/_resolve_original_target 添加诊断日志",
+          "file": "core/download_service.py",
+          "log_points": [
+            "download_image 入口(illust_id/page/original/multi/expand)",
+            "原图元数据未预置请求Ajax",
+            "原图元数据结果(page_count/source)",
+            "多页扇出开始(page_count)与完成(success/N)",
+            "download_image 早返回(early_return)",
+            "download_image 执行下载(target截断80字符)"
+          ],
+          "log_level": "log_message 'debug' 级别（仅 DEBUG_MODE 时输出）",
+          "complexity_impact": "download_image C(19)→C(20)",
+          "risk": "低（仅添加日志，无控制流变更）",
+          "status": "已完成",
+          "verify": "126 passed + flake8 0"
+        },
+        {
+          "id": "R7-6",
+          "title": "_reconcile_snapshot 添加诊断日志",
+          "file": "core/follow_crawl_service.py",
+          "log_points": [
+            "reconcile_snapshot 快照获取(snapshots/complete/run)",
+            "tracked/current/intersection 统计",
+            "unfollowed_marked 数量",
+            "刷新 totals 决策(revived/added/complete)",
+            "无变更沿用原 run"
+          ],
+          "log_level": "self.log [D] 前缀（debug 风格）",
+          "complexity_impact": "_reconcile_snapshot C(11)→C(12)",
+          "risk": "低（仅添加日志，无控制流变更）",
+          "status": "已完成",
+          "verify": "126 passed + flake8 0"
+        }
+      ]
+    },
+    {
+      "phase": "P3-收尾",
+      "goal": "更新日志与记忆",
+      "tasks": [
+        {
+          "id": "R7-7",
+          "title": "更新 LOG.json + TASK_PLAN.json + project_memory.md",
+          "strategy": "记录 R7-1~R7-6 完成情况 + radon 复扫结果 + flake8 终态 + mock 测试策略 + 诊断日志规范",
+          "risk": "无",
+          "status": "已完成",
+          "verify": "LOG.json R7-3~R7-6 已记录；TASK_PLAN.json 修复 JSON 结构并补全 R7-3~R7-7；project_memory.md 追加条目 26-29"
+        }
+      ]
+    }
+  ],
+  "phases_R8": [
+    {
+      "phase": "P0-最高优先级：消除 E 级复杂度",
+      "goal": "拆分 2 个 E 级函数（_process_illust E(37) + _validate_download_request_inputs E(34)），降至 C(≤11) 或更低",
+      "tasks": [
+        {
+          "id": "R8-1",
+          "title": "拆分 _validate_download_request_inputs E(34) → A/C",
+          "file": "gui/pixiv_downloader_runtime_mixin.py:314",
+          "complexity_before": "E(34)",
+          "complexity_target": "C(≤11)，目标 A/C",
+          "strategy": "按校验职责提取3个方法：_validate_numeric_bounds(数值范围 max_count/max_workers/delay/api_delay) + _validate_mode_inputs(模式相关 search/user/related/ranking/follow_all) + _validate_name_template(命名模板 空值/分隔符/字段解析/未知变量/{id}要求)。主函数降为顺序编排器，返回首个非空错误",
+          "impact_analysis": "2处调用方（_start_download 内部 + test_gui_validation 测试），签名/返回值不变，风险低",
+          "risk": "低（纯校验逻辑，无副作用）",
+          "status": "已完成",
+          "verify": "126 passed + radon E(34)→A(3)，5 helpers 全 B 级(6-10)。test_follow_gui_options SimpleNamespace mock 用 MethodType 绑定 helper"
+        },
+        {
+          "id": "R8-2",
+          "title": "拆分 _process_illust E(37) → C",
+          "file": "core/pixiv_fetcher_queue_mixin.py:167",
+          "complexity_before": "E(37)",
+          "complexity_target": "C(≤11)",
+          "strategy": "按流水线阶段提取3个方法：_handle_legacy_skip_check(已下载审计/缺页重排) + _fetch_illust_detail_with_timing(详情请求+耗时告警+异常分类) + _enqueue_illust_pages(逐页构造DownloadTask入队)。主函数降为编排器，两次 _filter_and_record_skip 守卫保持内联",
+          "impact_analysis": "2处调用方（_fetch_and_queue 同模块 + _get_following_users follow_mixin），签名/返回值(_IllustOutcome)不变，风险中",
+          "risk": "中（核心流水线，需保持 _IllustOutcome 返回契约）",
+          "status": "已完成",
+          "verify": "126 passed + radon E(37)→B(7) -81%。3 helpers: B(8)/C(12)/C(14)，C(12)/C(14)为合理停止点"
+        }
+      ]
+    },
+    {
+      "phase": "P1-收尾",
+      "goal": "验证与日志更新",
+      "tasks": [
+        {
+          "id": "R8-3",
+          "title": "全量验证 + 更新 LOG.json + project_memory.md + topics.md",
+          "strategy": "pytest 全量 + radon 复扫确认无 E/D 级残留 + flake8 保持 0 + 记录 R8-1/R8-2 完成情况",
+          "risk": "无",
+          "status": "已完成",
+          "verify": "126 passed + radon 无 E 级（2个 E 级全部消除）+ flake8 0"
+        }
+      ]
+    }
+  ],
+  "current_plan": {
+    "id": "JPGPNG-REFACTOR-20261023",
+    "updated_at": "2026-11-12T00:24:34+08:00",
+    "mainline": "P0-P8 completed",
+    "cleanup": "completed",
+    "progress": "docs/refactor/REFACTOR_PROGRESS.md",
+    "implementation": "docs/refactor/detailed_design/07_IMPLEMENTATION_AND_ACCEPTANCE.md",
+    "evidence": "../docs/maintenance/2026-10-23_jpgpng_release_and_cleanup.md",
+    "extension_E1": "E1-2 CLI released; E1-3 classification pilot and E1-4 bulk pending",
+    "historical_sections": "Existing July phases retained as history, not the current refactor task list",
+    "organizer_entry": "organize.cmd",
+    "organizer_evidence": "../docs/maintenance/2026-10-24_jpgpng_organizer_cli.md",
+    "organizer_data": "organizer_data",
+    "directory_tidy": "completed",
+    "directory_guide": "docs/PROJECT_LAYOUT.md",
+    "directory_tidy_evidence": "../docs/maintenance/2026-10-24_jpgpng_directory_tidy.md",
+    "technical_audit": {
+      "date": "2026-11-11",
+      "status": "completed_findings_unfixed_no_migration",
+      "report": "docs/audits/2026-11-11/README.md",
+      "evidence": "../.runtime/jpgpng_audit_20261111_01/audit_result.json",
+      "next_candidates": [
+        "Receipt disk revalidation",
+        "Shared dependency maintenance",
+        "Bounded same-condition stable gallery-dl comparison"
+      ],
+      "scope_note": "Audit completed; fixes and migration not implemented; E1-3/E1-4 remain pending"
+    },
+    "optimization_design": {
+      "id": "JPGPNG-OPTIMIZATION-DESIGN-20261111-01",
+      "date": "2026-11-11",
+      "status": "discussion_draft_ready_not_implemented",
+      "overview": "docs/optimization/2026-11-11/README.md",
+      "design": "docs/optimization/2026-11-11/DESIGN.md",
+      "validation_and_rollout": "docs/optimization/2026-11-11/VALIDATION_AND_ROLLOUT.md",
+      "evidence": "../.runtime/jpgpng_optimization_design_20261111_01/validation.json",
+      "next_step": "U1-A scoped artifact verification/repair implementation design; U1-B shared environment maintenance separately",
+      "engine_decision": "No engine selected or migrated; prefer bounded extraction comparison before adoption",
+      "yt_dlp": "Official documentation applicability review only; architecture reference, no installation or security audit",
+      "stages": {
+        "U0": "design_ready",
+        "U1": "not_started",
+        "U2": "not_started",
+        "U3": "not_started",
+        "U4": "optional_not_started"
+      },
+      "scope_note": "Documentation only. Existing audit findings remain unfixed. E1-3/E1-4 remain pending."
+    },
+    "active_workstream": {
+      "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
+      "updated_date": "2026-11-12",
+      "phase": "A1 audit blockers and unfinished writer draft",
+      "status": "audit_completed_findings_open_not_production_ready",
+      "resume": "docs/optimization/IMPLEMENTATION.md",
+      "next_step": "R0 freeze and behavioral regressions; R1 facts/lifecycle; then R2 scope receipt, R3 bounded plan storage, R4 writer, R5 integration. R6 production integration requires a separate gate.",
+      "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
+      "started_jobs": [],
+      "latest_batch": "JPGPNG-A1-AUDIT-20261111-01",
+      "foundation": "docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
+      "evidence": "../.runtime/jpgpng_a1_audit_20261111_01/audit_validation.json",
+      "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
+      "unfinished_draft": "core/archive_repository.py; ../.runtime/jpgpng_a1_writer_compat_20261111_01/README.md"
+    },
+    "archiving_design": {
+      "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
+      "date": "2026-11-11",
+      "status": "implementation_partial_audit_findings_open",
+      "overview": "docs/archiving/README.md",
+      "design": "docs/archiving/DESIGN.md",
+      "acceptance": "docs/archiving/ACCEPTANCE.md",
+      "implementation_log": "docs/archiving/IMPLEMENTATION_LOG.md",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_archive_design.md",
+      "evidence": "../.runtime/jpgpng_archive_design_20261111_01/validation.json",
+      "user_facts": {
+        "provider": "Quark SVIP",
+        "library_approx_GB": 500,
+        "staging_free_approx_GB": [
+          100,
+          200
+        ],
+        "independent_second_copy": false,
+        "bandwidth": "ample; user can assist bounded full readback",
+        "local_deletion": "intentional after cloud upload to reclaim space",
+        "full_library_retrieval_requested": false
+      },
+      "candidate_parameters_not_yet_validated": {
+        "package_target_GiB": 2,
+        "batch_input_target_GiB": 20,
+        "packages_per_recovery_group_max": 10,
+        "parity_percent_start": 15,
+        "whole_package_recovery": "Requires sufficient actual blocks and largest-package-loss drill; not guaranteed by percentage"
+      },
+      "first_transport": "Manual official Quark client; user attests origin, program verifies full bytes; not automated provider proof",
+      "stages": {
+        "A0": "design_ready",
+        "A1": "partial_implementation_requires_audit_fixes_before_production",
+        "A2": "not_started",
+        "A3": "not_started",
+        "A4": "not_started",
+        "A5": "not_started",
+        "A6": "not_started"
+      },
+      "next_step": "R0 freeze and behavioral regressions; R1 facts/lifecycle; then R2 scope receipt, R3 bounded plan storage, R4 writer, R5 integration. R6 production integration requires a separate gate.",
+      "user_action_now": "No retrieval, password or account access needed",
+      "later_user_action": "A4 upload and retrieve generated harmless test packages, approximately several hundred MiB to 2 GiB",
+      "gates": [
+        "Official tool source and version verification; secure password input with no argv/log leakage",
+        "Full readback for data/parity/control objects and full member extraction/hash checks",
+        "Portable recovery independent of application/database and separate key recovery",
+        "Precise file identity and explicit batch release only after evidence gates",
+        "Register archive_store as protected business data before creating it"
+      ],
+      "scope_note": "Historical scope adapter checkpoint passed; current writer draft fails and audit cross-module findings are open. No real archive/readback/release.",
+      "current_foundation": "docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
+      "current_evidence": "../.runtime/jpgpng_a1_audit_20261111_01/audit_validation.json"
+    },
+    "unified_implementation": {
+      "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
+      "date": "2026-11-11",
+      "status": "a1_partial_implementation_audit_findings_open",
+      "overview": "docs/optimization/IMPLEMENTATION.md",
+      "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
+      "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
+      "implemented": [
+        "core/preservation_policy.py",
+        "tests/test_preservation_policy.py"
+      ],
+      "tests": {
+        "passed": 93,
+        "failed": 0,
+        "skipped": 0,
+        "by_file": {
+          "tests.test_preservation_policy": 44,
+          "tests.test_task_contracts": 49
+        },
+        "report": "../.runtime/jpgpng_unified_implementation_20261111_01/tests02.xml"
+      },
+      "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
+      "remaining": {
+        "U1-A_A1": "Fix A1-01 through A1-12 via R0-R5, then separately review production writer/migration/receipt reuse integration. Original J-01 remains unfixed.",
+        "U1-B": "Shared dependency maintenance pending; separate governed environment change",
+        "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
+        "U2-A": "Coverage and pending-reason summaries pending",
+        "U2-B": "Filter explanations, saved presets and offline reevaluation pending",
+        "U2-C": "Measure request/disk/UI/log costs in each relevant implementation batch",
+        "A2-A4": "Official tools, secure password transport, archive/recovery and Quark roundtrip pending",
+        "A5-A6": "Archive reuse/UI, explicit release, real-library pilot and gradual intake pending",
+        "U3": "Bounded gallery-dl source comparison pending; no engine selected",
+        "U4_E1": "Optional extensions and existing organizer classification/bulk work retain original decision boundaries"
+      },
+      "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
+      "user_action_now": "No retrieval, passwords, installations or account operations needed",
+      "latest_batch": "JPGPNG-A1-AUDIT-20261111-01",
+      "latest_overview": "docs/audits/2026-11-12-a1/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_audit_20261111_01/audit_validation.json",
+      "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_implementation_audit"
+    },
+    "a1_implementation_audit": {
+      "id": "JPGPNG-A1-AUDIT-20261111-01",
+      "date": "2026-11-12",
+      "status": "completed_findings_unfixed",
+      "report": "docs/audits/2026-11-12-a1/README.md",
+      "findings": "docs/audits/2026-11-12-a1/FINDINGS.md",
+      "development_guide": "docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
+      "issues": {
+        "P1": 8,
+        "P2": 4,
+        "total": 12,
+        "fixed": 0
+      },
+      "tests": {
+        "total": 258,
+        "passed": 250,
+        "failed": 5,
+        "skipped": 3,
+        "report": "../.runtime/jpgpng_a1_audit_20261111_01/existing_tests.xml"
+      },
+      "failure_attribution": {
+        "transaction_conflict": 4,
+        "incorrect_stop_fixture": 1
+      },
+      "probes": {
+        "executed": 13,
+        "meaning": "Audit counterexamples, NOT acceptance passes",
+        "report": "../.runtime/jpgpng_a1_audit_20261111_01/probe_results.json"
+      },
+      "product_ready": false,
+      "production_source_changes": false,
+      "next_work_packages": [
+        "R0",
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5"
+      ]
+    },
+    "version_checkpoint": {
+      "id": "JPGPNG-GIT-CHECKPOINT-20261112-01",
+      "date": "2026-11-12",
+      "tag": "checkpoint-2026-11-12-a1-audit",
+      "repository": "https://github.com/InfiniX520/ImageTool-Lab",
+      "visibility": "private",
+      "state": "source_checkpoint_remote_result_in_external_receipt",
+      "guide": "docs/VERSION_CONTROL.md",
+      "record": "docs/maintenance/2026-11-12_version_checkpoint.md",
+      "push_receipt": "../.runtime/jpgpng_git_checkpoint_20261112_01/result.json",
+      "scope_note": "Audit tag matches audited Python sources; WIP tag preserves existing schema-3 draft. Audit counts do not certify the WIP tree.",
+      "current_working_tag": "checkpoint-2026-11-12-a1-wip",
+      "unreviewed_since_audit": [
+        "core/archive_schema.py: schema 2 -> 3; existing edits preserved, not validated by this backup task"
+      ]
+    }
+  }
+}

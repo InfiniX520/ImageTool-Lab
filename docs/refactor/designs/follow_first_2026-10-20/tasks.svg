@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="900" viewBox="0 0 1360 900"><style>text{font-family:"Microsoft YaHei","Segoe UI",sans-serif}</style>
+<rect x="0" y="0" width="1360" height="900" rx="0" fill="#f2f5f6"/>
+<text x="28" y="32" font-size="15" fill="#202b33" font-weight="600" text-anchor="start">JpgPng / 第二版布局研究</text>
+<text x="28" y="55" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">运行时：关注进度、失败项和关键事件放在同一页。</text>
+<text x="1332" y="32" font-size="12" fill="#596a75" font-weight="400" text-anchor="end">模拟数据 · 未接入下载</text>
+<text x="1332" y="54" font-size="12" fill="#596a75" font-weight="400" text-anchor="end">2026.10.20</text>
+<rect x="24" y="80" width="1312" height="774" rx="4" fill="#ffffff" stroke="#d8e1e5"/>
+<text x="54" y="127" font-size="30" fill="#202b33" font-weight="400" text-anchor="start" font-family="Georgia, serif">JpgPng</text>
+<path d="M195 102L195 131" stroke="#dce4e8" stroke-width="1"/>
+<text x="215" y="123" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">Pixiv 下载工具</text>
+<text x="493" y="124" font-size="14" fill="#596a75" font-weight="400" text-anchor="start">关注下载</text>
+<text x="624" y="124" font-size="14" fill="#287eae" font-weight="600" text-anchor="start">下载任务</text>
+<path d="M624 143H679" stroke="#287eae" stroke-width="2"/>
+<text x="755" y="124" font-size="14" fill="#596a75" font-weight="400" text-anchor="start">其他来源</text>
+<text x="886" y="124" font-size="14" fill="#596a75" font-weight="400" text-anchor="start">下载记录</text>
+<text x="1017" y="124" font-size="14" fill="#596a75" font-weight="400" text-anchor="start">设置</text>
+<text x="1186" y="123" font-size="16" fill="#596a75" font-weight="400" text-anchor="start">—</text>
+<text x="1240" y="122" font-size="16" fill="#596a75" font-weight="400" text-anchor="start">□</text>
+<text x="1292" y="123" font-size="18" fill="#596a75" font-weight="400" text-anchor="start">×</text>
+<path d="M24 145H1336" stroke="#dce4e8" stroke-width="1"/>
+<path d="M54 811H1306" stroke="#dce4e8" stroke-width="1"/>
+<text x="54" y="837" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">保存到  ./downl_Pixiv</text>
+<text x="305" y="837" font-size="12" fill="#287eae" font-weight="400" text-anchor="start">打开文件夹</text>
+<text x="1110" y="837" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">账户：待验证</text>
+<text x="1306" y="837" font-size="12" fill="#287eae" font-weight="400" text-anchor="end">原图 / 全部图片页</text>
+<text x="28" y="881" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">参考：IWLTY 的细线与错位色板 · Linear 的操作层次 · 21ST 的紧凑筛选</text>
+<text x="1332" y="881" font-size="12" fill="#596a75" font-weight="400" text-anchor="end">无缩略图区域</text>
+<text x="58" y="209" font-size="32" fill="#202b33" font-weight="400" text-anchor="start" font-family="SimSun, serif">下载任务</text>
+<text x="58" y="237" font-size="14" fill="#596a75" font-weight="400" text-anchor="start">查看进度，继续未完成的下载。</text>
+<rect x="1126" y="188" width="180" height="40" rx="2" fill="#ffffff" stroke="#dce4e8"/>
+<text x="1144" y="214" font-size="14" fill="#202b33" font-weight="500" text-anchor="start">暂停全部</text>
+<path d="M1265 208H1291" stroke="#287eae" stroke-width="1"/>
+<path d="M1286 204l5 4l-5 4" fill="none" stroke="#287eae"/>
+<text x="58" y="282" font-size="13" fill="#287eae" font-weight="600" text-anchor="start">全部  3</text>
+<text x="178" y="282" font-size="13" fill="#596a75" font-weight="400" text-anchor="start">运行中  1</text>
+<text x="320" y="282" font-size="13" fill="#596a75" font-weight="400" text-anchor="start">已暂停  1</text>
+<text x="462" y="282" font-size="13" fill="#596a75" font-weight="400" text-anchor="start">等待中  1</text>
+<path d="M58 295H109" stroke="#287eae" stroke-width="2"/>
+<text x="1306" y="282" font-size="12" fill="#596a75" font-weight="400" text-anchor="end">搜索任务或画师…</text>
+<path d="M58 307H1306" stroke="#dce4e8" stroke-width="1"/>
+<text x="78" y="333" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">任务</text>
+<text x="568" y="333" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">状态</text>
+<text x="744" y="333" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">新增完成 / 本批上限</text>
+<text x="1038" y="333" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">图片已保存</text>
+<text x="1222" y="333" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">操作</text>
+<path d="M58 347H1306" stroke="#dce4e8" stroke-width="1"/>
+<rect x="58" y="347" width="1248" height="67" rx="0" fill="#f0f7fa"/>
+<rect x="58" y="361" width="2" height="39" rx="0" fill="#287eae"/>
+<text x="78" y="374" font-size="14" fill="#202b33" font-weight="500" text-anchor="start">关注全部 · 历史续跑</text>
+<text x="78" y="396" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">示例画师 · 作品列表第 3 页</text>
+<circle cx="573" cy="378" r="3" fill="#287eae"/>
+<text x="586" y="383" font-size="13" fill="#287eae" font-weight="400" text-anchor="start">下载中</text>
+<text x="744" y="383" font-size="14" fill="#202b33" font-weight="400" text-anchor="start" font-family="Consolas, monospace">84 / 200</text>
+<text x="1038" y="383" font-size="13" fill="#202b33" font-weight="400" text-anchor="start">156 张</text>
+<text x="1222" y="383" font-size="13" fill="#287eae" font-weight="400" text-anchor="start">暂停</text>
+<path d="M58 414H1306" stroke="#dce4e8" stroke-width="1"/>
+<text x="78" y="441" font-size="14" fill="#202b33" font-weight="500" text-anchor="start">关注新作</text>
+<text x="78" y="463" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">沿用默认方案</text>
+<circle cx="573" cy="445" r="3" fill="#8c9aa3"/>
+<text x="586" y="450" font-size="13" fill="#596a75" font-weight="400" text-anchor="start">等待中</text>
+<text x="744" y="450" font-size="14" fill="#202b33" font-weight="400" text-anchor="start" font-family="Consolas, monospace">—</text>
+<text x="1038" y="450" font-size="13" fill="#202b33" font-weight="400" text-anchor="start">—</text>
+<text x="1222" y="450" font-size="13" fill="#287eae" font-weight="400" text-anchor="start">调整</text>
+<path d="M58 481H1306" stroke="#dce4e8" stroke-width="1"/>
+<text x="78" y="508" font-size="14" fill="#202b33" font-weight="500" text-anchor="start">每日榜 · 指定范围</text>
+<text x="78" y="530" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">2026.10.01 — 2026.10.03</text>
+<circle cx="573" cy="512" r="3" fill="#8c9aa3"/>
+<text x="586" y="517" font-size="13" fill="#596a75" font-weight="400" text-anchor="start">已暂停</text>
+<text x="744" y="517" font-size="14" fill="#202b33" font-weight="400" text-anchor="start" font-family="Consolas, monospace">36 / 100</text>
+<text x="1038" y="517" font-size="13" fill="#202b33" font-weight="400" text-anchor="start">61 张</text>
+<text x="1222" y="517" font-size="13" fill="#287eae" font-weight="400" text-anchor="start">继续</text>
+<path d="M58 548H1306" stroke="#dce4e8" stroke-width="1"/>
+<text x="58" y="588" font-size="18" fill="#202b33" font-weight="600" text-anchor="start">关注全部 · 历史续跑</text>
+<text x="1306" y="588" font-size="12" fill="#287eae" font-weight="400" text-anchor="end">打开目录   /   查看参数</text>
+<text x="58" y="618" font-size="13" fill="#596a75" font-weight="400" text-anchor="start">画师 63 / 186</text>
+<text x="259" y="618" font-size="13" fill="#596a75" font-weight="400" text-anchor="start">已完成作品 84    ·    跳过已有记录 120    ·    待重试 2</text>
+<path d="M58 638H1306" stroke="#dce4e8" stroke-width="1"/>
+<text x="58" y="665" font-size="13" fill="#202b33" font-weight="500" text-anchor="start">最近活动</text>
+<text x="1306" y="665" font-size="12" fill="#287eae" font-weight="400" text-anchor="end">详细日志  +</text>
+<text x="58" y="696" font-size="12" fill="#596a75" font-weight="400" text-anchor="start" font-family="Consolas, monospace">14:32:08</text>
+<text x="160" y="696" font-size="12" fill="#287eae" font-weight="400" text-anchor="start">完成</text>
+<text x="224" y="696" font-size="13" fill="#202b33" font-weight="400" text-anchor="start">示例作品 084 · 全部 3 页已保存</text>
+<text x="58" y="726" font-size="12" fill="#596a75" font-weight="400" text-anchor="start" font-family="Consolas, monospace">14:32:08</text>
+<text x="160" y="726" font-size="12" fill="#596a75" font-weight="400" text-anchor="start">跳过</text>
+<text x="224" y="726" font-size="13" fill="#202b33" font-weight="400" text-anchor="start">示例作品 085 · 已有完整记录</text>
+<text x="58" y="756" font-size="12" fill="#596a75" font-weight="400" text-anchor="start" font-family="Consolas, monospace">14:32:09</text>
+<text x="160" y="756" font-size="12" fill="#287eae" font-weight="400" text-anchor="start">下载</text>
+<text x="224" y="756" font-size="13" fill="#202b33" font-weight="400" text-anchor="start">示例作品 086 · 第 1 / 2 页正在下载</text>
+<text x="1306" y="790" font-size="12" fill="#596a75" font-weight="400" text-anchor="end">已保存断点 · 可以安全暂停</text>
+</svg>

@@ -1,0 +1,15 @@
+{
+  "basis": "User explicitly selected these attached screenshots as the visual direction; layouts may change; source attachment preserved byte-for-byte",
+  "files": [
+    {
+      "file": "follow_user.png",
+      "sha256": "f7281e572e2dfcaa855dc4701292e3147119ade25a9bfce1a06b22a314344695",
+      "bytes": 117640
+    },
+    {
+      "file": "tasks_user.png",
+      "sha256": "8634fa737b51f3dae4e02604bf6be9f4b143686e5fd6d77a2d4d3479214d8f14",
+      "bytes": 104037
+    }
+  ]
+}

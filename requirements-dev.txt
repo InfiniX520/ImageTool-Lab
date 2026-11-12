@@ -1,0 +1,9 @@
+# Test/development dependencies (not required by the packaged runtime)
+# Install with the project interpreter: python -m pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0
+pytest-cov>=4.0
+# Lint / format tool chain (P0-B 第五轮固化，配置见 pyproject.toml 与 .flake8)
+isort>=5.13
+black>=24.0
+flake8>=7.0

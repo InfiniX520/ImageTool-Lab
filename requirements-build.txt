@@ -1,0 +1,3 @@
+# Optional build dependency
+-r requirements.txt
+pyinstaller>=6.0

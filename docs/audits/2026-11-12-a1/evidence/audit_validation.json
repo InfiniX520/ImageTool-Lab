@@ -1,0 +1,197 @@
+{
+  "id": "JPGPNG-A1-AUDIT-20261111-01",
+  "completed_at": "2026-11-12T00:27:48+08:00",
+  "audit_material_validation_passed": true,
+  "product_ready": false,
+  "meaning": "Document, evidence and preservation validation only; product test failures remain open",
+  "source_files_unchanged": 173,
+  "frozen_source_and_tests": 14,
+  "prior_reports_unchanged": 14,
+  "focused_tests": {
+    "tests": 258,
+    "failures": 5,
+    "errors": 0,
+    "skipped": 3,
+    "passed": 250
+  },
+  "failure_details": [
+    {
+      "name": "test_inherited_single_writer_saves_reloads_and_preserves_history",
+      "message": "core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction"
+    },
+    {
+      "name": "test_concurrent_first_save_is_serialized_and_different_plan_cannot_replay",
+      "message": "core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction"
+    },
+    {
+      "name": "test_plan_precheck_conflict_does_not_overwrite_existing_batch",
+      "message": "core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction"
+    },
+    {
+      "name": "test_corrupt_archive_facts_are_rejected_without_leaving_read_transaction",
+      "message": "core.archive_plan_store.ArchivePlanStoreError: Archive plan save requires ownership of a new transaction"
+    },
+    {
+      "name": "test_inherited_v1_job_commands_remain_available_on_archive_copy",
+      "message": "AssertionError: assert False\n +  where False = settle_stop('6b8abbcedb0649a98954b9b4fee7fec2')\n +    where settle_stop = <core.archive_repository.ArchiveLibraryRepository object at 0x0000026DD6F296A0>.settle_stop"
+    }
+  ],
+  "audit_probes_executed": 13,
+  "probe_note": "Counterexamples, not acceptance passes",
+  "findings": [
+    {
+      "id": "A1-01",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-02",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-03",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-04",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-05",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-06",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-07",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-08",
+      "priority": "P1",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-09",
+      "priority": "P2",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-10",
+      "priority": "P2",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-11",
+      "priority": "P2",
+      "status": "open",
+      "note": "No product fix in this audit"
+    },
+    {
+      "id": "A1-12",
+      "priority": "P2",
+      "status": "open",
+      "note": "Navigation/status corrected; test coverage/fixtures still open"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "JpgPng/docs/optimization/IMPLEMENTATION.md",
+      "bytes": 14905,
+      "sha256": "eb323d42199836c894e5e2ff68e89e152ffb01e3886beb947458a9e7a67da9e5"
+    },
+    {
+      "path": "JpgPng/docs/archiving/IMPLEMENTATION_LOG.md",
+      "bytes": 12226,
+      "sha256": "a9cd232bac04834f218661d2f8505987228366858886e967f28be5c6747876f3"
+    },
+    {
+      "path": "JpgPng/docs/archiving/README.md",
+      "bytes": 7613,
+      "sha256": "20d1ee27bfaaab191f04fc6226fc973ce1d80e8a3d55f091bf635c80442cd2f6"
+    },
+    {
+      "path": "JpgPng/docs/README.md",
+      "bytes": 4789,
+      "sha256": "ff7a6d9842b85f47c797dc6e926edff55be4c3ef391a8998b0453294bcfc3737"
+    },
+    {
+      "path": "JpgPng/docs/PROJECT_LAYOUT.md",
+      "bytes": 4537,
+      "sha256": "fb31ddc57c6b87d5a8eebae5caccdb27ccbf4fbbaa3b13a5ad2dd893b786d804"
+    },
+    {
+      "path": "JpgPng/docs/refactor/REFACTOR_PROGRESS.md",
+      "bytes": 33441,
+      "sha256": "4fad8addc444bb7a05db690445666437ca33ebe0fdfcc4bdb4117129fd8d0321"
+    },
+    {
+      "path": "JpgPng/TASK_PLAN.json",
+      "bytes": 25213,
+      "sha256": "46b4ed92ede831b59ca61f1d79c605ee64c365025d216547a536fd962f52dc6d"
+    },
+    {
+      "path": "JpgPng/LOG.json",
+      "bytes": 59652,
+      "sha256": "ba63ea2d57007130000412a9bb7e8e3d63266f8172615797ca1ff05b3b975f62"
+    },
+    {
+      "path": "JpgPng/docs/audits/2026-11-12-a1/README.md",
+      "bytes": 8074,
+      "sha256": "a842387ab127d41fd36fcb1436595abdbfb33c7010232216b6df5122183474d4"
+    },
+    {
+      "path": "JpgPng/docs/audits/2026-11-12-a1/FINDINGS.md",
+      "bytes": 18309,
+      "sha256": "fa9635584a41d4453a94a8b12278eb0ddc4cc2127c1f60654f3aedd5bf44e7da"
+    },
+    {
+      "path": "JpgPng/docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
+      "bytes": 19717,
+      "sha256": "e21da203712a3be22120e74b97ca744ebe95ac9e4a8d4e95529941c1c491af52"
+    },
+    {
+      "path": "docs/maintenance/2026-11-12_jpgpng_a1_audit.md",
+      "bytes": 3153,
+      "sha256": "74e336f901582768482107dd63f1c45b83858c33cc95a5dd2d3450d39f0ba326"
+    },
+    {
+      "path": ".runtime/jpgpng_a1_writer_compat_20261111_01/README.md",
+      "bytes": 1370,
+      "sha256": "82bd39b5b995ad480341cf6c170d5e254fe87527e6fdd85618b8b1ffb500dec1"
+    },
+    {
+      "path": ".runtime/jpgpng_a1_audit_20261111_01/README.md",
+      "bytes": 1428,
+      "sha256": "ecd58a0a55a97b7db1fb3da0307000b162d347229087947225c420d44e635e87"
+    }
+  ],
+  "new_local_links_checked": 55,
+  "official_references": [
+    "https://docs.python.org/3.12/library/sqlite3.html#how-to-use-the-connection-context-manager",
+    "https://www.sqlite.org/lang_expr.html"
+  ],
+  "no_production_code_changes": true,
+  "no_business_data_operations": true,
+  "no_account_operations_or_installations": true,
+  "background_jobs_started_by_this_audit": [],
+  "errors": []
+}
