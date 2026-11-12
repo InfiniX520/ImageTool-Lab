@@ -1,5 +1,6 @@
 """Behavioral checks for portable, immutable collection requests."""
 import dataclasses
+import hashlib
 import json
 
 import pytest
@@ -68,6 +69,28 @@ def test_identity_is_portable_and_windows_case_insensitive():
     assert a.target_key == b.target_key
     assert b.relative_path == "downl_Pixiv/artist/42_p0.png"
     assert a.target_key != PathRef(kind="external", root_id="archive", relative_path=a.relative_path).target_key
+
+
+def test_archive_identity_folds_ascii_segments_without_collapsing_unicode():
+    mixed_a = PathRef(kind="external", root_id="Synthetic", relative_path="画/A.png")
+    mixed_b = PathRef(kind="external", root_id="synthetic", relative_path="画/a.png")
+    assert mixed_a.identity_key == mixed_b.identity_key
+    assert PathRef(relative_path="gallery/A/B.PNG").identity_key == PathRef(
+        relative_path="gallery/a/b.png").identity_key
+    # Non-ASCII composition and case are never merged: these are distinct files.
+    assert PathRef(relative_path="gallery/\u00e9.png").identity_key != PathRef(
+        relative_path="gallery/e\u0301.png").identity_key
+    assert PathRef(relative_path="gallery/stra\u00dfe.png").identity_key != PathRef(
+        relative_path="gallery/strasse.png").identity_key
+    assert mixed_a.relative_path == "画/A.png"
+
+
+def test_target_key_keeps_its_established_whole_path_casefold():
+    path = PathRef(kind="external", root_id="Synthetic", relative_path="画/A.png")
+    expected = hashlib.sha256(canonical_json([
+        path.kind, path.root_id.casefold(), path.relative_path.casefold(),
+    ]).encode()).hexdigest()
+    assert path.target_key == expected
 
 
 def test_page_and_source_snapshots_copy_mutable_sequences():

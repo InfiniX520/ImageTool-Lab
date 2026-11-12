@@ -119,17 +119,24 @@ class PathRef:
 
     @property
     def identity_key(self) -> str:
-        """Archive identity: ASCII case aliases fold, non-ASCII spelling stays exact.
+        """Archive identity: fold ASCII case in each path segment only.
 
-        Windows ASCII case aliases are one directory entry in normal use, while
-        NFC/NFD and other non-ASCII look-alikes can be distinct physical files.
+        Windows ASCII case aliases name one directory entry in normal use, so
+        each all-ASCII segment folds independently.  A segment containing any
+        non-ASCII character keeps its exact spelling: NFC/NFD look-alikes and
+        ``straße`` versus ``strasse`` remain distinct physical files.  The root
+        identifier is an ASCII token by contract, so it always folds.
+
+        This key is for archive identity comparison only.  ``target_key`` keeps
+        its established whole-path casefold behaviour for existing download
+        paths; do not use this property to replace it there.
         """
-        spelling = (
-            self.relative_path.casefold()
-            if self.relative_path.isascii() else self.relative_path
+        spelling = "/".join(
+            segment.casefold() if segment.isascii() else segment
+            for segment in self.relative_path.split("/")
         )
         return hashlib.sha256(canonical_json([
-            self.kind, self.root_id, spelling,
+            self.kind, self.root_id.casefold(), spelling,
         ]).encode("utf-8")).hexdigest()
 
 

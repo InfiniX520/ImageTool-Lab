@@ -14,6 +14,10 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 
+from core.archive_scope import (
+    ContentBinding, ContentResolution, ObservedFile, rebind_observation,
+    resolve_content_version,
+)
 from core.library_paths import AlreadyRunningError, InstanceLock
 from core.library_repository import _DDL, _REQUIRED_TABLES, _validate_database_path
 from core.local_observation import FileIdentity, LocalObservation, ObservationStatus
@@ -24,7 +28,13 @@ from core.task_contracts import ContractError, PathRef, canonical_json, normaliz
 
 ARCHIVE_SCHEMA_VERSION = "3"
 ARCHIVE_PROTOCOL_VERSION = 2
-ARCHIVE_JSON_LIMIT = 1024 * 1024
+# One document budget for plan headers, capacity and inventory JSON at both the
+# writer and the audit.  The previous 1 MiB audit limit rejected a legal plan
+# whose scope happened to be larger than 1 MiB.
+ARCHIVE_JSON_LIMIT = 8 * 1024 * 1024
+ARCHIVE_PLAN_DOCUMENT_LIMIT = 8 * 1024 * 1024
+ARCHIVE_PLAN_SEGMENT_LIMIT = 1024 * 1024
+ARCHIVE_PLAN_SEGMENT_COUNT = 128
 ARCHIVE_TABLES = frozenset({
     "archive_batches", "archive_contents", "archive_assets", "archive_transfer_intents",
     "archive_local_checks", "archive_packages", "archive_members", "archive_objects",
@@ -40,6 +50,25 @@ class ArchiveMigrationError(Exception):
 
 class ArchiveSchemaError(ArchiveMigrationError):
     """The source, destination or recorded evidence violates this schema."""
+
+
+class ArchiveIdentityConfirmationRequired(ArchiveSchemaError):
+    """A path now names a different physical object; a human must decide.
+
+    The resolution is attached so a caller can show the exact path, previous
+    revision, observed facts and next action.  This is deliberately not a
+    generic database error and it never claims the scope was collected fully.
+    """
+
+    def __init__(self, resolution: ContentResolution):
+        if not isinstance(resolution, ContentResolution):
+            raise TypeError("Expected a ContentResolution")
+        self.resolution = resolution
+        self.scope_complete = False
+        super().__init__(
+            "Path %s requires confirmation (%s); the scope is not complete"
+            % (resolution.candidate.relative_path, resolution.reason)
+        )
 
 
 def _token(value: object, field: str) -> str:
@@ -461,6 +490,89 @@ def _check_existing_objects(conn: sqlite3.Connection) -> None:
             raise ArchiveSchemaError(f"Missing or incompatible archive object: {name}")
 
 
+def read_plan_segments(
+    conn: sqlite3.Connection, batch_id: str, segment_count: object,
+    inventory_bytes: object, inventory_sha256: object,
+) -> str:
+    """Read and verify one plan document without materializing an oversized row.
+
+    The byte length is computed by SQLite first; the payload row is fetched only
+    after the per-segment and cumulative budgets pass.  A 9 MiB or larger row is
+    therefore rejected before Python receives it.
+    """
+    if (type(segment_count) is not int or not 1 <= segment_count <= ARCHIVE_PLAN_SEGMENT_COUNT
+            or type(inventory_bytes) is not int
+            or not 0 <= inventory_bytes <= ARCHIVE_PLAN_DOCUMENT_LIMIT
+            or not isinstance(inventory_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", inventory_sha256) is None):
+        raise ArchiveSchemaError("Stored archive plan header bound is invalid")
+    lengths = []
+    total_bytes = 0
+    rows = conn.execute(
+        """SELECT segment_index,byte_length,length(CAST(payload AS BLOB))
+           FROM archive_plan_segments WHERE batch_id=? ORDER BY segment_index""",
+        (batch_id,),
+    )
+    for index, row in enumerate(rows):
+        if index >= segment_count:
+            raise ArchiveSchemaError("Stored plan has extra segments")
+        if tuple(row[:1]) != (index,):
+            raise ArchiveSchemaError("Stored plan segments are not contiguous")
+        declared, actual = row[1], row[2]
+        if type(declared) is not int or type(actual) is not int:
+            raise ArchiveSchemaError("Stored plan segment length is invalid")
+        if declared != actual or actual > ARCHIVE_PLAN_SEGMENT_LIMIT:
+            raise ArchiveSchemaError("Stored plan segment byte length differs")
+        total_bytes += actual
+        if total_bytes > ARCHIVE_PLAN_DOCUMENT_LIMIT:
+            raise ArchiveSchemaError("Stored plan exceeds the document byte budget")
+        lengths.append(actual)
+    if len(lengths) != segment_count:
+        raise ArchiveSchemaError("Stored plan segment count differs from its header")
+    if total_bytes != inventory_bytes:
+        raise ArchiveSchemaError("Stored plan segment bytes differ from its header")
+    pieces = []
+    for index in range(segment_count):
+        row = conn.execute(
+            """SELECT payload FROM archive_plan_segments
+               WHERE batch_id=? AND segment_index=?""",
+            (batch_id, index),
+        ).fetchone()
+        if row is None or not isinstance(row[0], str):
+            raise ArchiveSchemaError("Stored plan segment payload is invalid")
+        payload = row[0]
+        if len(payload.encode("utf-8")) != lengths[index]:
+            raise ArchiveSchemaError("Stored plan segment byte length changed while reading")
+        pieces.append(payload)
+    joined = "".join(pieces)
+    if len(joined.encode("utf-8")) != inventory_bytes:
+        raise ArchiveSchemaError("Stored plan segment bytes differ from its header")
+    if hashlib.sha256(joined.encode("utf-8")).hexdigest() != inventory_sha256:
+        raise ArchiveSchemaError("Stored plan document digest differs from its header")
+    return joined
+
+
+def _check_stored_plan_segments(
+    conn: sqlite3.Connection, batch_id: str, scope: dict[str, object],
+) -> None:
+    """Recompute one stored plan document from its segments and header.
+
+    The maintenance audit must not accept a plan whose segment_count, byte
+    count or inventory digest no longer describes the stored segments.  The
+    plan loader already checks this; keeping the audit independent would let
+    the two entry points disagree about the same database.
+    """
+    version = scope.get("plan_schema_version")
+    if type(version) is not int or version != 2:
+        raise ArchiveSchemaError("Unsupported stored archive plan version")
+    if scope.get("batch_id") != batch_id:
+        raise ArchiveSchemaError("Stored archive plan batch identity differs")
+    read_plan_segments(
+        conn, batch_id, scope.get("segment_count"),
+        scope.get("inventory_bytes"), scope.get("inventory_sha256"),
+    )
+
+
 def validate_archive_facts(conn: sqlite3.Connection) -> None:
     """Fail closed on malformed stored facts, not only on syntactically valid DDL."""
     foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
@@ -479,8 +591,8 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
     ):
         for (value,) in conn.execute(f"SELECT {field} FROM {table}"):
             _stored_json(value, field)
-    for (scope_json, state) in conn.execute(
-        "SELECT scope_json,state FROM archive_batches"
+    for (batch_id, scope_json, state) in conn.execute(
+        "SELECT batch_id,scope_json,state FROM archive_batches"
     ):
         try:
             scope = json.loads(normalize_json(scope_json, object_only=True))
@@ -493,6 +605,19 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
             and not isinstance(scope.get("scope_receipt"), dict)
         ):
             raise ArchiveSchemaError("Stored archive plan requires a scope receipt")
+        if isinstance(scope, dict) and scope.get("format") == "jpgpng-archive-plan":
+            _check_stored_plan_segments(conn, batch_id, scope)
+            if state == "planned":
+                # The maintenance audit and the plan loader must agree on the
+                # full protocol, not just on segment bytes.  Import lazily: the
+                # plan store imports this module at import time.
+                from core.archive_plan_store import _load_in_transaction as _load_stored_plan
+                try:
+                    _load_stored_plan(conn, batch_id)
+                except Exception as exc:
+                    raise ArchiveSchemaError(
+                        "Stored archive plan failed the shared protocol check"
+                    ) from exc
     for batch_id, total_bytes, segment_count in conn.execute(
         "SELECT batch_id,COALESCE(SUM(byte_length),0),COUNT(*) "
         "FROM archive_plan_segments GROUP BY batch_id"
@@ -543,7 +668,8 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
             if receipt is None:
                 raise ArchiveSchemaError("Download receipt artifact is missing")
             try:
-                receipt_path = PathRef(**json.loads(receipt[0]))
+                receipt_path = PathRef(**json.loads(
+                    normalize_json(receipt[0], object_only=True)))
             except (KeyError, TypeError, ValueError) as exc:
                 raise ArchiveSchemaError("Download receipt path is invalid") from exc
             if (
@@ -809,7 +935,8 @@ def ensure_archive_asset(
             raise ContractError("Referenced download receipt does not exist")
         output_ref, size, digest, verification = receipt
         try:
-            if PathRef(**json.loads(output_ref)).identity_key != path.identity_key:
+            if PathRef(**json.loads(
+                    normalize_json(output_ref, object_only=True))).identity_key != path.identity_key:
                 raise ContractError("Download receipt path does not match this asset")
         except (KeyError, TypeError, ValueError) as exc:
             raise ContractError("Download receipt path is invalid") from exc
@@ -897,6 +1024,172 @@ def bind_archive_path(
     conn.execute(
         "UPDATE archive_path_bindings SET asset_id=?, revision=?, bound_at=? WHERE path_key=?",
         (content.asset_id, content.revision, bound_at, path.identity_key),
+    )
+
+
+def load_content_binding(
+    conn: sqlite3.Connection, path: PathRef,
+) -> ContentBinding | None:
+    """Read the current path binding and its last observed physical object."""
+    if not isinstance(path, PathRef):
+        raise ContractError("Expected a path reference")
+    row = conn.execute(
+        """SELECT c.content_key,c.asset_id,c.revision,c.size_bytes,c.sha256
+           FROM archive_path_bindings AS b
+           JOIN archive_assets AS a
+             ON a.asset_id=b.asset_id AND a.revision=b.revision
+            AND a.path_key=b.path_key
+           JOIN archive_contents AS c
+             ON c.asset_id=a.asset_id AND c.revision=a.revision
+           WHERE b.path_key=?""",
+        (path.identity_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    content = ContentVersion(row[1], row[2], row[3], row[4])
+    if row[0] != _content_key(content):
+        raise ArchiveSchemaError("Path binding content identity differs from its facts")
+    physical = None
+    observed = conn.execute(
+        """SELECT file_device,file_index FROM archive_local_checks
+           WHERE path_key=? AND file_device IS NOT NULL AND file_index IS NOT NULL
+           ORDER BY checked_at DESC, check_id DESC LIMIT 1""",
+        (path.identity_key,),
+    ).fetchone()
+    if observed is not None:
+        try:
+            physical = FileIdentity(int(observed[0]), int(observed[1]))
+        except (TypeError, ValueError) as exc:
+            raise ArchiveSchemaError("Stored observed physical identity is invalid") from exc
+    return ContentBinding(content, physical)
+
+
+def find_known_content(
+    conn: sqlite3.Connection, sha256: str, size_bytes: int,
+) -> ContentVersion | None:
+    """Find one already indexed content generation for these exact bytes."""
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ContractError("Invalid content digest")
+    if type(size_bytes) is not int or size_bytes < 0:
+        raise ContractError("Invalid content size")
+    row = conn.execute(
+        """SELECT asset_id,revision,size_bytes,sha256 FROM archive_contents
+           WHERE sha256=? AND size_bytes=? ORDER BY asset_id,revision LIMIT 1""",
+        (sha256, size_bytes),
+    ).fetchone()
+    return None if row is None else ContentVersion(row[0], row[1], row[2], row[3])
+
+
+def content_digest_is_known(
+    conn: sqlite3.Connection, sha256: str, size_bytes: int,
+) -> bool:
+    """True when this exact size and digest already has a content row."""
+    return find_known_content(conn, sha256, size_bytes) is not None
+
+
+def resolve_observed_content(
+    conn: sqlite3.Connection, observed: ObservedFile, *,
+    replacement_confirmed: bool = False,
+) -> ContentResolution:
+    """Resolve one real observation against the current indexed binding.
+
+    Reads only the current binding and whether the observed digest is already
+    known.  It never writes; the single writer transaction calls
+    ``apply_content_resolution`` and rechecks the expected binding there.
+    """
+    if not isinstance(observed, ObservedFile):
+        raise ContractError("Expected an observed file")
+    path = observed.candidate.path
+    existing = load_content_binding(conn, path)
+    known_content = None
+    content = observed.content
+    if observed.digest_complete and content is not None and content.sha256 is not None:
+        known_content = find_known_content(conn, content.sha256, content.size_bytes)
+    return resolve_content_version(
+        observed.candidate, observed, existing=existing,
+        digest_known=known_content is not None, known_content=known_content,
+        replacement_confirmed=replacement_confirmed,
+    )
+
+
+def _asset_row_is_exact(
+    conn: sqlite3.Connection, content: ContentVersion, path: PathRef,
+) -> bool:
+    row = conn.execute(
+        """SELECT content_key,asset_id,revision,path_key,path_json,size_bytes,sha256
+           FROM archive_assets WHERE asset_id=? AND revision=? AND path_key=?""",
+        (content.asset_id, content.revision, path.identity_key),
+    ).fetchone()
+    expected = (
+        _content_key(content), content.asset_id, content.revision, path.identity_key,
+        _path_json(path), content.size_bytes, content.sha256,
+    )
+    return row is not None and tuple(row) == expected
+
+
+def apply_content_resolution(
+    conn: sqlite3.Connection, resolution: ContentResolution, *,
+    observed: ObservedFile | None = None, bound_at: str,
+    source_kind: str = "observed_existing",
+) -> None:
+    """Write one resolved generation inside the caller's transaction.
+
+    The current binding is re-read here and the update carries the expected old
+    content key, so an out-of-band change cannot be overwritten silently.  A
+    replacement that would change the asset identity is refused with a
+    structured confirmation instead of a generic database error.
+    """
+    if not isinstance(resolution, ContentResolution):
+        raise ContractError("Expected a content resolution")
+    if not isinstance(bound_at, str) or not bound_at or len(bound_at) > 64:
+        raise ContractError("Invalid path binding time")
+    if observed is not None:
+        if not isinstance(observed, ObservedFile):
+            raise ContractError("Expected an observed file")
+        if observed.candidate != resolution.candidate:
+            raise ContractError("Observation candidate differs from the resolution")
+    if resolution.requires_attention or resolution.content is None:
+        raise ArchiveIdentityConfirmationRequired(resolution)
+    path = resolution.candidate.path
+    content = resolution.content
+    expected = resolution.previous_content
+    if (expected is not None and _content_key(expected) != _content_key(content)):
+        if conn.execute(
+            "SELECT 1 FROM archive_contents WHERE content_key=?",
+            (_content_key(expected),),
+        ).fetchone() is None:
+            ensure_archive_asset(conn, expected, path, source_kind=source_kind)
+        else:
+            _require_content(conn, expected)
+    if not _asset_row_is_exact(conn, content, path):
+        ensure_archive_asset(conn, content, path, source_kind=source_kind)
+    if observed is not None:
+        rebound = rebind_observation(observed, resolution)
+        if rebound is not None:
+            record_local_observation(conn, rebound.evidence, result=rebound)
+    current = conn.execute(
+        "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
+        (path.identity_key,),
+    ).fetchone()
+    if current is None:
+        bind_archive_path(conn, content, path, bound_at=bound_at)
+        return
+    current_key = conn.execute(
+        """SELECT content_key FROM archive_assets
+           WHERE asset_id=? AND revision=? AND path_key=?""",
+        (current[0], current[1], path.identity_key),
+    ).fetchone()
+    if current_key is None:
+        raise ArchiveSchemaError("Current path binding has no exact asset row")
+    if current_key[0] == _content_key(content):
+        return
+    if current[0] != content.asset_id:
+        raise ArchiveIdentityConfirmationRequired(resolution)
+    if current[1] >= content.revision:
+        raise ArchiveSchemaError(
+            "Current path binding is not older than the resolved revision")
+    bind_archive_path(
+        conn, content, path, bound_at=bound_at, expected_content_key=current_key[0],
     )
 
 

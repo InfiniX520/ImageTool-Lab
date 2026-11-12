@@ -40,6 +40,9 @@ from core.archive_inventory import (
     plan_archive_capacity,
 )
 from core.archive_schema import (
+    ARCHIVE_PLAN_DOCUMENT_LIMIT,
+    ARCHIVE_PLAN_SEGMENT_COUNT,
+    ARCHIVE_PLAN_SEGMENT_LIMIT,
     ARCHIVE_PROTOCOL_VERSION,
     ARCHIVE_SCHEMA_VERSION,
     ARCHIVE_TABLES,
@@ -48,6 +51,7 @@ from core.archive_schema import (
     _content_key,
     bind_archive_path,
     ensure_archive_asset,
+    read_plan_segments,
 )
 from core.local_observation import FileIdentity
 from core.preservation_policy import ContentVersion
@@ -56,9 +60,9 @@ from core.task_contracts import ContractError, PathRef, canonical_json, normaliz
 _ARCHIVE_PLAN_FORMAT = "jpgpng-archive-plan"
 _ARCHIVE_PLAN_VERSION = 2
 _ARCHIVE_PLAN_SEGMENT_CHARS = 200_000
-ARCHIVE_PLAN_MAX_BYTES = 8 * 1024 * 1024
+ARCHIVE_PLAN_MAX_BYTES = ARCHIVE_PLAN_DOCUMENT_LIMIT
 ARCHIVE_PLAN_MAX_ENTRIES = 9_000
-ARCHIVE_PLAN_MAX_SEGMENTS = 128
+ARCHIVE_PLAN_MAX_SEGMENTS = ARCHIVE_PLAN_SEGMENT_COUNT
 _BATCH_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
@@ -80,6 +84,41 @@ class ArchivePlanTooLargeError(ArchivePlanStoreError):
         super().__init__(
             f"Archive plan for {batch_id} is {payload_bytes} bytes; "
             f"the bounded plan budget is {ARCHIVE_PLAN_MAX_BYTES} bytes"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivePathConfirmation:
+    """One path whose physical replacement needs an explicit human decision."""
+
+    relative_path: str
+    path_key: str
+    existing_asset_id: str | None
+    existing_revision: int | None
+    proposed_asset_id: str
+    proposed_revision: int
+    reason: str
+    next_action: str = "confirm_same_name_replacement"
+
+
+class ArchiveConfirmationRequiredError(ArchivePlanStoreError):
+    """A same-name physical replacement is not auto-accepted by this batch.
+
+    The plan is not saved, the previous batch and path binding are untouched,
+    and the caller receives the exact paths plus a retry action.  The range is
+    explicitly not complete; an operator must confirm the replacement before a
+    new plan can be prepared.
+    """
+
+    def __init__(self, conflicts: tuple[ArchivePathConfirmation, ...]):
+        if not conflicts or not all(
+                isinstance(item, ArchivePathConfirmation) for item in conflicts):
+            raise TypeError("Expected one or more path confirmations")
+        self.conflicts = tuple(conflicts)
+        self.scope_complete = False
+        super().__init__(
+            "%d path(s) require replacement confirmation; the scope is not complete: %s"
+            % (len(self.conflicts), ", ".join(item.relative_path for item in self.conflicts))
         )
 
 
@@ -137,7 +176,9 @@ class PreparedArchivePlan:
             raise ArchivePlanStoreError("Prepared plan receipt is required text")
         try:
             receipt = ScopeReceipt.from_json(self.scope_receipt_json)
-            _receipt_json(receipt, self.inventory)
+            bound_receipt_json = _receipt_json(receipt, self.inventory)
+            if bound_receipt_json != self.scope_receipt_json:
+                raise ArchivePlanStoreError("Prepared plan receipt is not content-bound")
         except (ContractError, TypeError, ValueError, UnicodeError, RecursionError) as exc:
             raise ArchivePlanStoreError("Prepared plan receipt is invalid") from exc
         if not isinstance(self.segments, tuple) or not self.segments:
@@ -480,7 +521,7 @@ def _scope_entries(inventory: ArchiveInventory) -> tuple[ArchiveEntry, ...]:
     re-sorted here rather than assumed to be in page-consumption order.
     """
     entries = (
-        ArchiveEntry(asset.content, asset.path, asset.page_index)
+        ArchiveEntry(asset.content, asset.path, asset.page_index, asset.physical_identity)
         for asset in inventory.assets
     )
     return tuple(sorted(entries, key=lambda entry: (
@@ -489,19 +530,50 @@ def _scope_entries(inventory: ArchiveInventory) -> tuple[ArchiveEntry, ...]:
     )))
 
 
-def _receipt_json(receipt: ScopeReceipt, inventory: ArchiveInventory) -> str:
+def _receipt_json(
+    receipt: ScopeReceipt, inventory: ArchiveInventory, *,
+    root_revision: int | None = None,
+) -> str:
     if not isinstance(receipt, ScopeReceipt):
         raise ArchivePlanStoreError("Expected a ScopeReceipt")
     try:
         receipt.verify()
     except ContractError as exc:
         raise ArchivePlanStoreError("ScopeReceipt failed its digest verification") from exc
-    if not receipt.consumption_complete:
-        raise ArchivePlanStoreError("ScopeReceipt is not a complete page consumption")
-    if receipt.selection_kind is ScopeSelectionKind.SNAPSHOT and not receipt.scope_complete:
-        raise ArchivePlanStoreError("A whole-snapshot plan requires scope_complete")
+    if root_revision is not None:
+        _integer(root_revision, "plan root mapping revision")
+        if receipt.root_revision != root_revision:
+            raise ArchivePlanStoreError(
+                "ScopeReceipt root mapping revision differs from the plan"
+            )
+    # Completeness is bidirectional: a sub-batch receipt can never authorize a
+    # whole inventory, and a complete snapshot receipt cannot hide an inventory
+    # that still has rejected items.  A partial inventory may carry a partial
+    # snapshot receipt, but a sub-batch still has to consume its own pages fully.
+    if inventory.scope_complete:
+        if (not receipt.consumption_complete
+                or receipt.selection_kind is not ScopeSelectionKind.SNAPSHOT
+                or not receipt.scope_complete):
+            raise ArchivePlanStoreError(
+                "A complete inventory requires a complete whole-snapshot receipt")
+        if receipt.entries_in_snapshot != len(inventory.assets):
+            raise ArchivePlanStoreError(
+                "Complete inventory path count differs from the scope snapshot")
+        if (inventory.input_entry_count
+                != receipt.entries_in_snapshot + inventory.duplicate_entry_count):
+            raise ArchivePlanStoreError(
+                "Inventory input/duplicate counts disagree with the scope snapshot")
+    else:
+        if receipt.scope_complete:
+            raise ArchivePlanStoreError(
+                "An incomplete inventory cannot claim a complete scope")
+        if (receipt.selection_kind is ScopeSelectionKind.SUB_BATCH
+                and not receipt.consumption_complete):
+            raise ArchivePlanStoreError(
+                "A sub-batch receipt is not a complete page consumption")
     for asset in inventory.assets:
-        if asset.path.kind != receipt.kind or asset.path.root_id != receipt.root_id:
+        if (asset.path.kind != receipt.kind
+                or asset.path.root_id.casefold() != receipt.root_id.casefold()):
             raise ArchivePlanStoreError(
                 "ScopeReceipt root does not match the plan paths"
             )
@@ -509,7 +581,14 @@ def _receipt_json(receipt: ScopeReceipt, inventory: ArchiveInventory) -> str:
     if receipt.consumed_entries != len(entries):
         raise ArchivePlanStoreError("ScopeReceipt entry count differs from the plan")
     if not receipt.matches_entries(entries):
-        raise ArchivePlanStoreError("ScopeReceipt entries differ from the plan")
+        if not receipt.matches_physical_entries(entries):
+            raise ArchivePlanStoreError("ScopeReceipt entries differ from the plan")
+        try:
+            receipt = receipt.bind_content(entries)
+        except ContractError as exc:
+            raise ArchivePlanStoreError("ScopeReceipt entries differ from the plan") from exc
+        if not receipt.matches_entries(entries):
+            raise ArchivePlanStoreError("ScopeReceipt entries differ from the plan")
     try:
         return receipt.to_json()
     except (ContractError, TypeError, ValueError, UnicodeError, RecursionError) as exc:
@@ -534,7 +613,7 @@ def _inventory_segments(
     for index, start in enumerate(range(0, len(text), _ARCHIVE_PLAN_SEGMENT_CHARS)):
         payload = text[start:start + _ARCHIVE_PLAN_SEGMENT_CHARS]
         byte_length = len(payload.encode("utf-8"))
-        if byte_length > 1024 * 1024:
+        if byte_length > ARCHIVE_PLAN_SEGMENT_LIMIT:
             raise ArchivePlanStoreError("Archive plan segment exceeds its byte bound")
         segments.append(PlanSegment(index, payload, byte_length))
     return text, tuple(segments)
@@ -546,12 +625,16 @@ def prepare_archive_plan(
     *,
     scope: dict[str, object] | None = None,
     receipt: ScopeReceipt | None = None,
+    root_revision: int | None = None,
 ) -> PreparedArchivePlan:
     """Freeze and bound a plan without opening a database or reading image bytes.
 
     When a ScopeReceipt is supplied it must prove complete page consumption;
-    its entries are compared with this exact plan before any write.  A plan
-    without a complete ScopeReceipt is never prepared.
+    its v2 entry facts, including physical identity, are compared with this
+    exact plan before any write.  ``root_revision`` is the current root mapping
+    generation: an old receipt from another generation is refused rather than
+    silently replaying a stale candidate set.  A plan without a complete
+    ScopeReceipt is never prepared.
     """
     if not isinstance(inventory, ArchiveInventory) or not isinstance(capacity, CapacityPlan):
         raise ArchivePlanStoreError("Expected ArchiveInventory and CapacityPlan")
@@ -571,7 +654,8 @@ def prepare_archive_plan(
             validate_consistency=False,
         )
         inventory_json, segments = _inventory_segments(inventory, raw_inventory)
-        receipt_json = None if receipt is None else _receipt_json(receipt, checked_inventory)
+        receipt_json = None if receipt is None else _receipt_json(
+            receipt, checked_inventory, root_revision=root_revision)
         capacity_json = canonical_json(capacity.to_dict())
         checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
         if checked_inventory != inventory or checked_capacity != capacity:
@@ -592,6 +676,7 @@ def prepare_archive_plan(
         "inventory_bytes": len(inventory_json.encode("utf-8")),
         "segment_count": len(segments),
         "scope_receipt": None if receipt_json is None else json.loads(receipt_json),
+        "asset_sources_sha256": "0" * 64,
     })
     payload_bytes = (
         len(header_json.encode("utf-8")) + len(capacity_json.encode("utf-8"))
@@ -614,7 +699,8 @@ def prepare_archive_plan(
 
 def _decode_scope(
     conn: sqlite3.Connection, value: object, expected_batch_id: str,
-) -> tuple[ArchiveInventory, dict[str, object], dict[str, object] | None]:
+) -> tuple[ArchiveInventory, dict[str, object], dict[str, object] | None, str]:
+
     raw = _strict_object(value, "scope_json")
     if raw.get("format") != _ARCHIVE_PLAN_FORMAT:
         raise ArchivePlanStoreError("Stored scope JSON is not an archive plan")
@@ -626,6 +712,7 @@ def _decode_scope(
     expected_keys = {
         "format", "plan_schema_version", "batch_id", "scope",
         "inventory_sha256", "inventory_bytes", "segment_count", "scope_receipt",
+        "asset_sources_sha256",
     }
     if set(raw) != expected_keys:
         raise ArchivePlanStoreError("Stored scope JSON has missing or unknown fields")
@@ -642,30 +729,13 @@ def _decode_scope(
         raise ArchivePlanStoreError("Stored scope identity or bound is invalid")
     if not isinstance(raw["scope_receipt"], dict):
         raise ArchivePlanStoreError("Stored archive plan requires a scope receipt")
-    pieces = []
-    total_bytes = 0
-    cursor = conn.execute(
-        """SELECT segment_index,payload,byte_length FROM archive_plan_segments
-           WHERE batch_id=? ORDER BY segment_index""",
-        (expected_batch_id,),
-    )
-    for index, row in enumerate(cursor):
-        if index >= raw["segment_count"]:
-            raise ArchivePlanStoreError("Stored plan has extra segments")
-        if tuple(row[:1]) != (index,) or not isinstance(row[1], str):
-            raise ArchivePlanStoreError("Stored plan segments are not contiguous")
-        byte_length = len(row[1].encode("utf-8"))
-        if byte_length != row[2] or byte_length > 1024 * 1024:
-            raise ArchivePlanStoreError("Stored plan segment byte length differs")
-        total_bytes += byte_length
-        if total_bytes > ARCHIVE_PLAN_MAX_BYTES:
-            raise ArchivePlanStoreError("Stored plan exceeds the document byte budget")
-        pieces.append(row[1])
-    if len(pieces) != raw["segment_count"] or total_bytes != raw["inventory_bytes"]:
-        raise ArchivePlanStoreError("Stored plan segment count or bytes differ from its header")
-    inventory_json = "".join(pieces)
-    if hashlib.sha256(inventory_json.encode("utf-8")).hexdigest() != raw["inventory_sha256"]:
-        raise ArchivePlanStoreError("Stored plan document digest differs")
+    try:
+        inventory_json = read_plan_segments(
+            conn, expected_batch_id, raw["segment_count"],
+            raw["inventory_bytes"], raw["inventory_sha256"],
+        )
+    except ArchiveSchemaError as exc:
+        raise ArchivePlanStoreError(str(exc)) from exc
     try:
         inventory = _inventory(
             json.loads(normalize_json(inventory_json, object_only=True)),
@@ -681,7 +751,7 @@ def _decode_scope(
         _receipt_json(receipt, inventory)
     except (ContractError, TypeError, ValueError, UnicodeError) as exc:
         raise ArchivePlanStoreError("Stored scope receipt is invalid") from exc
-    return inventory, raw["scope"], scope_receipt
+    return inventory, raw["scope"], scope_receipt, raw["asset_sources_sha256"]
 
 
 def _expected_packages(inventory: ArchiveInventory) -> tuple[StoredPackagePlan, ...]:
@@ -712,7 +782,14 @@ def _check_package_index(
         raise ArchivePlanStoreError("Package index differs from the immutable plan JSON")
 
 
-def _check_assets(conn: sqlite3.Connection, inventory: ArchiveInventory) -> None:
+def _check_assets(
+    conn: sqlite3.Connection, inventory: ArchiveInventory,
+    asset_sources_sha256: object,
+) -> None:
+    if (not isinstance(asset_sources_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", asset_sources_sha256) is None):
+        raise ArchivePlanStoreError("Stored plan asset source digest is invalid")
+    source_facts = []
     for asset in inventory.assets:
         content = asset.content
         expected = (
@@ -732,6 +809,7 @@ def _check_assets(conn: sqlite3.Connection, inventory: ArchiveInventory) -> None
         ).fetchone()
         if row is None or tuple(row[:7]) != expected:
             raise ArchivePlanStoreError("Content/path facts differ from the immutable plan JSON")
+        source_facts.append([asset.path_key, row[7]])
         content_row = conn.execute(
             "SELECT content_key,size_bytes,sha256 FROM archive_contents "
             "WHERE asset_id=? AND revision=?",
@@ -750,7 +828,8 @@ def _check_assets(conn: sqlite3.Connection, inventory: ArchiveInventory) -> None
             if artifact_id is None or receipt is None:
                 raise ArchivePlanStoreError("Download receipt asset has no exact artifact")
             try:
-                receipt_path = PathRef(**json.loads(receipt[0]))
+                receipt_path = PathRef(**json.loads(
+                    normalize_json(receipt[0], object_only=True)))
             except (KeyError, TypeError, ValueError) as exc:
                 raise ArchivePlanStoreError("Download receipt path is invalid") from exc
             if (
@@ -762,6 +841,9 @@ def _check_assets(conn: sqlite3.Connection, inventory: ArchiveInventory) -> None
                 raise ArchivePlanStoreError("Download receipt does not prove this exact content")
         elif artifact_id is not None or source_kind not in {"observed_existing", "user_selected"}:
             raise ArchivePlanStoreError("Asset source or artifact binding is invalid")
+    if hashlib.sha256(canonical_json(sorted(source_facts)).encode("utf-8")).hexdigest() \
+            != asset_sources_sha256:
+        raise ArchivePlanStoreError("Asset source facts differ from the immutable plan JSON")
 
 
 def _timestamp(value: object) -> str:
@@ -783,11 +865,12 @@ def _load_in_transaction(conn: sqlite3.Connection, batch_id: str) -> StoredArchi
     protocol, scope_json, capacity_json, state, pause_reason, created_at = row
     if protocol != ARCHIVE_PROTOCOL_VERSION or state != "planned" or pause_reason is not None:
         raise ArchivePlanConflictError("Existing batch is not an unchanged planned archive batch")
-    inventory, scope, scope_receipt = _decode_scope(conn, scope_json, batch_id)
+    inventory, scope, scope_receipt, asset_sources_sha256 = _decode_scope(
+        conn, scope_json, batch_id)
     capacity = _capacity(_strict_object(capacity_json, "capacity_json"), inventory)
     stored_packages = _packages(conn, batch_id)
     _check_package_index(stored_packages, _expected_packages(inventory))
-    _check_assets(conn, inventory)
+    _check_assets(conn, inventory, asset_sources_sha256)
     return StoredArchivePlan(
         batch_id, inventory, capacity, scope, _timestamp(created_at), stored_packages,
         scope_receipt,
@@ -830,6 +913,51 @@ def _rollback(conn: sqlite3.Connection) -> None:
         conn.execute("ROLLBACK")
 
 
+def _replacement_conflicts(
+    conn: sqlite3.Connection, inventory: ArchiveInventory,
+) -> tuple[ArchivePathConfirmation, ...]:
+    """Find paths whose current owner is a different logical asset.
+
+    This runs inside the writer transaction before the new batch row is
+    inserted.  A same-asset revision advance is allowed; a different asset at
+    the same path is a replacement the caller did not confirm.
+    """
+    conflicts = []
+    for asset in inventory.assets:
+        binding = conn.execute(
+            "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
+            (asset.path_key,),
+        ).fetchone()
+        if binding is not None and binding[0] != asset.content.asset_id:
+            conflicts.append(ArchivePathConfirmation(
+                relative_path=asset.path.relative_path,
+                path_key=asset.path_key,
+                existing_asset_id=binding[0],
+                existing_revision=binding[1],
+                proposed_asset_id=asset.content.asset_id,
+                proposed_revision=asset.content.revision,
+                reason="physical_object_belongs_to_another_asset",
+            ))
+            continue
+        owners = [row[0] for row in conn.execute(
+            "SELECT DISTINCT asset_id FROM archive_assets WHERE path_key=?",
+            (asset.path_key,),
+        )]
+        foreign = [owner for owner in owners if owner != asset.content.asset_id]
+        if foreign:
+            conflicts.append(ArchivePathConfirmation(
+                relative_path=asset.path.relative_path,
+                path_key=asset.path_key,
+                existing_asset_id=foreign[0],
+                existing_revision=None,
+                proposed_asset_id=asset.content.asset_id,
+                proposed_revision=asset.content.revision,
+                reason="path_owned_by_another_asset",
+                next_action="confirm_or_choose_new_path",
+            ))
+    return tuple(conflicts)
+
+
 def save_prepared_plan_in_transaction(
     conn: sqlite3.Connection, prepared: PreparedArchivePlan,
 ) -> ArchivePlanSaveResult:
@@ -856,6 +984,10 @@ def save_prepared_plan_in_transaction(
         ):
             raise ArchivePlanConflictError("Batch ID already contains a different immutable plan")
         return ArchivePlanSaveResult(stored, replayed=True)
+
+    conflicts = _replacement_conflicts(conn, prepared.inventory)
+    if conflicts:
+        raise ArchiveConfirmationRequiredError(conflicts)
 
     expected_packages = _expected_packages(prepared.inventory)
     package_ids = [package.package_id for package in expected_packages]
@@ -887,6 +1019,7 @@ def save_prepared_plan_in_transaction(
             for segment in prepared.segments
         ],
     )
+    source_facts: list[list[str]] = []
     for asset in prepared.inventory.assets:
         content = asset.content
         existing_asset = conn.execute(
@@ -933,6 +1066,22 @@ def save_prepared_plan_in_transaction(
                     conn, content, asset.path, bound_at=created_at,
                     expected_content_key=current_content[0],
                 )
+        source_row = conn.execute(
+            """SELECT source_kind FROM archive_assets
+               WHERE asset_id=? AND revision=? AND path_key=?""",
+            (content.asset_id, content.revision, asset.path_key),
+        ).fetchone()
+        if source_row is None:
+            raise ArchivePlanStoreError("Saved asset has no source fact")
+        source_facts.append([asset.path_key, source_row[0]])
+    header = json.loads(prepared.header_json)
+    header["asset_sources_sha256"] = hashlib.sha256(
+        canonical_json(sorted(source_facts)).encode("utf-8")
+    ).hexdigest()
+    conn.execute(
+        "UPDATE archive_batches SET scope_json=? WHERE batch_id=?",
+        (canonical_json(header), prepared.batch_id),
+    )
     conn.executemany(
         """INSERT INTO archive_packages (
                package_id,batch_id,package_revision,format,tool_version,key_ref,
@@ -963,10 +1112,14 @@ def save_archive_plan(
     *,
     scope: dict[str, object] | None = None,
     receipt: ScopeReceipt | None = None,
+    root_revision: int | None = None,
 ) -> ArchivePlanSaveResult:
     """Prepare outside any transaction, then save on this standalone connection."""
     conn = _require_connection(conn)
-    prepared = prepare_archive_plan(inventory, capacity, scope=scope, receipt=receipt)
+    prepared = prepare_archive_plan(
+        inventory, capacity, scope=scope, receipt=receipt,
+        root_revision=root_revision,
+    )
     try:
         if conn.in_transaction:
             raise ArchivePlanStoreError("Archive plan save requires ownership of a new transaction")
@@ -997,8 +1150,13 @@ def load_archive_plan_in_transaction(
         raise ArchivePlanStoreError("Invalid archive batch ID")
     if not conn.in_transaction:
         raise ArchivePlanStoreError("Archive plan reload requires a caller-owned transaction")
-    _require_schema3(conn)
-    return _load_in_transaction(conn, batch_id)
+    try:
+        _require_schema3(conn)
+        return _load_in_transaction(conn, batch_id)
+    except ArchivePlanStoreError:
+        raise
+    except (sqlite3.Error, ContractError, ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise ArchivePlanStoreError("Stored archive plan failed strict validation") from exc
 
 
 def load_archive_plan(conn: sqlite3.Connection, batch_id: str) -> StoredArchivePlan:

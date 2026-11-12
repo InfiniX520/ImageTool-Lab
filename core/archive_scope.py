@@ -65,14 +65,18 @@ from pathlib import Path
 from typing import ContextManager
 
 from core.archive_inventory import ArchiveEntry
-from core.local_observation import FileIdentity
-from core.preservation_policy import ContentVersion
+from core.local_observation import (
+    FileIdentity, LocalObservation, ObservationBudget, ObservationRequest,
+    ObservationStatus,
+)
+from core.preservation_policy import ContentVersion, LocalEvidence, LocalState
 from core.task_contracts import ContractError, PathRef, canonical_json, normalize_json
 
 SCOPE_SCHEMA_VERSION = 1
-SCOPE_RECEIPT_SCHEMA_VERSION = 1
+SCOPE_RECEIPT_SCHEMA_VERSION = 2
 _CURSOR_SCHEMA = "jpgpng.archive-scope.cursor.v1"
-_RECEIPT_SCHEMA = "jpgpng.archive-scope.receipt.v1"
+_RECEIPT_SCHEMA = "jpgpng.archive-scope.receipt.v2"
+_RECEIPT_SCHEMA_V1 = "jpgpng.archive-scope.receipt.v1"
 _MAX_CURSOR_BYTES = 16384
 _RECEIPT_FIELD_LIMIT = 128
 _ROOT_ERRNOS = {
@@ -447,12 +451,32 @@ class ScopePage:
     schema_version: int = SCOPE_SCHEMA_VERSION
     aliases: tuple[ScopeFileAlias, ...] = ()
     selection_digest: str = ""
+    entry_facts: tuple[ScopeEntryFact, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "entries", tuple(self.entries))
         object.__setattr__(self, "exclusions", tuple(self.exclusions))
         object.__setattr__(self, "issues", tuple(self.issues))
         object.__setattr__(self, "aliases", tuple(self.aliases))
+        facts = tuple(self.entry_facts)
+        if len(facts) != len(self.entries):
+            raise ContractError("A scope page needs one entry fact per entry")
+        for entry, fact in zip(self.entries, facts):
+            if not isinstance(fact, ScopeEntryFact) or not isinstance(entry.path, PathRef):
+                raise ContractError("Invalid scope page entry fact")
+            if (fact.relative_path != entry.path.relative_path
+                    or fact.kind != entry.path.kind
+                    or fact.root_id != entry.path.root_id):
+                raise ContractError("Scope page entry fact differs from its entry")
+            identity = entry.physical_identity
+            if fact.physical_identity != identity:
+                raise ContractError("Scope page entry fact physical identity differs")
+            if (entry.content is None or fact.size_bytes != entry.content.size_bytes
+                    or fact.content_asset_id != entry.content.asset_id
+                    or fact.content_revision != entry.content.revision
+                    or fact.content_sha256 != entry.content.sha256):
+                raise ContractError("Scope page entry fact content differs")
+        object.__setattr__(self, "entry_facts", facts)
         if (self.cursor is not None) != self.has_next_page:
             raise ContractError("Cursor and next-page state disagree")
         if self.cursor is not None and not self.completion.snapshot_id:
@@ -486,13 +510,570 @@ def _digest_text(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _entries_digest(entries: Iterable[ArchiveEntry]) -> str:
-    rows = []
-    for entry in entries:
-        path = entry.path
-        relative = path.relative_path if isinstance(path, PathRef) else str(path)
-        rows.append([relative, None if entry.content is None else entry.content.size_bytes])
-    return _digest_text(rows)
+@dataclass(frozen=True, slots=True)
+class ScopeEntryFact:
+    """One enumerated file as the exact path/root/physical object of that scan.
+
+    This is the v2 receipt entry fact.  It deliberately carries no content
+    digest: scope enumeration never reads bytes.  ``size_bytes`` is the
+    enumerated size; ``mtime_ns`` and the OS identity bind the candidate to the
+    object the observer must later open.  A receipt that only repeated a path
+    and a size could not say which physical file those facts described.
+    """
+
+    kind: str
+    root_id: str
+    root_revision: int
+    relative_path: str
+    device: int | None
+    file_index: int | None
+    size_bytes: int
+    mtime_ns: int
+    content_asset_id: str | None = None
+    content_revision: int | None = None
+    content_sha256: str | None = None
+
+    def __post_init__(self):
+        if self.kind not in {"project", "external"}:
+            raise ContractError("Invalid scope entry kind")
+        if not isinstance(self.root_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{1,64}", self.root_id):
+            raise ContractError("Invalid scope entry root identity")
+        _integer(self.root_revision, "scope entry root revision", 0, 2**63 - 1)
+        try:
+            path = PathRef(self.kind, self.root_id, self.relative_path)
+        except ContractError as exc:
+            raise ContractError("Invalid scope entry path") from exc
+        if path.relative_path == ".":
+            raise ContractError("A scope entry must name a file")
+        object.__setattr__(self, "relative_path", path.relative_path)
+        if (self.device is None) != (self.file_index is None):
+            raise ContractError("A scope entry needs both device and file index")
+        if self.device is not None:
+            FileIdentity(self.device, self.file_index)
+        _integer(self.size_bytes, "scope entry size", 0, 2**63 - 1)
+        if (type(self.mtime_ns) is not int
+                or not -(2**63) <= self.mtime_ns <= 2**63 - 1):
+            raise ContractError("Invalid scope entry modification time")
+        if self.content_asset_id is None:
+            if self.content_revision is not None or self.content_sha256 is not None:
+                raise ContractError("Scope entry content facts are incomplete")
+        else:
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", self.content_asset_id):
+                raise ContractError("Invalid scope entry content asset")
+            _integer(self.content_revision, "scope entry content revision", 0, 2**63 - 1)
+            if self.content_sha256 is not None and not re.fullmatch(
+                    r"[0-9a-f]{64}", self.content_sha256):
+                raise ContractError("Invalid scope entry content digest")
+
+    @property
+    def physical_identity(self) -> FileIdentity | None:
+        if self.device is None:
+            return None
+        return FileIdentity(self.device, self.file_index)
+
+    def row(self) -> list[object]:
+        return [
+            self.kind, self.root_id, self.root_revision, self.relative_path,
+            self.device, self.file_index, self.size_bytes, self.mtime_ns,
+            self.content_asset_id, self.content_revision, self.content_sha256,
+        ]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind, "root_id": self.root_id,
+            "root_revision": self.root_revision,
+            "relative_path": self.relative_path,
+            "device": self.device, "file_index": self.file_index,
+            "size_bytes": self.size_bytes, "mtime_ns": self.mtime_ns,
+            "content_asset_id": self.content_asset_id,
+            "content_revision": self.content_revision,
+            "content_sha256": self.content_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> ScopeEntryFact:
+        if not isinstance(value, dict) or set(value) != {
+            "kind", "root_id", "root_revision", "relative_path", "device",
+            "file_index", "size_bytes", "mtime_ns", "content_asset_id",
+            "content_revision", "content_sha256",
+        }:
+            raise ContractError("Invalid scope entry fact fields")
+        return cls(**value)
+
+
+def _facts_digest(facts: Iterable[ScopeEntryFact]) -> str:
+    return _digest_text([fact.row() for fact in facts])
+
+
+def _entry_fact(entry: ArchiveEntry, *, root_revision: int,
+                mtime_ns: int = 0) -> ScopeEntryFact:
+    path = entry.path
+    if not isinstance(path, PathRef) or entry.content is None:
+        raise ContractError("A scope entry fact requires a PathRef and content size")
+    identity = entry.physical_identity
+    return ScopeEntryFact(
+        path.kind, path.root_id, root_revision, path.relative_path,
+        None if identity is None else identity.device,
+        None if identity is None else identity.file_index,
+        entry.content.size_bytes, mtime_ns, entry.content.asset_id,
+        entry.content.revision, entry.content.sha256,
+    )
+
+
+def _entries_digest(entries: Iterable[ArchiveEntry], *, root_revision: int = 0,
+                    mtime_ns: int = 0) -> str:
+    """Compatibility helper: digest explicit plan entries as v2 facts."""
+    return _facts_digest(
+        _entry_fact(entry, root_revision=root_revision, mtime_ns=mtime_ns)
+        for entry in entries
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateSnapshot:
+    """One enumerated candidate handed to a concrete file observer.
+
+    The enumerator freezes the raw path spelling, root mapping revision and the
+    OS physical facts of the directory entry.  The observer receives this
+    object, never only a path plus a size, so a replaced object cannot silently
+    inherit the old candidate's receipt.
+    """
+
+    kind: str
+    root_id: str
+    root_revision: int
+    relative_path: str
+    physical_identity: FileIdentity | None
+    size_bytes: int
+    mtime_ns: int
+    snapshot_id: str
+    run_id: str
+
+    def __post_init__(self):
+        if self.kind not in {"project", "external"}:
+            raise ContractError("Invalid candidate kind")
+        if not isinstance(self.root_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{1,64}", self.root_id):
+            raise ContractError("Invalid candidate root identity")
+        _integer(self.root_revision, "candidate root revision", 0, 2**63 - 1)
+        try:
+            path = PathRef(self.kind, self.root_id, self.relative_path)
+        except ContractError as exc:
+            raise ContractError("Invalid candidate path") from exc
+        if path.relative_path == ".":
+            raise ContractError("A candidate must name a file")
+        object.__setattr__(self, "relative_path", path.relative_path)
+        if self.physical_identity is not None and not isinstance(
+                self.physical_identity, FileIdentity):
+            raise ContractError("Invalid candidate physical identity")
+        _integer(self.size_bytes, "candidate size", 0, 2**63 - 1)
+        if (type(self.mtime_ns) is not int
+                or not -(2**63) <= self.mtime_ns <= 2**63 - 1):
+            raise ContractError("Invalid candidate modification time")
+        _token_text(self.snapshot_id, "candidate snapshot ID")
+        _token_text(self.run_id, "candidate run ID")
+
+    @property
+    def path(self) -> PathRef:
+        return PathRef(self.kind, self.root_id, self.relative_path)
+
+    def entry_fact(self) -> ScopeEntryFact:
+        identity = self.physical_identity
+        return ScopeEntryFact(
+            self.kind, self.root_id, self.root_revision, self.relative_path,
+            None if identity is None else identity.device,
+            None if identity is None else identity.file_index,
+            self.size_bytes, self.mtime_ns,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedFile:
+    """The concrete read result for one candidate, with no inferred identity."""
+
+    candidate: CandidateSnapshot
+    expected_content: ContentVersion
+    content: ContentVersion | None
+    digest_complete: bool
+    bytes_read: int
+    observed_size: int | None
+    observed_mtime_ns: int | None
+    observed_identity: FileIdentity | None
+    observation: LocalObservation | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self):
+        if not isinstance(self.candidate, CandidateSnapshot):
+            raise ContractError("Invalid observed candidate")
+        if not isinstance(self.expected_content, ContentVersion):
+            raise ContractError("Invalid expected content for observation")
+        if type(self.digest_complete) is not bool:
+            raise ContractError("Invalid observation completion flag")
+        _integer(self.bytes_read, "observed bytes read", 0, 2**63 - 1)
+        if self.observed_size is not None and (
+                type(self.observed_size) is not int or self.observed_size < 0):
+            raise ContractError("Invalid observed size")
+        if self.observed_mtime_ns is not None and (
+                type(self.observed_mtime_ns) is not int
+                or not -(2**63) <= self.observed_mtime_ns <= 2**63 - 1):
+            raise ContractError("Invalid observed modification time")
+        if self.observed_identity is not None and not isinstance(
+                self.observed_identity, FileIdentity):
+            raise ContractError("Invalid observed physical identity")
+        if self.digest_complete:
+            if (self.content is None or self.content.sha256 is None
+                    or self.observed_size is None or self.observed_identity is None
+                    or self.observed_mtime_ns is None):
+                raise ContractError(
+                    "A complete observation needs content, size, mtime and identity")
+            if (self.content.size_bytes != self.observed_size
+                    or self.content.asset_id != self.expected_content.asset_id
+                    or self.content.revision != self.expected_content.revision):
+                raise ContractError("Complete observation facts disagree")
+        elif self.content is not None:
+            raise ContractError("An incomplete observation cannot assert content")
+        if self.observation is not None:
+            if not isinstance(self.observation, LocalObservation):
+                raise ContractError("Invalid local observation result")
+            if self.observation.evidence.path != self.candidate.path:
+                raise ContractError("Observation path differs from its candidate")
+
+
+class ResolutionKind(StrEnum):
+    REUSE = "reuse"
+    NEW_REVISION = "new_revision"
+    REPLACEMENT = "replacement"
+    BASELINE = "baseline"
+    CONFLICT = "conflict"
+    NEEDS_CONFIRMATION = "needs_confirmation"
+
+
+@dataclass(frozen=True, slots=True)
+class ContentBinding:
+    """The current path binding plus the last observed physical object."""
+
+    content: ContentVersion
+    physical_identity: FileIdentity | None = None
+
+    def __post_init__(self):
+        if not isinstance(self.content, ContentVersion):
+            raise ContractError("Invalid bound content")
+        if self.physical_identity is not None and not isinstance(
+                self.physical_identity, FileIdentity):
+            raise ContractError("Invalid bound physical identity")
+
+
+@dataclass(frozen=True, slots=True)
+class ContentResolution:
+    """One explicit decision from candidate/observation to a content revision."""
+
+    kind: ResolutionKind
+    candidate: CandidateSnapshot
+    content: ContentVersion | None
+    previous_content: ContentVersion | None
+    reason: str
+    next_action: str = "none"
+    requires_confirmation: bool = False
+    scope_complete: bool = True
+
+    def __post_init__(self):
+        if not isinstance(self.kind, ResolutionKind):
+            raise ContractError("Invalid content resolution kind")
+        if not isinstance(self.candidate, CandidateSnapshot):
+            raise ContractError("Invalid content resolution candidate")
+        for value, name in ((self.content, "content"),
+                            (self.previous_content, "previous content")):
+            if value is not None and not isinstance(value, ContentVersion):
+                raise ContractError("Invalid " + name)
+        _token_text(self.reason, "content resolution reason")
+        _token_text(self.next_action, "content resolution next action")
+        if type(self.requires_confirmation) is not bool:
+            raise ContractError("Invalid confirmation flag")
+        if type(self.scope_complete) is not bool:
+            raise ContractError("Invalid resolution completeness flag")
+        resolved = self.kind in {
+            ResolutionKind.REUSE, ResolutionKind.NEW_REVISION,
+            ResolutionKind.REPLACEMENT, ResolutionKind.BASELINE,
+        }
+        if resolved:
+            if (self.content is None or self.requires_confirmation
+                    or not self.scope_complete or self.next_action != "none"):
+                raise ContractError("A resolved content decision must be complete")
+        elif self.scope_complete or not self.requires_confirmation:
+            raise ContractError("An unresolved content decision cannot claim a complete scope")
+        if (self.kind is ResolutionKind.NEW_REVISION
+                and (self.previous_content is None or self.content is None
+                     or self.content.asset_id != self.previous_content.asset_id
+                     or self.content.revision <= self.previous_content.revision)):
+            raise ContractError("A new revision needs the same asset and a higher revision")
+
+    @property
+    def requires_attention(self) -> bool:
+        return self.requires_confirmation or not self.scope_complete
+
+
+def _resolution(
+    kind: ResolutionKind, candidate: CandidateSnapshot,
+    content: ContentVersion | None, previous: ContentVersion | None,
+    reason: str, *, next_action: str = "none",
+    requires_confirmation: bool = False, scope_complete: bool = True,
+) -> ContentResolution:
+    return ContentResolution(
+        kind, candidate, content, previous, reason, next_action,
+        requires_confirmation, scope_complete,
+    )
+
+
+def _unresolved(
+    kind: ResolutionKind, candidate: CandidateSnapshot, reason: str,
+    next_action: str,
+) -> ContentResolution:
+    return _resolution(
+        kind, candidate, None, None, reason, next_action=next_action,
+        requires_confirmation=True, scope_complete=False,
+    )
+
+
+def resolve_content_version(
+    candidate: CandidateSnapshot, observed: ObservedFile, *,
+    existing: ContentBinding | None = None, digest_known: bool = False,
+    known_content: ContentVersion | None = None,
+    replacement_confirmed: bool = False,
+) -> ContentResolution:
+    """Central, pure candidate/observation to content-generation resolver.
+
+    Order is fixed: prove the observed bytes belong to the enumerated physical
+    object first, then reuse, advance a revision, or stop for a replacement
+    decision.  Nothing here writes a database or guesses a missing digest.
+    """
+    if not isinstance(candidate, CandidateSnapshot) or not isinstance(observed, ObservedFile):
+        raise ContractError("Expected a candidate and its observation")
+    if observed.candidate != candidate:
+        return _unresolved(
+            ResolutionKind.CONFLICT, candidate, "candidate_mismatch", "reobserve")
+    if not observed.digest_complete or observed.content is None:
+        return _unresolved(
+            ResolutionKind.CONFLICT, candidate, "observation_incomplete", "reobserve")
+    if (observed.content.sha256 is None or observed.observed_size is None
+            or observed.observed_mtime_ns is None or observed.observed_identity is None):
+        return _unresolved(
+            ResolutionKind.NEEDS_CONFIRMATION, candidate,
+            "physical_facts_unavailable", "reobserve")
+    if candidate.physical_identity is None:
+        return _unresolved(
+            ResolutionKind.NEEDS_CONFIRMATION, candidate,
+            "candidate_physical_identity_missing", "reobserve")
+    if observed.observed_identity != candidate.physical_identity:
+        return _unresolved(
+            ResolutionKind.CONFLICT, candidate,
+            "physical_identity_changed_during_observation", "reobserve")
+    if observed.observed_size != candidate.size_bytes:
+        return _unresolved(
+            ResolutionKind.CONFLICT, candidate, "size_changed_during_observation",
+            "reobserve")
+    if observed.observed_mtime_ns != candidate.mtime_ns:
+        return _unresolved(
+            ResolutionKind.CONFLICT, candidate, "mtime_changed_during_observation",
+            "reobserve")
+    observed_content = observed.content
+    if observed_content.size_bytes != observed.observed_size:
+        return _unresolved(
+            ResolutionKind.CONFLICT, candidate, "observed_content_size_mismatch",
+            "reobserve")
+
+    if existing is None:
+        if (known_content is not None
+                and known_content.sha256 == observed_content.sha256
+                and known_content.size_bytes == observed_content.size_bytes):
+            return _resolution(
+                ResolutionKind.REUSE, candidate, known_content, None,
+                "known_content_first_binding")
+        if digest_known:
+            return _resolution(
+                ResolutionKind.REUSE, candidate, observed_content, None,
+                "known_digest_first_binding")
+        baseline_revision = max(
+            observed.expected_content.revision, observed_content.revision) + 1
+        baseline = ContentVersion(
+            observed_content.asset_id, baseline_revision,
+            observed_content.size_bytes, observed_content.sha256,
+        )
+        return _resolution(
+            ResolutionKind.BASELINE, candidate, baseline, observed.expected_content,
+            "first_observation_baseline")
+
+    if not isinstance(existing, ContentBinding):
+        raise ContractError("Invalid existing content binding")
+    previous = existing.content
+    content_matches = (
+        previous.sha256 is not None
+        and previous.sha256 == observed_content.sha256
+        and previous.size_bytes == observed_content.size_bytes
+    )
+    same_object = (
+        None if existing.physical_identity is None
+        else existing.physical_identity == observed.observed_identity
+    )
+    if same_object is False:
+        if not replacement_confirmed:
+            return _unresolved(
+                ResolutionKind.NEEDS_CONFIRMATION, candidate,
+                "physical_object_replaced", "confirm_same_name_replacement")
+        if content_matches:
+            return _resolution(
+                ResolutionKind.REPLACEMENT, candidate, previous, previous,
+                "confirmed_replacement_same_content")
+        revision = max(
+            previous.revision, observed.expected_content.revision,
+            observed_content.revision,
+        ) + 1
+        replacement = ContentVersion(
+            previous.asset_id, revision, observed_content.size_bytes,
+            observed_content.sha256,
+        )
+        return _resolution(
+            ResolutionKind.REPLACEMENT, candidate, replacement, previous,
+            "confirmed_physical_replacement")
+    if previous.sha256 is None:
+        revision = max(
+            previous.revision, observed.expected_content.revision,
+            observed_content.revision,
+        ) + 1
+        baseline = ContentVersion(
+            previous.asset_id, revision, observed_content.size_bytes,
+            observed_content.sha256,
+        )
+        return _resolution(
+            ResolutionKind.BASELINE, candidate, baseline, previous,
+            "unknown_history_baseline")
+    if content_matches:
+        return _resolution(
+            ResolutionKind.REUSE, candidate, previous, previous,
+            "same_physical_object_same_content")
+    if same_object is None:
+        if replacement_confirmed:
+            revision = max(previous.revision, observed_content.revision) + 1
+            replacement = ContentVersion(
+                previous.asset_id, revision, observed_content.size_bytes,
+                observed_content.sha256,
+            )
+            return _resolution(
+                ResolutionKind.REPLACEMENT, candidate, replacement, previous,
+                "confirmed_replacement_unknown_prior_identity")
+        return _unresolved(
+            ResolutionKind.NEEDS_CONFIRMATION, candidate,
+            "previous_physical_identity_unknown", "reobserve_or_confirm")
+    revision = max(previous.revision, observed_content.revision) + 1
+    newer = ContentVersion(
+        previous.asset_id, revision, observed_content.size_bytes,
+        observed_content.sha256,
+    )
+    return _resolution(
+        ResolutionKind.NEW_REVISION, candidate, newer, previous,
+        "same_physical_object_content_changed")
+
+
+def _observation_probe(
+    expected: ContentVersion, candidate: CandidateSnapshot,
+) -> ContentVersion:
+    """Keep the expected digest but use the enumerated size for one read.
+
+    LocalObserver rejects a size mismatch before opening the file.  A size
+    change is exactly what this resolver must explain, so the probe keeps the
+    historical asset/revision and digest while adopting the newly enumerated
+    size.  It is a read contract, not a stored content row.
+    """
+    if expected.size_bytes == candidate.size_bytes:
+        return expected
+    return ContentVersion(
+        expected.asset_id, expected.revision, candidate.size_bytes, expected.sha256,
+    )
+
+
+def observe_candidate(
+    candidate: CandidateSnapshot, observer, *, expected_content: ContentVersion,
+    run_id: str, check_id: str, budget: ObservationBudget | None = None,
+    cancellation=None,
+) -> ObservedFile:
+    """Observe exactly one candidate and return its explicit handoff facts."""
+    if not isinstance(candidate, CandidateSnapshot):
+        raise ContractError("Expected a CandidateSnapshot")
+    if not isinstance(expected_content, ContentVersion):
+        raise ContractError("Expected the content version to probe")
+    if not isinstance(observer, object) or not callable(getattr(observer, "observe", None)):
+        raise ContractError("Expected a local observer")
+    if budget is None:
+        budget = ObservationBudget()
+    if not isinstance(budget, ObservationBudget):
+        raise ContractError("Invalid observation budget")
+    probe = _observation_probe(expected_content, candidate)
+    result = observer.observe(ObservationRequest(
+        probe, candidate.path, run_id, check_id, budget, cancellation,
+    ))
+    if not isinstance(result, LocalObservation):
+        raise ContractError("The observer returned an invalid result")
+    content = None
+    if result.digest_complete:
+        if result.evidence.observed_sha256 is None or result.size_bytes is None:
+            raise ContractError("A complete observation lacks its digest or size")
+        content = ContentVersion(
+            probe.asset_id, probe.revision, result.size_bytes,
+            result.evidence.observed_sha256,
+        )
+    return ObservedFile(
+        candidate=candidate, expected_content=probe, content=content,
+        digest_complete=result.digest_complete, bytes_read=result.bytes_read,
+        observed_size=result.size_bytes, observed_mtime_ns=result.mtime_ns,
+        observed_identity=result.identity, observation=result,
+    )
+
+
+def rebind_observation(
+    observed: ObservedFile, resolution: ContentResolution,
+) -> LocalObservation | None:
+    """Bind one real read to the content row the resolution can persist.
+
+    The bytes, byte count, identity and digest are taken from the actual
+    observation.  Only the evidence's content reference is rebound: a baseline
+    stays ``unknown`` against the unknown historical row, a reused digest stays
+    ``hash_match`` against the reused content, and a changed object is stored as
+    ``changed`` against its previous revision.  No historical hash is invented.
+    """
+    if observed.observation is None or not observed.digest_complete:
+        return None
+    if resolution.requires_attention or resolution.content is None:
+        return None
+    raw = observed.observation
+    observed_sha = raw.evidence.observed_sha256
+    if observed_sha is None or raw.size_bytes is None:
+        return None
+    if resolution.kind is ResolutionKind.BASELINE:
+        target = resolution.previous_content or observed.expected_content
+        if target.sha256 is not None:
+            return None
+        state, status, reason = LocalState.UNKNOWN, ObservationStatus.BASELINE_OBSERVED, "current_baseline"
+    elif (resolution.kind is ResolutionKind.REUSE
+          and resolution.content.sha256 == observed_sha
+          and resolution.content.size_bytes == raw.size_bytes):
+        target = resolution.content
+        state, status, reason = LocalState.HASH_MATCH, ObservationStatus.HASH_MATCH, "full_sha256_match"
+    else:
+        target = resolution.previous_content or observed.expected_content
+        if target.sha256 == observed_sha and target.size_bytes == raw.size_bytes:
+            state, status, reason = LocalState.HASH_MATCH, ObservationStatus.HASH_MATCH, "full_sha256_match"
+        else:
+            state, status, reason = LocalState.CHANGED, ObservationStatus.CHANGED, "hash_mismatch"
+    evidence = LocalEvidence(
+        content=target, path=observed.candidate.path,
+        root_revision=observed.candidate.root_revision, run_id=raw.evidence.run_id,
+        check_id=raw.evidence.check_id, checked_at=raw.evidence.checked_at,
+        state=state, observed_size=raw.size_bytes, observed_sha256=observed_sha,
+    )
+    return LocalObservation(
+        status=status, reason=reason, evidence=evidence, digest_complete=True,
+        bytes_read=raw.bytes_read, size_bytes=raw.size_bytes,
+        mtime_ns=raw.mtime_ns, identity=raw.identity,
+    )
 
 
 def _exclusions_digest(exclusions: Iterable[ScopeExclusion]) -> str:
@@ -570,6 +1151,7 @@ class ScopeReceipt:
     remaining_entries: int
     aborted: bool
     entries_digest: str
+    entry_facts: tuple[ScopeEntryFact, ...]
     exclusions_digest: str
     snapshot_verified: bool
     digest: str | None = None
@@ -599,6 +1181,18 @@ class ScopeReceipt:
                      "consumed_entries", "consumed_exclusions", "consumed_issues",
                      "remaining_entries"):
             _integer(getattr(self, name), "scope receipt " + name, 0, 2**63 - 1)
+        facts = tuple(self.entry_facts)
+        if len(facts) != self.consumed_entries:
+            raise ContractError("A scope receipt needs one entry fact per consumed entry")
+        for fact in facts:
+            if not isinstance(fact, ScopeEntryFact):
+                raise ContractError("Invalid scope receipt entry fact")
+            if (fact.kind != self.kind or fact.root_id != self.root_id
+                    or fact.root_revision != self.root_revision):
+                raise ContractError("Scope receipt entry fact differs from its root")
+        object.__setattr__(self, "entry_facts", facts)
+        if hmac.compare_digest(_facts_digest(facts), self.entries_digest) is False:
+            raise ContractError("Scope receipt entry facts do not match entries_digest")
         if self.page_count < 1:
             raise ContractError("A scope receipt requires at least one page")
         if self.last_page_index < self.first_page_index:
@@ -699,6 +1293,7 @@ class ScopeReceipt:
             "remaining_entries": self.remaining_entries,
             "aborted": self.aborted,
             "entries_digest": self.entries_digest,
+            "entry_facts": [fact.to_dict() for fact in self.entry_facts],
             "exclusions_digest": self.exclusions_digest,
             "snapshot_verified": self.snapshot_verified,
             "enumeration_complete": self.enumeration_complete,
@@ -724,8 +1319,17 @@ class ScopeReceipt:
     @classmethod
     def from_json(cls, text: str) -> ScopeReceipt:
         payload = json.loads(normalize_json(text, object_only=True))
-        if payload.pop("schema", None) != _RECEIPT_SCHEMA:
+        schema = payload.pop("schema", None)
+        if schema == _RECEIPT_SCHEMA_V1 or payload.get("schema_version") == 1:
+            raise ContractError(
+                "Scope receipt v1 is not supported; enumerate and consume the scope again")
+        if schema != _RECEIPT_SCHEMA:
             raise ContractError("Unexpected scope receipt schema")
+        raw_facts = payload.get("entry_facts")
+        if not isinstance(raw_facts, list):
+            raise ContractError("A version 2 scope receipt needs its entry facts")
+        payload["entry_facts"] = tuple(
+            ScopeEntryFact.from_dict(item) for item in raw_facts)
         digest = payload.pop("digest", None)
         mac = payload.pop("mac", None)
         derived = ("enumeration_complete", "consumption_complete", "scope_complete")
@@ -737,6 +1341,8 @@ class ScopeReceipt:
             payload["selection_kind"] = ScopeSelectionKind(payload["selection_kind"])
             payload["enumeration_state"] = ScopeState(payload["enumeration_state"])
             receipt = cls(**payload, digest=digest, mac=mac)
+        except ContractError:
+            raise
         except (KeyError, TypeError, ValueError) as exc:
             raise ContractError("Invalid scope receipt") from exc
         if any(declared[name] is not getattr(receipt, name) for name in derived):
@@ -765,8 +1371,76 @@ class ScopeReceipt:
             raise ContractError("Scope receipt signature does not match its key")
 
     def matches_entries(self, entries: Iterable[ArchiveEntry]) -> bool:
-        """True when these entries are exactly the consumed set, in order."""
-        return hmac.compare_digest(_entries_digest(entries), self.entries_digest)
+        """True when these entries are exactly the consumed set, in order.
+
+        Physical facts are compared explicitly instead of relying on
+        ``ArchiveEntry`` dataclass equality: ``physical_identity`` is excluded
+        from that equality by design, so a path-and-size comparison alone would
+        accept another device's file at the same name.  A content digest that
+        the receipt has not bound is not treated as a wildcard: an entry whose
+        SHA-256 is known cannot match an unbound scope fact.  Plan preparation
+        binds the observed content explicitly before persisting the receipt.
+        """
+        items = tuple(entries)
+        if not self.matches_physical_entries(items):
+            return False
+        for entry, fact in zip(items, self.entry_facts):
+            content = entry.content
+            if fact.content_sha256 is None:
+                # Scope enumeration has no digest; the plan must bind it.  A
+                # forged digest on a plan entry is not accepted by a scope-only
+                # receipt.
+                if content.sha256 is not None:
+                    return False
+            elif (content.asset_id != fact.content_asset_id
+                  or content.revision != fact.content_revision
+                  or content.sha256 != fact.content_sha256):
+                return False
+        return hmac.compare_digest(_facts_digest(self.entry_facts), self.entries_digest)
+
+    def matches_physical_entries(self, entries: Iterable[ArchiveEntry]) -> bool:
+        """Compare path/root/physical facts without requiring a content digest."""
+        items = tuple(entries)
+        if len(items) != len(self.entry_facts):
+            return False
+        for entry, fact in zip(items, self.entry_facts):
+            path = entry.path
+            if not isinstance(path, PathRef):
+                return False
+            if (path.kind != fact.kind
+                    or path.root_id.casefold() != fact.root_id.casefold()
+                    or path.relative_path != fact.relative_path):
+                return False
+            if entry.physical_identity != fact.physical_identity:
+                return False
+            if entry.content is None or entry.content.size_bytes != fact.size_bytes:
+                return False
+        return True
+
+    def bind_content(self, entries: Iterable[ArchiveEntry]) -> ScopeReceipt:
+        """Return a receipt whose entry facts carry the observed content facts.
+
+        The physical comparison runs first, so content can never be rebound to
+        another path, device or size.  Binding is one-way: a receipt that already
+        names a digest refuses to replace it with a different one.
+        """
+        items = tuple(entries)
+        if not self.matches_physical_entries(items):
+            raise ContractError("ScopeReceipt physical entries differ from the plan")
+        if any(fact.content_sha256 is not None for fact in self.entry_facts):
+            raise ContractError("ScopeReceipt already binds content facts")
+        facts = tuple(
+            replace(
+                fact, content_asset_id=entry.content.asset_id,
+                content_revision=entry.content.revision,
+                content_sha256=entry.content.sha256,
+            )
+            for entry, fact in zip(items, self.entry_facts)
+        )
+        return replace(
+            self, entry_facts=facts, entries_digest=_facts_digest(facts),
+            digest=None, mac=None,
+        )
 
 
 _RECEIPT_FIELDS = frozenset(
@@ -1202,7 +1876,7 @@ class ScopeEnumerator:
                 self._note(current_issues, halt.issue)
                 state = self._halt_state(halt)
         if state is not snapshot.state:
-            return self._make_page(snapshot, (), None, tuple(current_issues), state, start=0,
+            return self._make_page(snapshot, (), None, tuple(current_issues), state, start=start,
                                    has_next=False)
         if deliverable:
             try:
@@ -1213,13 +1887,23 @@ class ScopeEnumerator:
             except _Halt as halt:
                 self._note(current_issues, halt.issue)
                 return self._make_page(snapshot, (), None, tuple(current_issues),
-                                       self._halt_state(halt), start=0, has_next=False)
+                                       self._halt_state(halt), start=start, has_next=False)
         selected = snapshot.entries[start:start + self._request.page_size]
         end = start + len(selected)
         next_cursor = self._encode_cursor(snapshot, end) if end < len(snapshot.entries) else None
+        facts = tuple(
+            ScopeEntryFact(
+                self._request.kind, self._request.root_id, self._request.root_revision,
+                item.entry.path.relative_path, item.identity.device,
+                item.identity.file_index, item.entry.content.size_bytes, item.mtime_ns,
+                item.entry.content.asset_id, item.entry.content.revision,
+                item.entry.content.sha256,
+            )
+            for item in selected
+        )
         result = self._make_page(snapshot, tuple(item.entry for item in selected),
                                  next_cursor, tuple(current_issues), state, start=start,
-                                 has_next=next_cursor is not None)
+                                 has_next=next_cursor is not None, facts=facts)
         self._snapshot = replace(
             snapshot, cursor=_CursorState(end if next_cursor else 0, next_cursor is not None),
             cursor_key=snapshot.cursor_key,
@@ -1240,7 +1924,7 @@ class ScopeEnumerator:
         issues.append(issue)
 
     def _make_page(self, snapshot: _Snapshot, entries, cursor, issues, state, *, start,
-                   has_next):
+                   has_next, facts=()):
         completion = ScopeCompletion(
             state, snapshot.snapshot_id,
             None if snapshot.root_state is None else snapshot.root_state.identity,
@@ -1253,6 +1937,7 @@ class ScopeEnumerator:
             root_id=self._request.root_id, kind=self._request.kind,
             root_revision=self._request.root_revision, rules_digest=self._rules_digest,
             aliases=snapshot.aliases, selection_digest=snapshot.selection_digest,
+            entry_facts=tuple(facts),
         )
 
     def _encode_cursor(self, snapshot: _Snapshot, next_ordinal: int) -> str:
@@ -1400,6 +2085,9 @@ class ScopeEnumerator:
             if len(exclusions) >= self._policy.max_exclusions:
                 raise _Halt(_issue(ScopeIssueCode.EXCLUSION_BUDGET_EXHAUSTED, path),
                             ScopeState.BUDGET_EXHAUSTED)
+            if related == path:
+                # A duplicate of one relative path has no other path to point at.
+                related = None
             exclusions.append(ScopeExclusion(path, ScopeExclusionReason(reason).value, rule,
                                              related, identity))
 
@@ -1576,16 +2264,13 @@ class ScopeEnumerator:
             state = _node_state(info)
             if state is None:
                 raise _Halt(_issue(ScopeIssueCode.DIRECTORY_UNREADABLE, relative))
-            previous = directory_identities.get(state.identity)
-            if previous is not None:
-                add_exclusion(relative, ScopeExclusionReason.DUPLICATE_SELECTION,
-                              related=previous, identity=state.identity)
-                return False
             verdict = self._directory_eligibility(relative, relative.rsplit("/", 1)[-1])
             if not verdict.accepted:
                 add_verdict(relative, verdict, state.identity)
                 return False
-            directory_identities[state.identity] = relative
+            # Do not reject a second spelling here: the raw-directory spelling
+            # tie-break runs before traversal and must still see both.  A real
+            # duplicate identity is excluded by read_directory below.
             record_directory(relative, state, None)
             return True
 
@@ -1593,28 +2278,67 @@ class ScopeEnumerator:
             guard.checkpoint()
             ancestors = root_chain()
             selections: list[tuple[str, str, bool]] = []
-            selected: dict[tuple[bool, str], str] = {}
+            prefixes_seen: set[str] = set()
+            files_seen: set[str] = set()
+            prefix_candidates: list[str] = []
+            file_candidates: list[str] = []
             for index, (is_prefix, raw) in enumerate(
                     [(True, value) for value in self._request.prefixes]
                     + [(False, value) for value in self._request.files]):
                 guard.checkpoint()
-                consume_entry("<selection>")
                 relative = selection_relative(raw, index)
                 if relative is None:
                     continue
                 if relative == "." and not is_prefix:
                     add_issue(ScopeIssueCode.INVALID_PATH, relative)
                     continue
-                # Exact text only: a normalised name is not a file identity.
-                previous = selected.get((is_prefix, relative))
-                if previous is not None:
+                seen = prefixes_seen if is_prefix else files_seen
+                if relative in seen:
+                    # The duplicate is this same relative path; there is no
+                    # second path to name as its related location.
+                    add_exclusion(relative, ScopeExclusionReason.DUPLICATE_SELECTION)
+                    continue
+                seen.add(relative)
+                if is_prefix:
+                    prefix_candidates.append(relative)
+                else:
+                    file_candidates.append(relative)
+
+            def covers(prefix: str, relative: str) -> bool:
+                # Exact relative paths only.  A normalised or Unicode-collapsed
+                # comparison would fold NFC/NFD look-alikes that can be distinct
+                # physical files; case aliases are settled by directory identity.
+                if prefix == ".":
+                    return True
+                return relative == prefix or relative.startswith(prefix + "/")
+
+            # Outer prefixes first: a parent prefix has already collected every
+            # descendant, so a child prefix or a file below it is one redundant
+            # selection, not a second traversal that doubles the budgets.
+            prefix_candidates.sort(key=lambda value: (
+                value.count("/"), _path_key(value), value))
+            kept_prefixes: list[str] = []
+            for relative in prefix_candidates:
+                covering = next((prefix for prefix in kept_prefixes
+                                 if covers(prefix, relative)), None)
+                if covering is not None:
                     add_exclusion(relative, ScopeExclusionReason.DUPLICATE_SELECTION,
-                                  related=previous)
+                                  related=covering)
                     continue
-                if is_prefix and not prepare_prefix(relative):
+                if not prepare_prefix(relative):
                     continue
-                selected[(is_prefix, relative)] = relative
-                selections.append((_path_key(relative), relative, is_prefix))
+                consume_entry("<selection>")
+                kept_prefixes.append(relative)
+                selections.append((_path_key(relative), relative, True))
+            for relative in file_candidates:
+                covering = next((prefix for prefix in kept_prefixes
+                                 if covers(prefix, relative)), None)
+                if covering is not None:
+                    add_exclusion(relative, ScopeExclusionReason.DUPLICATE_SELECTION,
+                                  related=covering)
+                    continue
+                consume_entry("<selection>")
+                selections.append((_path_key(relative), relative, False))
             # Prefer the spelling that actually appears in the directory when
             # two selections name one case-insensitive entry.  This keeps the
             # real path and lets the alternate spelling be an explicit
@@ -1725,7 +2449,16 @@ class ScopeEnumerator:
                         or current.attributes != item.attributes):
                     raise _Halt(_issue(ScopeIssueCode.FILE_CHANGED, path.relative_path))
             final_chain = root_chain()
-            if final_chain != ancestors:
+            # Ancestors are safety identity, not scope membership.  An unrelated
+            # file appearing next to the root (or in a temporary parent) changes
+            # that parent's size/mtime but does not replace the root path.  Only
+            # a different physical identity along the chain is a replacement.
+            if ([state.identity for _, state in final_chain]
+                    != [state.identity for _, state in ancestors]):
+                raise _Halt(_issue(ScopeIssueCode.ROOT_CHANGED, "."))
+            # The root's own membership is scope-relevant and keeps its full
+            # state check; only ancestors above it are identity-only.
+            if final_chain[-1][1] != ancestors[-1][1]:
                 raise _Halt(_issue(ScopeIssueCode.ROOT_CHANGED, "."))
             for relative, before in directories.items():
                 guard.checkpoint()
@@ -1819,8 +2552,7 @@ class ScopeEnumerator:
             if previous_path == relative:
                 # The same raw path was selected twice; there is no second path
                 # to preserve, so record the duplicate selection explicitly.
-                add_exclusion(relative, duplicate_reason, related=previous_path,
-                              identity=state.identity)
+                add_exclusion(relative, duplicate_reason, identity=state.identity)
                 return
             # Same identity can be either a real hardlink (two directory
             # entries) or merely another spelling of one case-insensitive
@@ -2131,6 +2863,7 @@ def consume_scope_pages(pages, *, source=None, sub_batch=None,
 
     exclusions = first.exclusions
     collected: list[ArchiveEntry] = []
+    collected_facts: list[ScopeEntryFact] = []
     seen: set[str] = set()
     previous_key = None
     index = 0
@@ -2153,10 +2886,22 @@ def consume_scope_pages(pages, *, source=None, sub_batch=None,
             raise ContractError("Scope pages are missing, duplicated, or out of order")
         index += 1
         consumed_issues = len(page.issues)
-        for entry in page.entries:
+        if len(page.entry_facts) != len(page.entries):
+            raise ContractError("A scope page lacks its entry facts")
+        for entry, fact in zip(page.entries, page.entry_facts):
             path = entry.path
             if not isinstance(path, PathRef):
                 raise ContractError("Invalid scope entry path")
+            if (fact.kind != page.kind or fact.root_id != page.root_id
+                    or fact.root_revision != page.root_revision
+                    or fact.relative_path != path.relative_path
+                    or fact.physical_identity != entry.physical_identity
+                    or entry.content is None
+                    or fact.size_bytes != entry.content.size_bytes
+                    or fact.content_asset_id != entry.content.asset_id
+                    or fact.content_revision != entry.content.revision
+                    or fact.content_sha256 != entry.content.sha256):
+                raise ContractError("Scope entry facts disagree with the page")
             relative = path.relative_path
             if relative in seen:
                 raise ContractError("A scope entry was delivered twice")
@@ -2166,6 +2911,7 @@ def consume_scope_pages(pages, *, source=None, sub_batch=None,
                 raise ContractError("Scope entries are not in snapshot order")
             previous_key = key
             collected.append(entry)
+            collected_facts.append(fact)
 
     total = first.completion.entries_in_snapshot
     consumed = len(collected)
@@ -2196,12 +2942,16 @@ def consume_scope_pages(pages, *, source=None, sub_batch=None,
                 or snapshot.digest != first.completion.snapshot_digest
                 or snapshot.selection_digest != first.selection_digest):
             raise ContractError("Scope pages do not match the enumerator snapshot")
-        for position, entry in enumerate(collected):
+        for position, (entry, fact) in enumerate(zip(collected, collected_facts)):
             if position >= len(snapshot.entries):
                 raise ContractError("Consumed entries exceed the snapshot")
             expected = snapshot.entries[position]
             if expected.entry.path != entry.path or expected.entry.content != entry.content:
                 raise ContractError("Consumed entries do not match the snapshot")
+            if (fact.physical_identity != expected.identity
+                    or fact.mtime_ns != expected.mtime_ns
+                    or fact.size_bytes != expected.entry.content.size_bytes):
+                raise ContractError("Consumed entry physical facts do not match the snapshot")
         snapshot_verified = True
 
     receipt = ScopeReceipt(
@@ -2223,7 +2973,9 @@ def consume_scope_pages(pages, *, source=None, sub_batch=None,
         enumeration_state=first.completion.state,
         page_count=len(delivered),
         first_page_index=delivered[0].page_index,
-        last_page_index=index - 1,
+        # An aborted page is still the page the caller attempted; reporting -1
+        # for a first-page abort made a valid incomplete delivery raise instead.
+        last_page_index=max(index - 1, delivered[-1].page_index),
         expected_page_count=expected_page_count,
         last_page_has_next=delivered[-1].has_next_page,
         consumed_entries=consumed,
@@ -2231,7 +2983,8 @@ def consume_scope_pages(pages, *, source=None, sub_batch=None,
         consumed_issues=consumed_issues,
         remaining_entries=total - consumed,
         aborted=aborted,
-        entries_digest=_entries_digest(collected),
+        entries_digest=_facts_digest(collected_facts),
+        entry_facts=tuple(collected_facts),
         exclusions_digest=_exclusions_digest(exclusions),
         snapshot_verified=snapshot_verified,
     )

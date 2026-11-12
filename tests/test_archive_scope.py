@@ -160,7 +160,10 @@ def test_unicode_case_alias_and_overlapping_selections_are_reported(root):
                                       ("in_scope/z.bin", "in_scope/z.bin")))
     assert paths(result) == ["in_scope/z.bin", "in_scope/é.bin"]
     assert any(item.reason == "duplicate_selection" for item in result.exclusions)
-    assert any(item.reason == "duplicate_candidate" for item in result.exclusions)
+    # A file already covered by a selected prefix is one redundant selection,
+    # not a second traversal.  No exclusion may point at itself.
+    assert not any(item.reason == "duplicate_candidate" for item in result.exclusions)
+    assert all(item.related_path != item.relative_path for item in result.exclusions)
 
 
 def test_windows_case_aliases_never_emit_two_paths(root):

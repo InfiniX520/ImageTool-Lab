@@ -14,7 +14,7 @@ from core.archive_inventory import (
 from core.archive_plan_store import ArchivePlanConflictError, ArchivePlanStoreError
 from core.archive_scope import (
     SCOPE_RECEIPT_SCHEMA_VERSION, ScopeReceipt, ScopeSelectionKind, ScopeState,
-    _digest_text, _entries_digest, _path_key,
+    _digest_text, _entry_fact, _facts_digest, _path_key,
 )
 from core.local_observation import FileIdentity
 from core.archive_repository import ArchiveLibraryRepository
@@ -45,9 +45,11 @@ def make_plan(batch_id="archive-batch"):
 
 def make_receipt(inventory):
     entries = tuple(sorted(
-        (ArchiveEntry(asset.content, asset.path, asset.page_index) for asset in inventory.assets),
+        (ArchiveEntry(asset.content, asset.path, asset.page_index, asset.physical_identity)
+         for asset in inventory.assets),
         key=lambda entry: (_path_key(entry.path.relative_path), entry.path.relative_path),
     ))
+    facts = tuple(_entry_fact(entry, root_revision=1) for entry in entries)
     count = len(entries)
     return ScopeReceipt(
         schema_version=SCOPE_RECEIPT_SCHEMA_VERSION,
@@ -62,7 +64,7 @@ def make_receipt(inventory):
         first_page_index=0, last_page_index=0, expected_page_count=1,
         last_page_has_next=False, consumed_entries=count,
         consumed_exclusions=0, consumed_issues=0, remaining_entries=0,
-        aborted=False, entries_digest=_entries_digest(entries),
+        aborted=False, entries_digest=_facts_digest(facts), entry_facts=facts,
         exclusions_digest=_digest_text([]), snapshot_verified=True,
     )
 

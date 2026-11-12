@@ -15,7 +15,10 @@ from core.archive_inventory import (
     ArtworkGroup,
     CapacityPlan,
     CapacityPolicy,
+    InventoryIssue,
+    InventoryIssueCode,
     InventoryPolicy,
+    InventoryStatus,
     build_archive_inventory,
     plan_archive_capacity,
 )
@@ -32,7 +35,7 @@ from core.archive_plan_store import (
 )
 from core.archive_scope import (
     SCOPE_RECEIPT_SCHEMA_VERSION, ScopeReceipt, ScopeSelectionKind, ScopeState,
-    _digest_text, _entries_digest, _path_key,
+    _digest_text, _entry_fact, _facts_digest, _path_key,
 )
 from core.local_observation import FileIdentity
 from core.archive_schema import (
@@ -91,9 +94,11 @@ def make_plan(batch_id: str = "batch-synthetic", *, digest: str | None = "a"):
 
 def make_receipt(inventory):
     entries = tuple(sorted(
-        (ArchiveEntry(asset.content, asset.path, asset.page_index) for asset in inventory.assets),
+        (ArchiveEntry(asset.content, asset.path, asset.page_index, asset.physical_identity)
+         for asset in inventory.assets),
         key=lambda entry: (_path_key(entry.path.relative_path), entry.path.relative_path),
     ))
+    facts = tuple(_entry_fact(entry, root_revision=1) for entry in entries)
     count = len(entries)
     first = inventory.assets[0].path if inventory.assets else None
     return ScopeReceipt(
@@ -107,11 +112,13 @@ def make_receipt(inventory):
         snapshot_id="snapshot-1", snapshot_digest="0" * 64,
         root_identity=FileIdentity(1, 1),
         entries_in_snapshot=count, exclusions_in_snapshot=0, issues_in_snapshot=0,
-        enumeration_state=ScopeState.COMPLETE, page_count=1,
+        enumeration_state=(ScopeState.COMPLETE if inventory.scope_complete
+                           else ScopeState.COMPLETE_WITH_ISSUES),
+        page_count=1,
         first_page_index=0, last_page_index=0, expected_page_count=1,
         last_page_has_next=False, consumed_entries=count,
         consumed_exclusions=0, consumed_issues=0, remaining_entries=0,
-        aborted=False, entries_digest=_entries_digest(entries),
+        aborted=False, entries_digest=_facts_digest(facts), entry_facts=facts,
         exclusions_digest=_digest_text([]), snapshot_verified=True,
     )
 
@@ -555,8 +562,12 @@ def test_ten_thousand_one_entries_rejected_by_explicit_count_budget():
 
 def test_receipt_root_must_match_every_plan_path():
     inventory, capacity = make_plan("root-mismatch")
+    original = make_receipt(inventory)
+    wrong_facts = tuple(replace(fact, kind="project", root_id="project")
+                        for fact in original.entry_facts)
     wrong = replace(
-        make_receipt(inventory), kind="project", root_id="project", digest=None,
+        original, kind="project", root_id="project", digest=None,
+        entry_facts=wrong_facts, entries_digest=_facts_digest(wrong_facts),
     )
     with pytest.raises(ArchivePlanStoreError, match="root"):
         prepare_archive_plan(inventory, capacity, receipt=wrong)
@@ -621,9 +632,10 @@ def test_plan_receipt_is_persisted_and_tampering_rejected(migrated_copy):
 
     partial = replace(
         receipt, consumed_entries=0, remaining_entries=len(inventory.assets),
-        last_page_has_next=True, digest=None,
+        last_page_has_next=True, digest=None, entry_facts=(),
+        entries_digest=_facts_digest(()),
     )
-    with pytest.raises(ArchivePlanStoreError, match="complete page consumption"):
+    with pytest.raises(ArchivePlanStoreError, match="complete"):
         prepare_archive_plan(inventory, capacity, receipt=partial)
 
     tampered = dict(header)
@@ -715,6 +727,181 @@ def test_reload_rejects_header_document_budget_before_segments(migrated_copy):
         )
     with pytest.raises(ArchivePlanStoreError, match="bound|budget"):
         load_archive_plan(conn, "over-budget-header")
+
+
+def test_full_audit_recomputes_each_plan_segment_and_header(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("audit-segments")
+    save_plan(conn, inventory, capacity)
+    validate_archive_facts(conn)
+    payload, byte_length = conn.execute(
+        "SELECT payload,byte_length FROM archive_plan_segments "
+        "WHERE batch_id='audit-segments' AND segment_index=0"
+    ).fetchone()
+    header = conn.execute(
+        "SELECT scope_json FROM archive_batches WHERE batch_id='audit-segments'"
+    ).fetchone()[0]
+    with conn:
+        conn.execute(
+            "DELETE FROM archive_plan_segments WHERE batch_id='audit-segments'"
+        )
+    with pytest.raises(ArchiveSchemaError, match="segment"):
+        validate_archive_facts(conn)
+    with conn:
+        conn.execute(
+            "INSERT INTO archive_plan_segments VALUES ('audit-segments',0,?,?)",
+            (payload, byte_length),
+        )
+    validate_archive_facts(conn)
+    parsed = json.loads(header)
+    parsed["segment_count"] = 2
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='audit-segments'",
+            (json.dumps(parsed),),
+        )
+    with pytest.raises(ArchiveSchemaError, match="segment"):
+        validate_archive_facts(conn)
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='audit-segments'",
+            (header,),
+        )
+    changed = payload + " "
+    with conn:
+        conn.execute(
+            "UPDATE archive_plan_segments SET payload=?,byte_length=? "
+            "WHERE batch_id='audit-segments' AND segment_index=0",
+            (changed, len(changed.encode("utf-8"))),
+        )
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='audit-segments'",
+            (json.dumps({**parsed, "segment_count": 1,
+                         "inventory_bytes": len(changed.encode("utf-8"))}),),
+        )
+    with pytest.raises(ArchiveSchemaError, match="digest"):
+        validate_archive_facts(conn)
+
+
+def test_oversized_segment_is_rejected_before_its_payload_is_selected(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("oversized-segment")
+    save_plan(conn, inventory, capacity)
+    oversized = "x" * (2 * 1024 * 1024)
+    with conn:
+        conn.execute(
+            "UPDATE archive_plan_segments SET payload=?,byte_length=? "
+            "WHERE batch_id='oversized-segment' AND segment_index=0",
+            (oversized, len(oversized)),
+        )
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        with pytest.raises(ArchivePlanStoreError, match="segment byte length"):
+            load_archive_plan(conn, "oversized-segment")
+    finally:
+        conn.set_trace_callback(None)
+    assert any("length(CAST(payload AS BLOB))" in statement for statement in statements)
+    assert not any(statement.lstrip().upper().startswith("SELECT PAYLOAD")
+                   for statement in statements)
+
+
+def test_large_scope_header_is_accepted_by_save_load_and_audit(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("large-scope")
+    scope = {"kind": "explicit_selection", "blob": "x" * 1_500_000}
+    saved = save_plan(conn, inventory, capacity, scope=scope)
+    assert saved.plan.scope == scope
+    assert len(saved.plan.scope_receipt["entry_facts"]) == 1
+    assert load_archive_plan(conn, "large-scope") == saved.plan
+    validate_archive_facts(conn)
+
+
+def test_audit_reuses_the_full_plan_protocol_for_receipts(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("audit-receipt")
+    receipt = make_receipt(inventory)
+    save_plan(conn, inventory, capacity, receipt=receipt)
+    validate_archive_facts(conn)
+    header = json.loads(conn.execute(
+        "SELECT scope_json FROM archive_batches WHERE batch_id='audit-receipt'"
+    ).fetchone()[0])
+    partial = replace(
+        receipt, consumed_entries=0, remaining_entries=len(inventory.assets),
+        last_page_has_next=True, digest=None, entry_facts=(),
+        entries_digest=_facts_digest(()),
+    )
+    header["scope_receipt"] = json.loads(partial.to_json())
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='audit-receipt'",
+            (json.dumps(header),),
+        )
+    with pytest.raises(ArchiveSchemaError, match="protocol|receipt|complete"):
+        validate_archive_facts(conn)
+
+
+def test_complete_inventory_rejects_sub_batch_and_complete_receipts_reject_partial_inventory(
+    migrated_copy,
+):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("completeness")
+    receipt = make_receipt(inventory)
+    sub = replace(
+        receipt, selection_kind=ScopeSelectionKind.SUB_BATCH,
+        sub_batch_limit=1, sub_batch_description="one page", digest=None,
+    )
+    with pytest.raises(ArchivePlanStoreError, match="complete whole-snapshot"):
+        prepare_archive_plan(inventory, capacity, receipt=sub)
+
+    partial_inventory = replace(
+        inventory, status=InventoryStatus.NEEDS_ADJUSTMENT,
+        scope_complete=False, asset_count=0, path_count=0,
+        packages=(), member_payload_bytes=0, physical_member_payload_bytes=0,
+        unique_content_count=0, unique_content_bytes=0,
+        adjustment_codes=("inventory_rejected_items",),
+        issues=(InventoryIssue(
+            InventoryIssueCode.INVALID_PATH, "synthetic rejected item"),),
+    )
+    complete_receipt = replace(
+        make_receipt(partial_inventory), enumeration_state=ScopeState.COMPLETE,
+        digest=None,
+    )
+    partial_capacity = plan_archive_capacity(
+        partial_inventory, available_additional_bytes=1_000_000,
+    )
+    with pytest.raises(ArchivePlanStoreError, match="complete scope|incomplete inventory"):
+        prepare_archive_plan(partial_inventory, partial_capacity, receipt=complete_receipt)
+
+
+def test_asset_source_tamper_is_rejected_by_load_and_audit(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("source-tamper")
+    save_plan(conn, inventory, capacity)
+    validate_archive_facts(conn)
+    with conn:
+        conn.execute("UPDATE archive_assets SET source_kind='observed_existing'")
+    with pytest.raises(ArchivePlanStoreError, match="source"):
+        load_archive_plan(conn, "source-tamper")
+
+
+def test_transactional_reload_wraps_timestamp_value_errors(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("bad-timestamp")
+    save_plan(conn, inventory, capacity)
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET created_at='not-a-timestamp' WHERE batch_id='bad-timestamp'"
+        )
+    with pytest.raises(ArchivePlanStoreError):
+        load_archive_plan(conn, "bad-timestamp")
+    conn.execute("BEGIN")
+    try:
+        with pytest.raises(ArchivePlanStoreError):
+            from core.archive_plan_store import load_archive_plan_in_transaction
+            load_archive_plan_in_transaction(conn, "bad-timestamp")
+    finally:
+        conn.rollback()
 
 
 def test_prepared_scope_is_a_frozen_copy():

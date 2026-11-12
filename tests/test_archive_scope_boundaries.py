@@ -702,3 +702,103 @@ def test_root_replaced_by_a_junction_stops_paging(tmp_path):
     assert second.completion.state is ScopeState.PARTIAL
     assert {issue.code for issue in second.issues} == {ScopeIssueCode.ROOT_REPARSE_POINT}
     assert not second.entries
+
+# --- F4 recheck: ancestor activity, overlapping selections, abort receipt ---
+
+
+def test_unrelated_parent_activity_during_enumeration_is_not_root_changed(tmp_path):
+    import core.archive_scope as scope
+
+    root = tmp_path / "lib"
+    (root / "sub").mkdir(parents=True)
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        write(root, "sub/" + name)
+    touched = False
+
+    def scandir(path):
+        nonlocal touched
+        if not touched:
+            touched = True
+            (tmp_path / "unrelated.txt").write_bytes(b"other project output")
+        return os.scandir(path)
+
+    page = ScopeEnumerator(
+        root, ScopeRequest(("sub",)),
+        _io=scope._FileOperations(lambda path: path.lstat(), scandir),
+    ).page()
+    assert touched
+    assert page.completion.state is ScopeState.COMPLETE
+    assert paths(page) == ["sub/a.jpg", "sub/b.jpg", "sub/c.jpg"]
+    assert not page.issues
+
+
+def test_parent_and_child_prefix_are_one_traversal_not_two(tmp_path):
+    root = tmp_path / "gallery"
+    (root / "a").mkdir(parents=True)
+    for name in ("x.jpg", "y.jpg"):
+        write(root, "a/" + name)
+    write(root, "top.jpg")
+    page = enumerate_scope(root, ScopeRequest((".", "a")))
+    assert page.completion.full
+    assert sorted(paths(page)) == ["a/x.jpg", "a/y.jpg", "top.jpg"]
+    duplicates = [item for item in page.exclusions if item.reason == "duplicate_selection"]
+    assert duplicates
+    assert all(item.related_path != item.relative_path for item in page.exclusions)
+    assert any(item.relative_path == "a" and item.related_path == "." for item in duplicates)
+
+
+def test_prefix_and_descendant_file_are_not_captured_twice(tmp_path):
+    root = tmp_path / "gallery"
+    (root / "a").mkdir(parents=True)
+    write(root, "a/x.jpg")
+    write(root, "a/y.jpg")
+    page = enumerate_scope(root, ScopeRequest(("a",), ("a/x.jpg",)))
+    assert page.completion.full
+    assert paths(page) == ["a/x.jpg", "a/y.jpg"]
+    assert [item.relative_path for item in page.exclusions] == ["a/x.jpg"]
+    assert page.exclusions[0].reason == "duplicate_selection"
+    assert page.exclusions[0].related_path == "a"
+    assert not any(item.reason == "duplicate_candidate" for item in page.exclusions)
+
+
+def test_overlapping_selection_does_not_double_entry_or_directory_budget(tmp_path):
+    root = tmp_path / "gallery"
+    (root / "a").mkdir(parents=True)
+    for name in ("x.jpg", "y.jpg"):
+        write(root, "a/" + name)
+    page = enumerate_scope(
+        root, ScopeRequest((".", "a", "a/x.jpg")),
+        ScopePolicy(max_entries=4, max_directories=2, max_exclusions=4),
+    )
+    assert page.completion.state is ScopeState.COMPLETE
+    assert paths(page) == ["a/x.jpg", "a/y.jpg"]
+    assert all(item.related_path != item.relative_path for item in page.exclusions)
+
+
+def test_prefix_case_alias_uses_the_real_directory_spelling(tmp_path):
+    if os.name != "nt":
+        pytest.skip("Windows case-insensitive directory spelling")
+    root = tmp_path / "alias-root"
+    (root / "gallery" / "a").mkdir(parents=True)
+    write(root, "gallery/a/x.jpg")
+    page = enumerate_scope(root, ScopeRequest(("GALLERY", "gallery")))
+    assert page.completion.state is ScopeState.COMPLETE
+    assert paths(page) == ["gallery/a/x.jpg"]
+    assert not any(item.related_path == item.relative_path for item in page.exclusions)
+
+
+def test_first_page_abort_returns_an_incomplete_receipt(tmp_path):
+    root = tmp_path / "gallery"
+    root.mkdir()
+    write(root, "a.jpg")
+    write(root, "b.jpg")
+    source = ScopeEnumerator(
+        root, ScopeRequest((".",), page_size=100), ScopePolicy(max_entries=1),
+    )
+    page = source.page()
+    assert page.completion.state is ScopeState.BUDGET_EXHAUSTED
+    assert not page.entries
+    receipt = consume_scope_pages([page], source=source)
+    assert receipt.aborted
+    assert not receipt.consumption_complete and not receipt.scope_complete
+    assert receipt.last_page_index == 0
