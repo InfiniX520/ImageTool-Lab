@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -17,11 +18,12 @@ from core.archive_scope import (
     _digest_text, _entry_fact, _facts_digest, _path_key,
 )
 from core.local_observation import FileIdentity
-from core.archive_repository import ArchiveLibraryRepository
+from core.archive_repository import ArchiveLibraryBusyError, ArchiveLibraryRepository
 from core.archive_schema import ArchiveMigrationError, migrate_archive_copy
 from core.library_repository import (
-    LibraryClosedError, LibraryRepository, SchemaVersionError,
+    LibraryBusyError, LibraryClosedError, LibraryRepository, SchemaVersionError,
 )
+from core import library_repository
 from core.preservation_policy import ContentVersion
 from core.task_contracts import CollectionRequest, PathRef
 
@@ -141,6 +143,32 @@ def test_repository_root_revision_gate_is_wired(tmp_path):
             )
         saved = repository.save_archive_plan(
             inventory, capacity, receipt=receipt, root_revision=1,
+        )
+        assert repository.load_archive_plan(inventory.batch_id) == saved.plan
+
+
+def test_shared_writer_busy_error_is_adapted_at_archive_boundary(tmp_path, monkeypatch):
+    path = tmp_path / "library.sqlite3"
+    migrated(path)
+    inventory, capacity = make_plan("busy-boundary")
+    monkeypatch.setattr(library_repository, "_BUSY_TIMEOUT_MS", 100)
+    with open_repository(path) as repository:
+        holder = sqlite3.connect(str(path), isolation_level=None, timeout=0)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            with pytest.raises(ArchiveLibraryBusyError) as caught:
+                repository.save_archive_plan(
+                    inventory, capacity, receipt=make_receipt(inventory),
+                )
+            assert time.monotonic() - started >= 0.03
+            assert isinstance(caught.value.__cause__, LibraryBusyError)
+            assert repository._writer_thread.is_alive()
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+        saved = repository.save_archive_plan(
+            inventory, capacity, receipt=make_receipt(inventory),
         )
         assert repository.load_archive_plan(inventory.batch_id) == saved.plan
 

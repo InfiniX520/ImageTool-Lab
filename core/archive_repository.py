@@ -21,7 +21,7 @@ from core.archive_schema import (
     ARCHIVE_SCHEMA_VERSION, ARCHIVE_TABLES, ArchiveMigrationError, _check_existing_objects,
 )
 from core.library_repository import (
-    LibraryRepository, SchemaVersionError, _LIBRARY_FORMAT,
+    LibraryBusyError, LibraryRepository, SchemaVersionError, _LIBRARY_FORMAT,
 )
 from core.task_contracts import ContractError
 
@@ -141,6 +141,8 @@ class ArchiveLibraryRepository(LibraryRepository):
                     ),
                 },
             )
+        except LibraryBusyError as exc:
+            raise ArchiveLibraryBusyError("Archive library is busy") from exc
         except sqlite3.OperationalError as exc:
             if "locked" in str(exc).lower() or "busy" in str(exc).lower():
                 raise ArchiveLibraryBusyError("Archive library is busy") from exc
@@ -156,6 +158,8 @@ class ArchiveLibraryRepository(LibraryRepository):
             raise
         except ContractError as exc:
             raise ArchiveLibraryError("Archive plan facts were rejected") from exc
+        except LibraryBusyError as exc:
+            raise ArchiveLibraryBusyError("Archive library is busy") from exc
         except sqlite3.OperationalError as exc:
             if "locked" in str(exc).lower() or "busy" in str(exc).lower():
                 raise ArchiveLibraryBusyError("Archive library is busy") from exc
