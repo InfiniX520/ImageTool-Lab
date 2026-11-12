@@ -541,7 +541,7 @@ def _scope_entries(inventory: ArchiveInventory) -> tuple[ArchiveEntry, ...]:
 
 def _receipt_json(
     receipt: ScopeReceipt, inventory: ArchiveInventory, *,
-    root_revision: int | None = None,
+    root_revision: int | None = None, bind_content: bool = True,
 ) -> str:
     if not isinstance(receipt, ScopeReceipt):
         raise ArchivePlanStoreError("Expected a ScopeReceipt")
@@ -592,6 +592,8 @@ def _receipt_json(
     if not receipt.matches_entries(entries):
         if not receipt.matches_physical_entries(entries):
             raise ArchivePlanStoreError("ScopeReceipt entries differ from the plan")
+        if not bind_content:
+            raise ArchivePlanStoreError("Stored scope receipt is not content-bound")
         try:
             receipt = receipt.bind_content(entries)
         except ContractError as exc:
@@ -757,7 +759,7 @@ def _decode_scope(
         raise ArchivePlanStoreError("Stored archive plan requires a scope receipt")
     try:
         receipt = ScopeReceipt.from_json(canonical_json(scope_receipt))
-        _receipt_json(receipt, inventory)
+        _receipt_json(receipt, inventory, bind_content=False)
     except (ContractError, TypeError, ValueError, UnicodeError) as exc:
         raise ArchivePlanStoreError("Stored scope receipt is invalid") from exc
     return inventory, raw["scope"], scope_receipt, raw["asset_sources_sha256"]

@@ -669,6 +669,31 @@ def test_persisted_null_receipt_is_rejected_by_load_and_full_audit(migrated_copy
         validate_archive_facts(conn)
 
 
+def test_stored_receipt_must_be_content_bound_on_load(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("unbound-receipt")
+    receipt = make_receipt(inventory)
+    save_plan(conn, inventory, capacity, receipt=receipt)
+    facts = tuple(
+        replace(fact, content_asset_id=None, content_revision=None, content_sha256=None)
+        for fact in receipt.entry_facts
+    )
+    unbound = replace(
+        receipt, entry_facts=facts, entries_digest=_facts_digest(facts), digest=None,
+    )
+    header = json.loads(conn.execute(
+        "SELECT scope_json FROM archive_batches WHERE batch_id='unbound-receipt'"
+    ).fetchone()[0])
+    header["scope_receipt"] = json.loads(unbound.to_json())
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET scope_json=? WHERE batch_id='unbound-receipt'",
+            (json.dumps(header),),
+        )
+    with pytest.raises(ArchivePlanStoreError, match="content-bound|receipt"):
+        load_archive_plan(conn, "unbound-receipt")
+
+
 def test_referenced_content_digest_is_checked_on_load_and_replay(migrated_copy):
     conn, _ = migrated_copy
     inventory, capacity = make_plan("content-corruption")
