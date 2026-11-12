@@ -30,6 +30,10 @@ class ArchiveLibraryError(ArchivePlanStoreError):
     """The archive repository cannot safely accept a command or connection."""
 
 
+class ArchiveLibraryBusyError(ArchiveLibraryError):
+    """Another writer or reader holds the SQLite lock past the configured timeout."""
+
+
 class ArchiveLibraryRepository(LibraryRepository):
     """Use one inherited writer/lock for immutable plans on an explicit copy.
 
@@ -119,21 +123,26 @@ class ArchiveLibraryRepository(LibraryRepository):
             )
         except ContractError as exc:
             raise ArchiveLibraryError("Archive plan input was rejected") from exc
-        return self._enqueue(
-            "save_archive_plan",
-            {"prepared": prepared},
-            size_payload={
-                "batch_id": prepared.batch_id,
-                "payload_bytes": prepared.payload_bytes,
-                "segment_count": len(prepared.segments),
-                "scope_bytes": len(prepared.scope_json.encode("utf-8")),
-                "capacity_bytes": len(prepared.capacity_json.encode("utf-8")),
-                "receipt_bytes": (
-                    0 if prepared.scope_receipt_json is None
-                    else len(prepared.scope_receipt_json.encode("utf-8"))
-                ),
-            },
-        )
+        try:
+            return self._enqueue(
+                "save_archive_plan",
+                {"prepared": prepared},
+                size_payload={
+                    "batch_id": prepared.batch_id,
+                    "payload_bytes": prepared.payload_bytes,
+                    "segment_count": len(prepared.segments),
+                    "scope_bytes": len(prepared.scope_json.encode("utf-8")),
+                    "capacity_bytes": len(prepared.capacity_json.encode("utf-8")),
+                    "receipt_bytes": (
+                        0 if prepared.scope_receipt_json is None
+                        else len(prepared.scope_receipt_json.encode("utf-8"))
+                    ),
+                },
+            )
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                raise ArchiveLibraryBusyError("Archive library is busy") from exc
+            raise
 
     def load_archive_plan(self, batch_id: str) -> StoredArchivePlan:
         """Run strict validation in a short inherited read transaction."""

@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -1441,7 +1442,7 @@ def migrate_archive_copy(
     lock_path = source.parent / ".writer.lock"
     try:
         with InstanceLock(lock_path):
-            with sqlite3.connect(source, isolation_level=None) as conn:
+            with closing(sqlite3.connect(source, isolation_level=None)) as conn:
                 conn.execute("PRAGMA busy_timeout=1000")
                 conn.execute("PRAGMA query_only=ON")
                 conn.execute("PRAGMA foreign_keys=ON")
@@ -1451,7 +1452,7 @@ def migrate_archive_copy(
                     # Reserve a new name atomically; never overwrite an existing backup.
                     with backup.open("xb"):
                         pass
-                    with sqlite3.connect(backup) as destination:
+                    with closing(sqlite3.connect(backup)) as destination:
                         conn.backup(destination)
                         destination.execute("PRAGMA foreign_keys=ON")
                         if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -1483,6 +1484,7 @@ def migrate_archive_copy(
                         if conn.in_transaction:
                             conn.execute("ROLLBACK")
                         raise
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 digest = hashlib.sha256(backup.read_bytes()).hexdigest()
                 return ArchiveMigrationReport(
                     "already_current" if source_version == ARCHIVE_SCHEMA_VERSION else "migrated",

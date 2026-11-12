@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -112,6 +113,21 @@ def test_migration_preserves_old_rows_and_verified_backup(tmp_path):
         assert backup.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0] == "1"
+
+
+def test_migration_checkpoints_source_before_returning(tmp_path):
+    source = tmp_path / "source.sqlite3"
+    make_v1(source)
+    migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
+    # Copy only the main database file, without opening the source first.  A
+    # successful migration must have checkpointed and closed its connections.
+    copied = tmp_path / "copied-only.sqlite3"
+    shutil.copy2(source, copied)
+    with sqlite3.connect(copied) as conn:
+        assert conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == ARCHIVE_SCHEMA_VERSION
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
 def test_idempotent_second_run_uses_new_backup_without_changes(tmp_path):
