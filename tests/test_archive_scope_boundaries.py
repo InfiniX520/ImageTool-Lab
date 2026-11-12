@@ -8,6 +8,10 @@ A1-03  physical identity of look-alike names and hardlink aliases
 A1-04  versioned consumption receipt for a complete page delivery
 A1-10  linear identity index instead of a per-file scan
 A1-11  ancestor path safety versus selected-directory membership
+
+Real adapter counts (scandir opens and yielded entries, lstat calls, page
+counts, cancellation points) live in `test_archive_scope_io_budget.py`: the
+identity-comparison counters below only prove one sub-step of the work.
 """
 import json
 import os
@@ -633,6 +637,32 @@ def test_replaced_root_identity_stops_paging(tmp_path):
     root.mkdir()
     for name in ("a.jpg", "b.jpg", "c.jpg"):
         write(root, name)
+    second = source.page(first_page.cursor)
+    assert second.completion.state is ScopeState.PARTIAL
+    assert {issue.code for issue in second.issues} == {ScopeIssueCode.ROOT_CHANGED}
+    assert not second.entries
+
+
+def test_root_replacement_is_caught_while_the_rotation_is_active(tmp_path):
+    """A root swap is refused on the next page, slice or no slice.
+
+    Between-page verification is bounded (a rotating slice of the recorded
+    directories), so this asserts the part that must never be batched: the root
+    itself is re-checked on every page, and its identity is what fails.
+    """
+    root = tmp_path / "gallery"
+    root.mkdir()
+    for index in range(12):
+        (root / ("d%02d" % index)).mkdir()
+        write(root, "d%02d/a.jpg" % index)
+    source = ScopeEnumerator(root, ScopeRequest((".",), page_size=1))
+    first_page = source.page()
+    moved = tmp_path / "gallery-moved"
+    root.rename(moved)
+    root.mkdir()
+    for index in range(12):
+        (root / ("d%02d" % index)).mkdir()
+        write(root, "d%02d/a.jpg" % index)
     second = source.page(first_page.cursor)
     assert second.completion.state is ScopeState.PARTIAL
     assert {issue.code for issue in second.issues} == {ScopeIssueCode.ROOT_CHANGED}

@@ -18,9 +18,28 @@ identity (device, file index) and by the exact relative path.  Two physically
 distinct files whose names differ only by Unicode composition are both kept,
 and hardlink aliases share one content identity while every path is retained.
 
+Two secondary costs are bounded explicitly instead of being repeated inside a
+loop.  Explicit file selections resolve their exact raw spelling through one
+directory read per parent (grouped by parent, bound to the directory identity
+and node state observed around that read), so adding another selected file in
+an already indexed directory costs no further directory pass.  Between-page
+stability verification is a session with a stated total cost: each page
+verifies a bounded rotating slice of the recorded directories, and the page
+that can complete a whole-snapshot receipt re-verifies every directory before
+that receipt can exist.  Directory replacement, root replacement, and real
+membership changes are still refused.
+
 Directory identity and metadata checks detect ordinary enumeration races; they
 are not an atomic defence against an adversarial filesystem writer.  Final
 content identity and stability remain LocalObserver's responsibility.
+
+Cancellation and the execution time budget are checked before and after every
+filesystem call, at every directory entry, and once more before a page is
+returned.  Only work performed inside one bounded operation (one enumeration or
+one page verification) is charged: time a caller spends idle between two page
+requests is never part of an execution budget.  A single blocking operating
+system call cannot be interrupted from inside this module, so the honest bound
+is "no further work between two calls"; that limit is stated, not hidden.
 """
 from __future__ import annotations
 
@@ -40,7 +59,7 @@ import time
 import unicodedata
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum, StrEnum
 from pathlib import Path
 from typing import ContextManager
@@ -66,6 +85,14 @@ _OUTPUT_DIRECTORY_RULES = (
     "output", "outputs", "archive_output", "archive_outputs", "archive_store",
     ".runtime",
 )
+# Bounds for the two auxiliary structures this module keeps while it reads.
+# They are only reachable by a scope that cannot be verified inside its own
+# budgets, so they stop with an explicit issue instead of growing unbounded.
+_MAX_INDEXED_DIRECTORIES = 4096
+_MAX_INDEXED_NAMES = 2000000
+_MAX_NAME_INDEX_RESCANS = 4
+_MAX_MEMBERSHIP_RESCANS = 8
+
 _SENSITIVE_FILE_RULES = (
     "*.db", "*.db-journal", "*.db-wal", "*.db-shm", "*.sqlite", "*.sqlite3",
     "*.sqlite3-journal", "*.sqlite3-wal", "*.sqlite3-shm", "*.log", "*.log.*",
@@ -162,9 +189,15 @@ class ScopePolicy:
     `output_roots` names this scope's own output directories as root-relative
     paths, so a configured writer directory is protected even when it is not
     called `archive_store`.  No extension or image-format whitelist silently
-    narrows a selected scope.  Budgets cover the entire snapshot, not each
-    page.  At most one terminal issue beyond max_issues is retained to explain
-    an issue-budget stop.
+    narrows a selected scope.  At most one terminal issue beyond max_issues is
+    retained to explain an issue-budget stop.
+
+    Entry, directory, issue, and exclusion budgets cover the entire snapshot.
+    The time budget bounds the work of one bounded operation - one enumeration,
+    or one page's validity check - and is checked before and after every
+    filesystem call, so idle time between page requests is never charged as
+    execution time.  A blocking operating-system call cannot be interrupted
+    from inside this module; the budget stops the next call instead.
     """
 
     additional_directory_excludes: tuple[str, ...] = ()
@@ -298,6 +331,7 @@ class ScopeIssueCode(StrEnum):
     TIME_BUDGET_EXHAUSTED = "time_budget_exhausted"
     ISSUE_BUDGET_EXHAUSTED = "issue_budget_exhausted"
     EXCLUSION_BUDGET_EXHAUSTED = "exclusion_budget_exhausted"
+    NAME_INDEX_BUDGET_EXHAUSTED = "name_index_budget_exhausted"
     CANCELLED = "cancelled"
 
 
@@ -879,6 +913,7 @@ def _issue(code: ScopeIssueCode, path: str) -> ScopeIssue:
         ScopeIssueCode.TIME_BUDGET_EXHAUSTED: "The monotonic time budget was exhausted.",
         ScopeIssueCode.ISSUE_BUDGET_EXHAUSTED: "The retained-issue budget was exhausted.",
         ScopeIssueCode.EXCLUSION_BUDGET_EXHAUSTED: "The retained-exclusion budget was exhausted.",
+        ScopeIssueCode.NAME_INDEX_BUDGET_EXHAUSTED: "The raw-name index budget was exhausted.",
         ScopeIssueCode.CANCELLED: "Enumeration was cancelled; this is not a complete scope.",
     }
     return ScopeIssue(code, path, messages[code])
@@ -888,6 +923,209 @@ class _Halt(Exception):
     def __init__(self, issue: ScopeIssue, state: ScopeState = ScopeState.PARTIAL):
         self.issue = issue
         self.state = state
+
+
+class _WorkGuard:
+    """Cancellation plus a work budget for one bounded scope operation.
+
+    One guard is opened per enumeration or per page delivery, so the time
+    budget only charges work performed inside that operation.  A caller may
+    hold a cursor for hours without spending the scope's execution budget,
+    which is exactly the difference between "this scan is too slow" and "the
+    user walked away".
+
+    `checkpoint` runs before and after every filesystem call, at every directory
+    entry, and once more before a page is returned.  A single blocking
+    operating-system call cannot be interrupted from inside this module; what
+    is guaranteed is that no further call starts and no result is returned once
+    a cancellation arrives or the budget is spent.
+    """
+
+    __slots__ = ("checks", "_cancel", "_clock", "_max_seconds", "_started")
+
+    def __init__(self, clock, cancellation, max_seconds):
+        self._clock = clock
+        self._cancel = cancellation
+        self._max_seconds = max_seconds
+        self.checks = 0
+        self._started = self._now()
+
+    def _now(self):
+        now = self._clock()
+        if type(now) not in (int, float) or not math.isfinite(now):
+            raise ContractError("Scope clock returned an invalid value")
+        return now
+
+    def checkpoint(self) -> None:
+        self.checks += 1
+        if self._cancel is not None and self._cancel():
+            raise _Halt(_issue(ScopeIssueCode.CANCELLED, "."), ScopeState.CANCELLED)
+        if self._now() - self._started > self._max_seconds:
+            raise _Halt(_issue(ScopeIssueCode.TIME_BUDGET_EXHAUSTED, "."),
+                        ScopeState.BUDGET_EXHAUSTED)
+
+
+@dataclass(slots=True)
+class _DirectoryNames:
+    """Raw child names of one directory with the identity that produced them."""
+
+    identity: FileIdentity
+    state: _NodeState
+    names: frozenset[str]
+    rescans: int
+
+
+class _RawNameIndex:
+    """One bounded directory pass per parent, revalidated before every use.
+
+    Explicit selections need the exact spelling of each path segment: a name
+    that differs only by case or Unicode composition shares one display key but
+    is not the same directory entry.  Asking the filesystem once per selection
+    (the previous behaviour) made the cost grow with selections times directory
+    size, because every selection re-read the same parent.
+
+    This index reads each parent once, keeps the raw child names, and records
+    the directory identity and node state observed immediately before and after
+    that read.  Every lookup revalidates the record with one lstat:
+
+    * a different identity at the same path drops the record and reads again -
+      the cached names belong to a directory that is no longer there;
+    * a changed state (size or modification time) reads the directory again and
+      keeps the new names only when the read is confirmed by a matching state;
+    * a read that is not confirmed by the surrounding states is never kept, and
+      repeated instability stops the scope with `directory_changed` instead of
+      pretending the raw spelling is settled.
+
+    The index lives for exactly one enumeration, so it never carries a name set
+    across snapshots.  Directories the eligibility policy excludes are never
+    read: an excluded output or credential directory must not be opened just to
+    answer a spelling question about a path that will be excluded anyway.
+    """
+
+    __slots__ = ("_allowed", "_by_identity", "_entries", "_guard", "_io", "_root",
+                 "directory_reads", "names_read")
+
+    def __init__(self, io, root, guard, allowed):
+        self._io = io
+        self._root = root
+        self._guard = guard
+        self._allowed = allowed
+        self._entries: dict[str, _DirectoryNames] = {}
+        # Two spellings of one directory ("gallery" and "GALLERY" on a
+        # case-insensitive volume) must not be read twice.
+        self._by_identity: dict[FileIdentity, _DirectoryNames] = {}
+        self.directory_reads = 0
+        self.names_read = 0
+
+    def index(self, relative: str) -> frozenset[str] | None:
+        """Raw child names of one directory, or None when it cannot be read."""
+        if relative != "." and not self._allowed(relative):
+            return None
+        record = self._entries.get(relative)
+        if record is None:
+            return self._read(relative, 0)
+        current = self._observe(relative)
+        if (current is not None and current.identity == record.identity
+                and (current.size_bytes, current.mtime_ns)
+                == (record.state.size_bytes, record.state.mtime_ns)):
+            return record.names
+        self._entries.pop(relative, None)
+        if current is None:
+            return None
+        if record.rescans >= _MAX_NAME_INDEX_RESCANS:
+            raise _Halt(_issue(ScopeIssueCode.DIRECTORY_CHANGED, relative))
+        return self._read(relative, record.rescans + 1)
+
+    def _path(self, relative: str) -> Path:
+        return (self._root if relative == "."
+                else self._root.joinpath(*relative.split("/")))
+
+    def _observe(self, relative: str) -> _NodeState | None:
+        self._guard.checkpoint()
+        try:
+            info = self._io.lstat(self._path(relative))
+        except OSError:
+            return None
+        finally:
+            self._guard.checkpoint()
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            return None
+        return _node_state(info)
+
+    def _read(self, relative: str, rescans: int) -> frozenset[str] | None:
+        if relative not in self._entries and len(self._entries) >= _MAX_INDEXED_DIRECTORIES:
+            raise _Halt(_issue(ScopeIssueCode.NAME_INDEX_BUDGET_EXHAUSTED, relative),
+                        ScopeState.BUDGET_EXHAUSTED)
+        before = self._observe(relative)
+        if before is None:
+            return None
+        known = self._by_identity.get(before.identity)
+        if (known is not None and (known.state.size_bytes, known.state.mtime_ns)
+                == (before.size_bytes, before.mtime_ns)):
+            # The same physical directory was already read under another
+            # spelling; its names cannot differ.
+            self._entries[relative] = _DirectoryNames(before.identity, before,
+                                                      known.names, rescans)
+            return known.names
+        target = self._path(relative)
+        names: set[str] = set()
+        try:
+            with self._io.scandir(target) as children:
+                for child in children:
+                    self._guard.checkpoint()
+                    name = child.name if hasattr(child, "name") else child
+                    if not isinstance(name, str) or not name or len(name) > 255:
+                        raise _Halt(_issue(ScopeIssueCode.DIRECTORY_UNREADABLE, relative))
+                    names.add(name)
+                    self.names_read += 1
+                    if len(names) > _MAX_INDEXED_NAMES:
+                        raise _Halt(_issue(ScopeIssueCode.NAME_INDEX_BUDGET_EXHAUSTED,
+                                           relative), ScopeState.BUDGET_EXHAUSTED)
+        except _Halt:
+            raise
+        except (OSError, ValueError, TypeError):
+            self._entries.pop(relative, None)
+            return None
+        after = self._observe(relative)
+        if (after is None or after.identity != before.identity
+                or (after.size_bytes, after.mtime_ns)
+                != (before.size_bytes, before.mtime_ns)):
+            # The directory changed while it was read: a half-observed name set
+            # is never a usable answer.
+            self._entries.pop(relative, None)
+            if rescans >= _MAX_NAME_INDEX_RESCANS:
+                raise _Halt(_issue(ScopeIssueCode.DIRECTORY_CHANGED, relative))
+            return self._read(relative, rescans + 1)
+        self.directory_reads += 1
+        record = _DirectoryNames(before.identity, before, frozenset(names), rescans)
+        self._entries[relative] = record
+        self._by_identity[before.identity] = record
+        return record.names
+
+
+@dataclass(slots=True)
+class _StabilitySession:
+    """Between-page verification state with one stated total cost.
+
+    For a delivery of P pages over D recorded directories this session visits
+    each directory about once: every page except the last verifies a rotating
+    slice of `ceil(D / P)` directories, and the page that can complete the
+    receipt verifies all of them.  Total directory checks are therefore about
+    `2 * D` for the whole delivery instead of `D * P`.
+
+    `observed` holds the last state whose child names were confirmed identical
+    to the snapshot.  A directory whose modification time moved but whose
+    membership did not is not re-read on every later page; repeated instability
+    is capped by `_MAX_MEMBERSHIP_RESCANS`, after which the scope refuses to
+    certify the range.
+    """
+
+    snapshot_digest: str
+    rotation: int = 0
+    sweeps: int = 0
+    checks: int = 0
+    observed: dict[str, _NodeState] = field(default_factory=dict)
+    rescans: dict[str, int] = field(default_factory=dict)
 
 
 class ScopeEnumerator:
@@ -910,6 +1148,7 @@ class ScopeEnumerator:
             raise ContractError("Invalid scope clock")
         self._key = secrets.token_bytes(32)
         self._snapshot: _Snapshot | None = None
+        self._stability: _StabilitySession | None = None
         self._identity_comparisons = 0
         self._rules_digest = hashlib.sha256(canonical_json({
             "policy": self._policy._digest_data(),
@@ -933,10 +1172,14 @@ class ScopeEnumerator:
         if cancellation is not None and not callable(getattr(cancellation, "is_set", None)):
             raise ContractError("Cancellation must provide is_set()")
         cancelled = None if cancellation is None else cancellation.is_set
+        # One guard per bounded operation: an enumeration for the first page, a
+        # validity check for every later page.  Time spent waiting for the next
+        # request is not part of either budget.
+        guard = _WorkGuard(self._monotonic, cancelled, self._policy.max_seconds)
         if cursor is None:
             if self._snapshot is not None:
                 raise ContractError("The first-page cursor cannot restart a live enumerator")
-            self._snapshot = self._enumerate(cancelled)
+            self._snapshot = self._enumerate(cancelled, guard)
             if self._snapshot.root_state is None:
                 return self._empty_result(self._snapshot, cancellation)
         snapshot = self._snapshot
@@ -945,18 +1188,32 @@ class ScopeEnumerator:
         start = 0 if cursor is None else self._decode_cursor(cursor, snapshot)
         current_issues = list(snapshot.issues)
         state = snapshot.state
+        # A snapshot that already stopped (partial, cancelled, over budget) has
+        # no continuous range to verify: its pages only carry that verdict and
+        # deliver no entries.
+        deliverable = state in (ScopeState.COMPLETE, ScopeState.COMPLETE_WITH_ISSUES)
         if cancelled is not None and cancelled():
-            current_issues.append(_issue(ScopeIssueCode.CANCELLED, "."))
+            self._note(current_issues, _issue(ScopeIssueCode.CANCELLED, "."))
             state = ScopeState.CANCELLED
-        else:
+        elif deliverable:
             try:
-                self._check_snapshot_root(snapshot)
+                self._check_snapshot_root(snapshot, guard, start)
             except _Halt as halt:
-                current_issues.append(halt.issue)
-                state = ScopeState.PARTIAL
+                self._note(current_issues, halt.issue)
+                state = self._halt_state(halt)
         if state is not snapshot.state:
             return self._make_page(snapshot, (), None, tuple(current_issues), state, start=0,
                                    has_next=False)
+        if deliverable:
+            try:
+                # Last checkpoint before any result leaves this module: a
+                # cancellation or an exhausted budget during the work above must
+                # never be reported as a complete page.
+                guard.checkpoint()
+            except _Halt as halt:
+                self._note(current_issues, halt.issue)
+                return self._make_page(snapshot, (), None, tuple(current_issues),
+                                       self._halt_state(halt), start=0, has_next=False)
         selected = snapshot.entries[start:start + self._request.page_size]
         end = start + len(selected)
         next_cursor = self._encode_cursor(snapshot, end) if end < len(snapshot.entries) else None
@@ -968,6 +1225,19 @@ class ScopeEnumerator:
             cursor_key=snapshot.cursor_key,
         )
         return result
+
+    @staticmethod
+    def _halt_state(halt: _Halt) -> ScopeState:
+        """A cancelled operation stays cancelled; every other stop is partial."""
+        return ScopeState.CANCELLED if halt.state is ScopeState.CANCELLED else ScopeState.PARTIAL
+
+    @staticmethod
+    def _note(issues: list[ScopeIssue], issue: ScopeIssue) -> None:
+        """Record one stop reason without repeating an identical verdict."""
+        if issues and (issues[-1].code, issues[-1].relative_path) == (issue.code,
+                                                                     issue.relative_path):
+            return
+        issues.append(issue)
 
     def _make_page(self, snapshot: _Snapshot, entries, cursor, issues, state, *, start,
                    has_next):
@@ -1055,16 +1325,6 @@ class ScopeEnumerator:
                 binascii.Error, ContractError) as exc:
             raise ContractError("Invalid, foreign, or altered scope cursor") from exc
 
-    def _checkpoint(self, started: float, cancelled) -> None:
-        if cancelled is not None and cancelled():
-            raise _Halt(_issue(ScopeIssueCode.CANCELLED, "."), ScopeState.CANCELLED)
-        now = self._monotonic()
-        if type(now) not in (int, float) or not math.isfinite(now):
-            raise ContractError("Scope clock returned an invalid value")
-        if now - started > self._policy.max_seconds:
-            raise _Halt(_issue(ScopeIssueCode.TIME_BUDGET_EXHAUSTED, "."),
-                        ScopeState.BUDGET_EXHAUSTED)
-
     # --- one eligibility policy for recursion, explicit files and prefixes ---
 
     def _configured_output_root(self, relative: str) -> str | None:
@@ -1107,7 +1367,7 @@ class ScopeEnumerator:
             return ScopeEligibility(ScopeVerdict.EXCLUDE, ScopeExclusionReason.EXCLUDED_FILE, rule)
         return ScopeEligibility(ScopeVerdict.ACCEPT)
 
-    def _enumerate(self, cancelled) -> _Snapshot | None:
+    def _enumerate(self, cancelled, guard: _WorkGuard) -> _Snapshot | None:
         entries: list[_FileSnapshot] = []
         exclusions: list[ScopeExclusion] = []
         issues: list[ScopeIssue] = []
@@ -1118,9 +1378,11 @@ class ScopeEnumerator:
         directory_names: dict[str, tuple[str, ...]] = {}
         used_entries = 0
         used_directories = 0
-        started = self._monotonic()
-        if type(started) not in (int, float) or not math.isfinite(started):
-            raise ContractError("Scope clock returned an invalid value")
+        # One raw-name index for this enumeration only: an explicit selection
+        # never re-reads a parent directory it already resolved, and no name set
+        # survives into another snapshot.
+        name_index = _RawNameIndex(self._io, self._root, guard,
+                                   self._indexable_directory)
 
         def add_issue(code, path, *, terminal=False):
             if len(issues) < self._policy.max_issues:
@@ -1151,9 +1413,11 @@ class ScopeEnumerator:
                             ScopeState.BUDGET_EXHAUSTED)
             used_entries += 1
 
-        def lstat(path, relative, *, root=False):
+        def lstat(path, relative, *, root=False, guarded=True):
+            if guarded:
+                guard.checkpoint()
             try:
-                return self._io.lstat(path)
+                info = self._io.lstat(path)
             except (FileNotFoundError, NotADirectoryError):
                 if root:
                     raise _Halt(_issue(ScopeIssueCode.ROOT_UNAVAILABLE, ".")) from None
@@ -1164,11 +1428,21 @@ class ScopeEnumerator:
                     raise _Halt(_issue(ScopeIssueCode.ROOT_UNAVAILABLE, ".")) from None
                 add_issue(ScopeIssueCode.UNREADABLE, relative)
                 return None
+            finally:
+                # A cancellation or spent budget that arrived during the call
+                # must stop the next call, not be reported as a healthy path.
+                if guarded:
+                    guard.checkpoint()
+            return info
 
-        def root_chain():
+        def root_chain(*, guarded=True):
+            # `guarded=False` is used by exactly one caller: the handler that
+            # must still report which root an aborted snapshot was bound to.
+            # That read is bounded by the path depth, scans no directory, and
+            # certifies nothing beyond the identity of the root itself.
             chain = []
             for directory in reversed((self._root, *self._root.parents)):
-                info = lstat(directory, ".", root=True)
+                info = lstat(directory, ".", root=True, guarded=guarded)
                 assert info is not None
                 if _is_reparse(info):
                     raise _Halt(_issue(ScopeIssueCode.ROOT_REPARSE_POINT, "."))
@@ -1244,7 +1518,7 @@ class ScopeEnumerator:
             try:
                 with self._io.scandir(directory) as children:
                     for child in children:
-                        self._checkpoint(started, cancelled)
+                        guard.checkpoint()
                         name = child.name if hasattr(child, "name") else child
                         if not isinstance(name, str) or not name or len(name) > 255:
                             raise _Halt(_issue(ScopeIssueCode.DIRECTORY_UNREADABLE, relative))
@@ -1316,14 +1590,14 @@ class ScopeEnumerator:
             return True
 
         try:
-            self._checkpoint(started, cancelled)
+            guard.checkpoint()
             ancestors = root_chain()
             selections: list[tuple[str, str, bool]] = []
             selected: dict[tuple[bool, str], str] = {}
             for index, (is_prefix, raw) in enumerate(
                     [(True, value) for value in self._request.prefixes]
                     + [(False, value) for value in self._request.files]):
-                self._checkpoint(started, cancelled)
+                guard.checkpoint()
                 consume_entry("<selection>")
                 relative = selection_relative(raw, index)
                 if relative is None:
@@ -1345,8 +1619,19 @@ class ScopeEnumerator:
             # two selections name one case-insensitive entry.  This keeps the
             # real path and lets the alternate spelling be an explicit
             # duplicate exclusion instead of becoming a second restorable path.
+            #
+            # The spelling flag only breaks a tie inside one display key, so it
+            # is resolved only for keys that actually collide: grouping the
+            # colliding selections by parent directory turns "one directory scan
+            # per selection" into one bounded scan per distinct parent.
+            collisions: dict[str, list[str]] = {}
+            for key, relative, _is_prefix in selections:
+                collisions.setdefault(key, []).append(relative)
+            wanted = [relative for group in collisions.values() if len(group) > 1
+                      for relative in group]
+            present = self._raw_entry_presence(wanted, name_index) if wanted else {}
             selections.sort(key=lambda value: (
-                value[0], not self._raw_entry_exists(value[1]), value[1], not value[2],
+                value[0], not present.get(value[1], False), value[1], not value[2],
             ))
             pending_files = deque(
                 (relative, key) for key, relative, is_prefix in selections if not is_prefix)
@@ -1354,7 +1639,7 @@ class ScopeEnumerator:
                 (relative, key) for key, relative, is_prefix in selections if is_prefix)
             directory_queue: deque[str] = deque()
             while pending_files or pending_directories or directory_queue:
-                self._checkpoint(started, cancelled)
+                guard.checkpoint()
                 if pending_files:
                     relative, _key = pending_files.popleft()
                     verdict = self._file_eligibility(relative)
@@ -1377,7 +1662,7 @@ class ScopeEnumerator:
                         continue
                     self._capture_file(relative, path_ref, info, entries, add_issue,
                                        add_exclusion, identities, aliases,
-                                       ScopeExclusionReason.DUPLICATE_SELECTION)
+                                       ScopeExclusionReason.DUPLICATE_SELECTION, name_index)
                     continue
                 if not directory_queue:
                     relative, _key = pending_directories.popleft()
@@ -1399,7 +1684,7 @@ class ScopeEnumerator:
                 children = read_directory(relative)
                 child_directories = []
                 for child_relative in children:
-                    self._checkpoint(started, cancelled)
+                    guard.checkpoint()
                     path_ref = scoped_path(child_relative)
                     if path_ref is None:
                         continue
@@ -1424,10 +1709,10 @@ class ScopeEnumerator:
                         continue
                     self._capture_file(child_relative, path_ref, info, entries, add_issue,
                                        add_exclusion, identities, aliases,
-                                       ScopeExclusionReason.DUPLICATE_CANDIDATE)
+                                       ScopeExclusionReason.DUPLICATE_CANDIDATE, name_index)
                 directory_queue.extend(reversed(child_directories))
             for item in entries:
-                self._checkpoint(started, cancelled)
+                guard.checkpoint()
                 path = item.entry.path
                 assert isinstance(path, PathRef)
                 info = lstat(self._root.joinpath(*path.relative_path.split("/")),
@@ -1443,7 +1728,7 @@ class ScopeEnumerator:
             if final_chain != ancestors:
                 raise _Halt(_issue(ScopeIssueCode.ROOT_CHANGED, "."))
             for relative, before in directories.items():
-                self._checkpoint(started, cancelled)
+                guard.checkpoint()
                 target = (self._root if relative == "."
                           else self._root.joinpath(*relative.split("/")))
                 info = lstat(target, relative, root=relative == ".")
@@ -1451,14 +1736,14 @@ class ScopeEnumerator:
                 if (current != before or _is_reparse(info)
                         or not stat.S_ISDIR(info.st_mode)):
                     raise _Halt(_issue(ScopeIssueCode.DIRECTORY_CHANGED, relative))
-            self._checkpoint(started, cancelled)
+            guard.checkpoint()
             state = ScopeState.COMPLETE_WITH_ISSUES if issues else ScopeState.COMPLETE
         except _Halt as halt:
             self._identity_comparisons = identities.comparisons
             add_issue(halt.issue.code, halt.issue.relative_path, terminal=True)
             state = halt.state
             try:
-                ancestors = root_chain()
+                ancestors = root_chain(guarded=False)
                 root_state = ancestors[-1][1]
             except _Halt as root_halt:
                 add_issue(root_halt.issue.code, root_halt.issue.relative_path, terminal=True)
@@ -1519,7 +1804,7 @@ class ScopeEnumerator:
                 "mtime_ns": item.mtime_ns, "attributes": item.attributes}
 
     def _capture_file(self, relative, path_ref, info, entries, add_issue, add_exclusion,
-                      identities, aliases, duplicate_reason):
+                      identities, aliases, duplicate_reason, name_index):
         if not stat.S_ISREG(info.st_mode):
             add_issue(ScopeIssueCode.NOT_REGULAR_FILE, relative)
             return
@@ -1541,7 +1826,7 @@ class ScopeEnumerator:
             # entries) or merely another spelling of one case-insensitive
             # directory entry.  Only a raw path that exists name-by-name is a
             # restorable alias; the other spelling is a duplicate selection.
-            if not self._raw_entry_exists(relative):
+            if not self._raw_entry_exists(relative, name_index):
                 add_exclusion(relative, duplicate_reason, related=previous_path,
                               identity=state.identity)
                 return
@@ -1565,38 +1850,83 @@ class ScopeEnumerator:
         entries.append(item)
         identities.add(state.identity, item)
 
-    def _raw_entry_exists(self, relative: str) -> bool:
-        """True only when every raw path segment appears in its directory listing."""
-        current = self._root
-        for piece in relative.split("/"):
-            try:
-                with self._io.scandir(current) as children:
-                    if not any(
-                        (child.name if hasattr(child, "name") else child) == piece
-                        for child in children
-                    ):
-                        return False
-            except OSError:
-                return False
-            current = current / piece
-        return True
+    def _indexable_directory(self, relative: str) -> bool:
+        """False for a directory the eligibility policy would exclude anyway.
 
-    def _check_snapshot_root(self, snapshot: _Snapshot) -> None:
+        Resolving the raw spelling of a path must never open a managed output
+        or credential directory - nor one below such a directory - because that
+        path is excluded later by the same policy: its listing decides nothing,
+        and reading it would contradict the exclusion.  The ancestor check is
+        what keeps a path such as `archive_store/nested` closed even though its
+        own last segment is an ordinary name.
+        """
+        if relative == ".":
+            return True
+        if not self._ancestor_eligibility(relative).accepted:
+            return False
+        return self._directory_eligibility(relative, relative.rsplit("/", 1)[-1]).accepted
+
+    def _raw_entry_presence(self, relatives: list[str],
+                            name_index: _RawNameIndex) -> dict[str, bool]:
+        """Exact-spelling presence for many selections with one pass per parent.
+
+        Every selection is split into its parent directories and the child name
+        that must appear in each; those needs are grouped by directory, so a
+        directory shared by hundreds of selections is read once.  A directory
+        that cannot be read (missing, replaced, excluded) yields `False` rather
+        than an exception: the selection's own metadata read reports why.
+        """
+        needed: dict[str, set[str]] = {}
+        for relative in relatives:
+            current = "."
+            for piece in relative.split("/"):
+                needed.setdefault(current, set()).add(piece)
+                current = piece if current == "." else current + "/" + piece
+        listings = {directory: name_index.index(directory) for directory in needed}
+        presence = {}
+        for relative in relatives:
+            current = "."
+            found = True
+            for piece in relative.split("/"):
+                names = listings.get(current)
+                if names is None or piece not in names:
+                    found = False
+                    break
+                current = piece if current == "." else current + "/" + piece
+            presence[relative] = found
+        return presence
+
+    def _raw_entry_exists(self, relative: str, name_index: _RawNameIndex) -> bool:
+        """True only when every raw path segment appears in its directory listing."""
+        return self._raw_entry_presence([relative], name_index).get(relative, False)
+
+    def _stability_session(self, snapshot: _Snapshot) -> _StabilitySession:
+        session = self._stability
+        if session is None or session.snapshot_digest != snapshot.digest:
+            session = _StabilitySession(snapshot.digest)
+            self._stability = session
+        return session
+
+    def _check_snapshot_root(self, snapshot: _Snapshot, guard: _WorkGuard,
+                             start: int) -> None:
         """Between pages: prove path safety, then prove membership is unchanged.
 
         Ancestors above the root only prove that the path was not replaced, made
         into a reparse point, or taken offline; their own mtime is unrelated
-        scope activity.  The root and every enumerated directory are compared
-        against their recorded child-name snapshot instead of raw mtime, so an
-        unrelated write in a parent directory cannot abort paging while a real
-        membership change still does.
+        scope activity.  The root is checked on every page, and the enumerated
+        directories are checked in a bounded rotating slice: about two passes
+        over them for a whole delivery instead of one full pass per page.  The
+        page that can complete a receipt verifies all of them before that
+        receipt can exist.
         """
         ancestors = snapshot.ancestors
         if not ancestors:
             raise _Halt(_issue(ScopeIssueCode.ROOT_UNAVAILABLE, "."))
         root_path, root_before = ancestors[-1]
         for directory, before in ancestors[:-1]:
+            guard.checkpoint()
             info = self._lstat_quiet(directory)
+            guard.checkpoint()
             if info is None:
                 raise _Halt(_issue(ScopeIssueCode.ROOT_UNAVAILABLE, "."))
             if _is_reparse(info):
@@ -1606,7 +1936,9 @@ class ScopeEnumerator:
             current = _node_state(info)
             if current is None or current.identity != before.identity:
                 raise _Halt(_issue(ScopeIssueCode.ROOT_CHANGED, "."))
+        guard.checkpoint()
         info = self._lstat_quiet(root_path)
+        guard.checkpoint()
         if info is None:
             raise _Halt(_issue(ScopeIssueCode.ROOT_UNAVAILABLE, "."))
         if _is_reparse(info):
@@ -1616,7 +1948,7 @@ class ScopeEnumerator:
         current = _node_state(info)
         if current is None or current.identity != root_before.identity:
             raise _Halt(_issue(ScopeIssueCode.ROOT_CHANGED, "."))
-        self._check_directory_membership(snapshot, root_path)
+        self._check_directory_membership(snapshot, root_path, guard, start)
 
     def _lstat_quiet(self, path: Path):
         try:
@@ -1624,49 +1956,106 @@ class ScopeEnumerator:
         except OSError:
             return None
 
-    def _check_directory_membership(self, snapshot: _Snapshot, root_path: Path) -> None:
-        for item in snapshot.directories:
-            relative = item.relative_path
-            is_root = relative == "."
-            target = root_path if is_root else root_path.joinpath(*relative.split("/"))
-            info = self._lstat_quiet(target)
-            if info is None:
-                raise _Halt(_issue(
-                    ScopeIssueCode.ROOT_UNAVAILABLE if is_root else
-                    ScopeIssueCode.DIRECTORY_UNREADABLE, relative))
-            if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
-                raise _Halt(_issue(
-                    ScopeIssueCode.ROOT_REPARSE_POINT if is_root else
-                    ScopeIssueCode.DIRECTORY_CHANGED, relative))
-            current = _node_state(info)
-            if current is None or current.identity != item.state.identity:
-                raise _Halt(_issue(
-                    ScopeIssueCode.ROOT_CHANGED if is_root else
-                    ScopeIssueCode.DIRECTORY_CHANGED, relative))
-            if item.names is None:
-                # Ancestor-only record: identity guard, no membership snapshot.
-                continue
-            if (current.size_bytes, current.mtime_ns) == (item.state.size_bytes,
-                                                          item.state.mtime_ns):
-                continue
-            if self._read_names(target, relative) != item.names:
-                raise _Halt(_issue(
-                    ScopeIssueCode.ROOT_CHANGED if is_root else
-                    ScopeIssueCode.DIRECTORY_CHANGED, relative))
+    def _check_directory_membership(self, snapshot: _Snapshot, root_path: Path,
+                                    guard: _WorkGuard, start: int) -> None:
+        """Verify a bounded, rotating slice of the recorded directories.
 
-    def _read_names(self, target: Path, relative: str) -> tuple[str, ...]:
+        Every page except the last checks `ceil(directories / pages)`, so one
+        delivery pays about two passes over the directories in total
+        (`O(directories)`) instead of one full pass per page
+        (`O(directories * pages)`).  The page that ends a delivery verifies all
+        of them, and it is the only page that can complete a whole-snapshot
+        receipt: no receipt exists before a complete re-verification.
+        """
+        items = snapshot.directories
+        if not items:
+            return
+        count = len(items)
+        session = self._stability_session(snapshot)
+        pages = max(1, -(-len(snapshot.entries) // self._request.page_size))
+        terminal = len(snapshot.entries) - start <= self._request.page_size
+        if terminal:
+            first, size = 0, count
+            session.sweeps += 1
+        else:
+            first = session.rotation % count
+            size = min(count, max(1, -(-count // pages)))
+        for offset in range(size):
+            position = (first + offset) % count
+            guard.checkpoint()
+            self._verify_directory(items[position], root_path, guard, session)
+            session.checks += 1
+            session.rotation = (position + 1) % count
+
+    def _verify_directory(self, item: _DirectorySnapshot, root_path: Path,
+                          guard: _WorkGuard, session: _StabilitySession) -> None:
+        relative = item.relative_path
+        is_root = relative == "."
+        target = root_path if is_root else root_path.joinpath(*relative.split("/"))
+        guard.checkpoint()
+        info = self._lstat_quiet(target)
+        guard.checkpoint()
+        if info is None:
+            raise _Halt(_issue(
+                ScopeIssueCode.ROOT_UNAVAILABLE if is_root else
+                ScopeIssueCode.DIRECTORY_UNREADABLE, relative))
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            raise _Halt(_issue(
+                ScopeIssueCode.ROOT_REPARSE_POINT if is_root else
+                ScopeIssueCode.DIRECTORY_CHANGED, relative))
+        current = _node_state(info)
+        if current is None or current.identity != item.state.identity:
+            raise _Halt(_issue(
+                ScopeIssueCode.ROOT_CHANGED if is_root else
+                ScopeIssueCode.DIRECTORY_CHANGED, relative))
+        if item.names is None:
+            # Ancestor-only record: identity guard, no membership snapshot.
+            return
+        confirmed = session.observed.get(relative, item.state)
+        if (current.size_bytes, current.mtime_ns) == (confirmed.size_bytes,
+                                                      confirmed.mtime_ns):
+            return
+        if self._read_names(target, relative, guard, item.names) != item.names:
+            raise _Halt(_issue(
+                ScopeIssueCode.ROOT_CHANGED if is_root else
+                ScopeIssueCode.DIRECTORY_CHANGED, relative))
+        rescans = session.rescans.get(relative, 0) + 1
+        session.rescans[relative] = rescans
+        if rescans > _MAX_MEMBERSHIP_RESCANS:
+            # Membership was re-confirmed again and again: the directory is not
+            # stable enough to certify, so the range is refused, not widened.
+            raise _Halt(_issue(
+                ScopeIssueCode.ROOT_CHANGED if is_root else
+                ScopeIssueCode.DIRECTORY_CHANGED, relative))
+        session.observed[relative] = current
+
+    def _read_names(self, target: Path, relative: str, guard: _WorkGuard,
+                    expected: tuple[str, ...] | None = None) -> tuple[str, ...] | None:
+        """Read one directory's names, stopping at the first unexpected entry.
+
+        `expected` is the snapshot's own name tuple.  A name the snapshot did not
+        contain already proves the membership changed, so the read stops there
+        instead of finishing a directory it must reject anyway; `None` reports
+        that proof without reading the rest.
+        """
         names = []
+        expected_names = None if expected is None else frozenset(expected)
         try:
             with self._io.scandir(target) as children:
                 for child in children:
+                    guard.checkpoint()
                     name = child.name if hasattr(child, "name") else child
                     if not isinstance(name, str) or not name:
                         raise _Halt(_issue(ScopeIssueCode.DIRECTORY_UNREADABLE, relative))
-                    names.append(name if relative == "." else relative + "/" + name)
+                    full = name if relative == "." else relative + "/" + name
+                    if expected_names is not None and full not in expected_names:
+                        return None
+                    names.append(full)
         except _Halt:
             raise
         except OSError:
             raise _Halt(_issue(ScopeIssueCode.DIRECTORY_UNREADABLE, relative)) from None
+        guard.checkpoint()
         return tuple(sorted(names, key=lambda value: (_path_key(value), value)))
 
     def _empty_result(self, snapshot: _Snapshot, cancellation) -> ScopePage:
