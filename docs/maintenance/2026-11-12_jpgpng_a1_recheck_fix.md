@@ -56,6 +56,17 @@
 - P3：prefix 的两种大小写拼写优先级受输入顺序影响。
 - 这些不是 F4 提交新引入；F4 的最终 checkpoint 让 abort 首页路径更容易触发。
 
+## 3B. F5 2,000 文件真实整链
+
+- 独立 worktree `f5_worktree` 固定 HEAD `4a9c3f3`，未改产品源码、未提交。
+- 2,000 个真实小文件 / 441 目录节点；逐项路径/大小/SHA-256/work/page/path_key/content_key 全部一致，missing/extra/差异均为 0。
+- 计划 12 段、payload 2,300,857 B（8 MiB 的 27.4%）；临时库 6,131,712 B，assets/contents/bindings 各 2,000，integrity/FK 正常。
+- 冷/热整链 23.703/10.447 s；观察 17.676/5.198 s；保存 3.041/2.954 s；重开加载 0.496/0.594 s。
+- `tracemalloc` 验证峰值 61,065,092 B（26.54× 载荷）；全新进程单次 load 峰值 26,936,770 B（11.71×）→ 8 MiB 不是堆上限。
+- page_size 1/100/1000 与显式选择：计划内容逐字节一致；scandir 均约 441 次/0 次，无页数爆炸。
+- 15 个负向对照均被计划加载拒绝；但**全库审计仍接受删除一个计划段**（只查预算上限，不核对 header segment_count/inventory_sha256），已转 F3 修复。范围凭据仍只绑路径+大小（AR2-03），已在 F5 真实数据复现。
+- 相关归档 328 passed/3 skipped；全量 1,337 passed/3 skipped。未覆盖真实图片/解码、500 GB 吞吐、并发/崩溃/WAL、symlink/硬链接，不能称 F3 完成。
+
 ## 4. F3/F5 并行状态
 
 - F3（AR2-03/04/07）长任务实现中；设计见 `docs/archiving/A1_IDENTITY_HANDOFF.md`。F3 允许修改 `PathRef.identity_key`，但 `target_key` 不变。
