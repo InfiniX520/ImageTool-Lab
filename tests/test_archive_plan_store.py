@@ -769,7 +769,7 @@ def test_reload_rejects_duplicate_inventory_json_key(migrated_copy):
         "WHERE batch_id='duplicate-key' AND segment_index=0"
     ).fetchone()[0]
     assert payload.endswith("}")
-    changed = payload[:-1] + ',"batch_id":"duplicate"}'
+    changed = payload[:-1] + ',"batch_id":"duplicate-key"}'
     header = json.loads(conn.execute(
         "SELECT scope_json FROM archive_batches WHERE batch_id='duplicate-key'"
     ).fetchone()[0])
