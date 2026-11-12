@@ -787,7 +787,7 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
                 raise ArchiveSchemaError("Download receipt does not prove this exact content")
         assets[(asset_id, revision, path_key)] = (content, path, source_kind, artifact_id)
 
-    content_keys = {key for key, _ in content_facts.values()}
+    content_keys = {key: value for key, value in content_facts.values()}
     acceptances: dict[str, tuple[str, str, int]] = {}
     for row in conn.execute(
         """SELECT acceptance_id,path_key,content_key,asset_id,revision,
@@ -804,8 +804,18 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
         content = asset[0]
         if content_key != _content_key(content):
             raise ArchiveSchemaError("Path acceptance content differs from its asset")
-        if expected_content_key is not None and expected_content_key not in content_keys:
-            raise ArchiveSchemaError("Path acceptance expects an unknown content row")
+        if expected_content_key is not None:
+            expected_content = content_keys.get(expected_content_key)
+            if expected_content is None:
+                raise ArchiveSchemaError("Path acceptance expects an unknown content row")
+            # An acceptance replaces an older generation of the same logical asset.
+            # It cannot expect itself, a later generation, or another asset's row.
+            if (
+                expected_content.asset_id != asset_id
+                or expected_content.revision >= revision
+            ):
+                raise ArchiveSchemaError(
+                    "Path acceptance expects a generation that cannot precede it")
         if type(root_revision) is not int or root_revision < 0:
             raise ArchiveSchemaError("Path acceptance root revision is invalid")
         if _TOKEN.fullmatch(reason) is None:
@@ -1563,8 +1573,10 @@ def apply_content_resolution(
     record_local_observation(conn, rebound.evidence, result=rebound)
     acceptance = record_path_acceptance(
         conn, content, path, check_id=check_id, root_revision=root_revision,
-        expected_content_key=expected_key, accepted_at=bound_at,
-        reason=resolution.reason,
+        # Nothing was superseded when the binding already names this generation, so
+        # the acceptance records no older generation instead of naming itself.
+        expected_content_key=None if expected_key == new_key else expected_key,
+        accepted_at=bound_at, reason=resolution.reason,
     )
     bind_archive_path(
         conn, content, path, bound_at=bound_at, expected_content_key=expected_key,

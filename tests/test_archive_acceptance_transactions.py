@@ -38,8 +38,8 @@ from core.archive_schema import (
     ArchiveMigrationError, ArchiveSchemaError, ArchiveTransactionRequiredError,
     apply_content_resolution, bind_archive_path, ensure_archive_asset, load_content_binding,
     migrate_archive_copy, record_archive_observation, record_local_observation,
-    record_release_event, record_transfer_intent, resolve_observed_content,
-    validate_archive_facts,
+    record_path_acceptance, record_release_event, record_transfer_intent,
+    resolve_observed_content, validate_archive_facts,
 )
 from core.archive_scope import (
     CandidateSnapshot, ResolutionKind, ScopeEnumerator, ScopeRequest, consume_scope_pages,
@@ -698,6 +698,82 @@ def test_confirmed_replacement_moves_the_pointer_only_after_confirmation(library
     # Both acceptances are kept: the history of accepted evidence is append-only.
     assert conn.execute("SELECT COUNT(*) FROM archive_path_acceptances").fetchone()[0] == 2
     validate_archive_facts(conn)
+
+
+def test_acceptance_rows_are_recomputed_by_the_maintenance_audit(library, tmp_path):
+    """A tampered acceptance cannot survive the full-library audit."""
+    conn, root = library[1], tmp_path / "audit-root"
+    _, first, acceptance_ = baseline(conn, root, "gallery/a.bin", b"AAAA", tag="au1")
+    validate_archive_facts(conn)
+
+    row = conn.execute(
+        "SELECT check_id,file_device,root_revision FROM archive_path_acceptances"
+    ).fetchone()
+    assert row == (acceptance_.check_id, str(acceptance_.physical_identity.device),
+                   acceptance_.root_revision)
+
+    # The accepted physical object must be the one the check observed.
+    with transaction(conn):
+        conn.execute(
+            "UPDATE archive_path_acceptances SET file_device=?",
+            (str(int(row[1]) + 1),),
+        )
+    with pytest.raises(ArchiveSchemaError, match="acceptance"):
+        validate_archive_facts(conn)
+    with transaction(conn):
+        conn.execute(
+            "UPDATE archive_path_acceptances SET file_device=?", (row[1],)
+        )
+    validate_archive_facts(conn)
+
+    # Dropping the acceptance reference is not a false claim, it is a weaker one:
+    # the binding then names no accepted physical object and a later content change
+    # has to be confirmed again.
+    with transaction(conn):
+        conn.execute("UPDATE archive_path_bindings SET acceptance_id=NULL")
+    weakened = load_content_binding(conn, path_of("gallery/a.bin"))
+    assert weakened.acceptance_id is None and weakened.physical_identity is None
+    assert weakened.content == acceptance_.content
+    validate_archive_facts(conn)
+    with transaction(conn):
+        conn.execute(
+            "UPDATE archive_path_bindings SET acceptance_id=?",
+            (acceptance_.acceptance_id,),
+        )
+    assert load_content_binding(conn, path_of("gallery/a.bin")).acceptance_id == (
+        acceptance_.acceptance_id)
+    validate_archive_facts(conn)
+
+
+def test_acceptance_cannot_reuse_a_check_of_other_bytes(library, tmp_path):
+    """An acceptance must be justified by a check of exactly these bytes."""
+    conn, root = library[1], tmp_path / "accept-check-root"
+    target, first, first_acceptance = baseline(
+        conn, root, "gallery/a.bin", b"AAAA", tag="ac1")
+    first_acceptance_check = first_acceptance.check_id
+    time.sleep(0.02)
+    rewrite(target, b"BBBB")
+    _, entry, observed = scan_one(conn, root, "gallery/a.bin",
+                                  run_id="run-ac2", check_id="check-ac2")
+    resolution = resolve_observed_content(conn, observed)
+    assert resolution.content is not None and resolution.content.sha256 == sha(b"BBBB")
+    accepted, acceptance_ = accept(conn, observed)
+    assert accepted.content == resolution.content
+    before = conn.execute("SELECT COUNT(*) FROM archive_path_acceptances").fetchone()[0]
+    with pytest.raises(ArchiveSchemaError, match="exact content"):
+        with transaction(conn):
+            record_path_acceptance(
+                conn, resolution.content, entry.path, check_id=first_acceptance_check,
+                root_revision=1, expected_content_key=_content_key_of(first.content),
+                accepted_at=LATER, reason="synthetic_acceptance",
+            )
+    assert conn.execute("SELECT COUNT(*) FROM archive_path_acceptances").fetchone()[0] == before
+    assert load_content_binding(conn, entry.path).content == resolution.content
+
+
+def _content_key_of(content):
+    from core.archive_schema import _content_key
+    return _content_key(content)
 
 
 def test_same_timestamp_diagnostics_are_not_a_tie_breaker(library, tmp_path):
