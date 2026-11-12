@@ -21,12 +21,13 @@ from core.preservation_policy import (
 )
 from core.task_contracts import ContractError, PathRef, canonical_json, normalize_json
 
-ARCHIVE_SCHEMA_VERSION = "2"
-ARCHIVE_PROTOCOL_VERSION = 1
+ARCHIVE_SCHEMA_VERSION = "3"
+ARCHIVE_PROTOCOL_VERSION = 2
+ARCHIVE_JSON_LIMIT = 8 * 1024 * 1024
 ARCHIVE_TABLES = frozenset({
     "archive_batches", "archive_contents", "archive_assets", "archive_transfer_intents",
     "archive_local_checks", "archive_packages", "archive_members", "archive_objects",
-    "archive_groups", "archive_group_objects", "archive_locations",
+    "archive_path_bindings", "archive_groups", "archive_group_objects", "archive_locations",
     "archive_checks", "archive_releases",
 })
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
@@ -60,7 +61,7 @@ def _json(value: object) -> str:
     if value is None:
         return "{}"
     result = canonical_json(_plain_json(value))
-    if len(result.encode("utf-8")) > 1024 * 1024:
+    if len(result.encode("utf-8")) > ARCHIVE_JSON_LIMIT:
         raise ContractError("Archive evidence detail exceeds 1 MiB")
     return result
 
@@ -69,7 +70,7 @@ def _stored_json(value: object, field: str) -> None:
     if not isinstance(value, str):
         raise ArchiveSchemaError(f"Invalid stored {field}")
     try:
-        if len(value.encode("utf-8")) > 1024 * 1024:
+        if len(value.encode("utf-8")) > ARCHIVE_JSON_LIMIT:
             raise ArchiveSchemaError(f"Stored {field} exceeds its bound")
         normalize_json(value, object_only=True)
     except (ContractError, UnicodeError) as exc:
@@ -124,7 +125,7 @@ def _content_key(content: ContentVersion) -> str:
 ARCHIVE_DDL = (
     """CREATE TABLE archive_batches (
         batch_id TEXT PRIMARY KEY,
-        protocol_version INTEGER NOT NULL CHECK (protocol_version = 1),
+        protocol_version INTEGER NOT NULL CHECK (protocol_version = 2),
         scope_json TEXT NOT NULL,
         capacity_json TEXT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('planned','paused','blocked','completed')),
@@ -158,7 +159,17 @@ ARCHIVE_DDL = (
         PRIMARY KEY (asset_id, revision, path_key),
         FOREIGN KEY (asset_id, revision) REFERENCES archive_contents(asset_id, revision),
         UNIQUE (content_key, path_key),
-        UNIQUE (path_key)
+        CHECK ((source_kind != 'download_receipt') OR (artifact_id IS NOT NULL))
+    )""",
+    """CREATE TABLE archive_path_bindings (
+        path_key TEXT PRIMARY KEY,
+        content_key TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        bound_at TEXT NOT NULL,
+        FOREIGN KEY (asset_id, revision, path_key) REFERENCES archive_assets(
+            asset_id, revision, path_key
+        )
     )""",
     """CREATE TABLE archive_transfer_intents (
         intent_id TEXT PRIMARY KEY,
@@ -239,7 +250,7 @@ ARCHIVE_DDL = (
     """CREATE TABLE archive_groups (
         group_id TEXT PRIMARY KEY,
         batch_id TEXT NOT NULL REFERENCES archive_batches(batch_id),
-        protocol_version INTEGER NOT NULL CHECK (protocol_version = 1),
+        protocol_version INTEGER NOT NULL CHECK (protocol_version = 2),
         parameters_json TEXT NOT NULL,
         target_capability TEXT NOT NULL CHECK (target_capability IN (
             'partial_damage','whole_largest_pack'
@@ -308,7 +319,8 @@ ARCHIVE_DDL = (
         ))
     )""",
     """CREATE TABLE archive_releases (
-        release_id TEXT PRIMARY KEY,
+        event_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
         content_key TEXT NOT NULL,
         local_check_id TEXT NOT NULL,
         archive_check_id TEXT NOT NULL,
@@ -321,7 +333,7 @@ ARCHIVE_DDL = (
         FOREIGN KEY (archive_check_id, content_key) REFERENCES archive_checks(
             check_id, content_key
         ),
-        UNIQUE (release_id, event)
+        UNIQUE (operation_id, event)
     )""",
     "CREATE INDEX idx_archive_assets_content ON archive_assets(content_key, path_key)",
     "CREATE INDEX idx_archive_intents_asset ON archive_transfer_intents(asset_id, revision, observed_at)",
@@ -487,19 +499,54 @@ def ensure_archive_asset(
     content_key = _content_key(content)
     if source_kind not in {"download_receipt", "observed_existing", "user_selected"}:
         raise ContractError("Invalid asset source")
-    existing = conn.execute(
-        "SELECT size_bytes,sha256 FROM archive_contents WHERE content_key=?", (content_key,),
-    ).fetchone()
-    if existing is not None and existing != (content.size_bytes, content.sha256):
-        raise ContractError("Content identity already has different facts")
-    conn.execute(
-        "INSERT OR IGNORE INTO archive_contents VALUES (?,?,?,?,?)",
-        (content_key, content.asset_id, content.revision, content.size_bytes, content.sha256),
+    if source_kind == "download_receipt":
+        if artifact_id is None:
+            raise ContractError("Download receipt source requires an artifact reference")
+        receipt = conn.execute(
+            "SELECT output_ref_json,size,sha256,verification FROM artifacts WHERE artifact_id=?",
+            (artifact_id,),
+        ).fetchone()
+        if receipt is None:
+            raise ContractError("Referenced download receipt does not exist")
+        output_ref, size, digest, verification = receipt
+        try:
+            if PathRef(**json.loads(output_ref)).target_key != path.target_key:
+                raise ContractError("Download receipt path does not match this asset")
+        except (TypeError, ValueError) as exc:
+            raise ContractError("Download receipt path is invalid") from exc
+        if verification != "structure_checked" or size != content.size_bytes or digest != content.sha256:
+            raise ContractError("Download receipt does not prove this exact content")
+    elif artifact_id is not None:
+        raise ContractError("Only download receipt assets may reference artifacts")
+    content_values = (
+        content.asset_id, content.revision, content.size_bytes, content.sha256,
     )
+    existing = conn.execute(
+        "SELECT asset_id,revision,size_bytes,sha256 FROM archive_contents WHERE content_key=?",
+        (content_key,),
+    ).fetchone()
+    if existing is not None:
+        if tuple(existing) != content_values:
+            raise ContractError("Content identity already has different facts")
+    else:
+        conn.execute(
+            "INSERT INTO archive_contents VALUES (?,?,?,?,?)",
+            (content_key, *content_values),
+        )
     values = (
-        content_key, content.asset_id, content.revision, path.target_key, _path_json(path),
+        content_key, *content_values[:2], path.target_key, _path_json(path),
         artifact_id, source_kind, content.size_bytes, content.sha256,
     )
+    existing_asset = conn.execute(
+        """SELECT content_key,asset_id,revision,path_key,path_json,artifact_id,
+                  source_kind,size_bytes,sha256 FROM archive_assets
+           WHERE asset_id=? AND revision=? AND path_key=?""",
+        (content.asset_id, content.revision, path.target_key),
+    ).fetchone()
+    if existing_asset is not None:
+        if tuple(existing_asset) != values:
+            raise ContractError("Existing asset has different immutable facts")
+        return content_key
     conn.execute(
         """INSERT INTO archive_assets (
             content_key,asset_id,revision,path_key,path_json,artifact_id,source_kind,size_bytes,sha256
