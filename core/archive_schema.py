@@ -608,17 +608,33 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
             raise ArchiveSchemaError("Stored archive plan requires a scope receipt")
         if isinstance(scope, dict) and scope.get("format") == "jpgpng-archive-plan":
             _check_stored_plan_segments(conn, batch_id, scope)
-            if state == "planned":
-                # The maintenance audit and the plan loader must agree on the
-                # full protocol, not just on segment bytes.  Import lazily: the
-                # plan store imports this module at import time.
-                from core.archive_plan_store import _load_in_transaction as _load_stored_plan
-                try:
-                    _load_stored_plan(conn, batch_id)
-                except Exception as exc:
-                    raise ArchiveSchemaError(
-                        "Stored archive plan failed the shared protocol check"
-                    ) from exc
+            # The maintenance audit and the plan loader must agree on the
+            # full protocol, not just on segment bytes.  Import lazily: the
+            # plan store imports this module at import time.
+            from core.archive_plan_store import (
+                _capacity, _check_assets, _decode_scope, _load_in_transaction,
+            )
+            try:
+                if state == "planned":
+                    _load_in_transaction(conn, batch_id)
+                else:
+                    inventory, _scope, _receipt, sources = _decode_scope(
+                        conn, scope_json, batch_id)
+                    _capacity(
+                        _strict_object(
+                            conn.execute(
+                                "SELECT capacity_json FROM archive_batches WHERE batch_id=?",
+                                (batch_id,),
+                            ).fetchone()[0],
+                            "capacity_json",
+                        ),
+                        inventory,
+                    )
+                    _check_assets(conn, inventory, sources)
+            except Exception as exc:
+                raise ArchiveSchemaError(
+                    "Stored archive plan failed the shared protocol check"
+                ) from exc
     for batch_id, total_bytes, segment_count in conn.execute(
         "SELECT batch_id,COALESCE(SUM(byte_length),0),COUNT(*) "
         "FROM archive_plan_segments GROUP BY batch_id"

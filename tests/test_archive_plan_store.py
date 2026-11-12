@@ -694,6 +694,24 @@ def test_stored_receipt_must_be_content_bound_on_load(migrated_copy):
         load_archive_plan(conn, "unbound-receipt")
 
 
+def test_non_planned_plan_also_requires_full_receipt_protocol(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("completed-null-receipt")
+    save_plan(conn, inventory, capacity)
+    header = json.loads(conn.execute(
+        "SELECT scope_json FROM archive_batches WHERE batch_id='completed-null-receipt'"
+    ).fetchone()[0])
+    header["scope_receipt"] = None
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET state='completed',scope_json=? "
+            "WHERE batch_id='completed-null-receipt'",
+            (json.dumps(header),),
+        )
+    with pytest.raises(ArchiveSchemaError, match="protocol|receipt"):
+        validate_archive_facts(conn)
+
+
 def test_referenced_content_digest_is_checked_on_load_and_replay(migrated_copy):
     conn, _ = migrated_copy
     inventory, capacity = make_plan("content-corruption")
