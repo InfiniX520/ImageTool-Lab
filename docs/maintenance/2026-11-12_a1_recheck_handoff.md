@@ -3,7 +3,7 @@
 ## 当前状态
 
 - 分支：`fix/a1-recheck-f1-f4-20261112`
-- HEAD：`4dfd26b`（O3 文档记录）；产品代码最后功能性提交 `eb31dff`。
+- HEAD：`8a7002e`；C 的 `LibraryBusyError` 已合并并跑全量；产品代码最后功能性提交 `8a7002e`。
 - 产品工作树干净；仅有运行时更新的 `AGENTS.md`/`CLAUDE.md` 不纳入本批提交。
 - **不是生产可用，不是真实图库迁移，不是删除/释放授权。**
 
@@ -21,11 +21,13 @@
 | `b46daa8` | FR-03 结构化内容冲突 |
 | `ef9038f` | FR-07/08/10 checkpoint/流式摘要/读取上限/load busy |
 | `eb31dff` | O3 计划头 root_revision 与回执强制对照 |
+| `bdfe8c4` | FR-04 缺失 `_strict_object` 导入的 P1 修复 |
+| `8a7002e` | C：`LibraryBusyError` 写入者锁竞争类型化，已全量 |
 | `1603252` / `4dfd26b` | 批次记录与交接文档 |
 
 ## 当前验证
 
-- 全量：**1368 项 / 1364 通过 / 0 失败 / 1 个 Tk/Tcl 环境 error / 3 skip**。
+- 全量：**1375 项 / 1371 通过 / 0 失败 / 1 个 Tk/Tcl 环境 error / 3 skip**。
   - 唯一 error 是 `test_collection_presentation` 的 Tk/Tcl setup，不是归档代码。
 - F5-v2 在 `6790565`：**576/576**，2,000 文件、12 段、payload 3,109,761 B。
 - 当前树 `p100-current-eb31`：**2,000 文件通过**，12 段、payload 3,109,779 B、10.37 s。
