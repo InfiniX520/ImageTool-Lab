@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
@@ -67,6 +68,25 @@ def connect(path: Path):
     return conn
 
 
+@contextmanager
+def archive_tx(path: Path):
+    """A caller-owned write transaction.
+
+    The archive writers refuse to run without one, so each case opens its own
+    BEGIN IMMEDIATE instead of relying on an implicit autocommit statement.
+    """
+    conn = connect(path)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+        conn.close()
+
+
 def test_explicit_copy_acknowledgement_and_backup_separation(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
@@ -97,7 +117,7 @@ def test_migration_preserves_old_rows_and_verified_backup(tmp_path):
             assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
             assert conn.execute("SELECT job_id FROM jobs").fetchone()[0] == job_id
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         tables = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
@@ -142,7 +162,7 @@ def test_idempotent_second_run_uses_new_backup_without_changes(tmp_path):
 
 
 def test_unknown_future_and_incomplete_schemas_are_refused_without_changes(tmp_path):
-    for index, version in enumerate(("4", "2", "unknown")):
+    for index, version in enumerate(("5", "3", "2", "unknown")):
         source = tmp_path / f"bad-{index}.sqlite3"
         make_v1(source)
         with sqlite3.connect(source) as conn:
@@ -185,7 +205,7 @@ def test_archive_asset_and_intent_are_distinct_from_download_history(tmp_path):
     source = tmp_path / "source.sqlite3"
     job_id = make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         record_transfer_intent(
             conn, CONTENT, PATH, intent_id="intent-1", root_revision=1,
@@ -207,7 +227,7 @@ def test_local_evidence_round_trip_and_state_binding(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         for observation in (
             local(), local(LocalState.MISSING, check_id="local-2"),
@@ -226,7 +246,7 @@ def test_stale_or_conflicting_asset_and_evidence_are_rejected(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="user_selected")
         with pytest.raises(ContractError):
             ensure_archive_asset(conn, CONTENT, PATH, source_kind="unknown")
@@ -272,7 +292,7 @@ def test_archive_upload_report_does_not_become_verified(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         _sealed_package(conn)
         evidence = ArchiveEvidence(
@@ -290,7 +310,7 @@ def test_verified_archive_must_have_matching_readback_and_containing_package(tmp
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         evidence = ArchiveEvidence(
             CONTENT, ArchiveState.USER_RETURNED_VERIFIED, "archive-1", TIME, "location-1",
@@ -308,7 +328,7 @@ def test_release_record_requires_verified_matching_facts_not_only_a_flag(tmp_pat
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         _sealed_package(conn)
         record_local_observation(conn, local(LocalState.MISSING))
@@ -327,7 +347,7 @@ def test_tampered_indexed_evidence_cannot_survive_validation(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         record_local_observation(conn, local())
         conn.execute("UPDATE archive_local_checks SET run_id='another-run' WHERE check_id='local-1'")
@@ -361,7 +381,7 @@ def test_synthetic_file_observation_inventory_and_persistence_work_together(tmp_
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, content, path, source_kind="observed_existing")
         record_local_observation(conn, observation.evidence, result=observation)
         validate_archive_facts(conn)
@@ -389,7 +409,7 @@ def test_legacy_baseline_is_a_new_fact_not_a_historical_hash_match(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, content, PATH, source_kind="observed_existing")
         record_local_observation(conn, observation.evidence, result=observation)
         validate_archive_facts(conn)
@@ -411,7 +431,7 @@ def test_cancelled_or_exhausted_observation_can_be_saved_without_reuse(tmp_path)
         source = tmp_path / f"source-{index}.sqlite3"
         make_v1(source)
         migrate_archive_copy(source, tmp_path / f"backup-{index}.sqlite3", temporary_copy_confirmed=True)
-        with connect(source) as conn:
+        with archive_tx(source) as conn:
             ensure_archive_asset(conn, content, PATH, source_kind="observed_existing")
             class Stop:
                 def is_set(self):
@@ -441,7 +461,7 @@ def test_content_revision_requires_expected_old_path_binding(tmp_path):
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
     newer = ContentVersion("asset-1", 2, 5, "c" * 64)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         bind_archive_path(conn, CONTENT, PATH, bound_at=TIME)
         ensure_archive_asset(conn, newer, PATH, source_kind="observed_existing")
@@ -463,7 +483,7 @@ def test_release_events_append_after_verified_checks_and_stop_at_terminal(tmp_pa
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         _sealed_package(conn)
         record_local_observation(conn, local())
@@ -506,7 +526,7 @@ def test_null_content_digest_cannot_be_upgraded_to_verified(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         _sealed_package(conn)
         record_archive_observation(
@@ -530,9 +550,8 @@ def test_row_factory_asset_reuse_is_exact(tmp_path):
     source = tmp_path / "source.sqlite3"
     make_v1(source)
     migrate_archive_copy(source, tmp_path / "backup.sqlite3", temporary_copy_confirmed=True)
-    with sqlite3.connect(source) as conn:
+    with archive_tx(source) as conn:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
         other = PathRef(relative_path="library/artist/alias.png")
         ensure_archive_asset(conn, CONTENT, PATH, source_kind="observed_existing")
         ensure_archive_asset(conn, CONTENT, other, source_kind="observed_existing")
@@ -549,7 +568,7 @@ def test_download_receipt_must_match_artifact_path_size_and_digest(tmp_path):
     output_ref = json.dumps({
         "kind": "project", "root_id": "project", "relative_path": PATH.relative_path,
     })
-    with connect(source) as conn:
+    with archive_tx(source) as conn:
         conn.execute(
             "INSERT INTO batches (batch_id,job_id,command_id,budget_json,phase,created_at) "
             "VALUES ('batch-1',?,'command-1','{}','queued',?)",

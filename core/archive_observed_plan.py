@@ -64,6 +64,7 @@ class ObservedPlanIssueCode(StrEnum):
     CONTENT_SIZE_MISMATCH = "content_size_mismatch"
     DUPLICATE_PATH = "duplicate_path"
     MIXED_ROOT = "mixed_root"
+    RECEIPT_SOURCE_MISMATCH = "receipt_source_mismatch"
     INCOMPLETE_INVENTORY = "incomplete_inventory"
     INVALID_ITEM = "invalid_item"
 
@@ -225,6 +226,76 @@ def _decision_issues(item: ObservedPlanItem) -> tuple[ObservedPlanIssue, ...]:
     return tuple(issues)
 
 
+def _receipt_source_issues(
+    items: Iterable[ObservedPlanItem], receipt,
+) -> tuple[ObservedPlanIssue, ...]:
+    """Refuse a scope receipt that cannot belong to these exact observations.
+
+    A receipt proves one enumeration: its snapshot, and for every path its
+    modification time, physical object and size, must be the ones this observation
+    was taken from.  Only the fields a plan entry cannot carry are compared here -
+    a newer observation handed an older receipt used to be relabelled into the old
+    snapshot, receipt mtime and receipt identity.
+
+    Root generation stays with the plan store, which already refuses a receipt from
+    another generation.  Content facts are compared only when the receipt already
+    binds them.
+    """
+    if not isinstance(receipt, ScopeReceipt):
+        return ()  # the plan builders report a missing receipt themselves
+    facts = {
+        (fact.kind, fact.root_id.casefold(), fact.relative_path): fact
+        for fact in receipt.entry_facts
+    }
+    issues: list[ObservedPlanIssue] = []
+    for item in items:
+        candidate = item.resolution.candidate
+        content = item.resolution.content
+        fact = facts.get(
+            (candidate.kind, candidate.root_id.casefold(), candidate.relative_path)
+        )
+        if fact is None:
+            issues.append(_issue(
+                ObservedPlanIssueCode.RECEIPT_SOURCE_MISMATCH,
+                "The scope receipt does not name this enumerated path",
+                item=item, reason="path_not_in_receipt",
+            ))
+            continue
+        if receipt.snapshot_id != candidate.snapshot_id:
+            issues.append(_issue(
+                ObservedPlanIssueCode.RECEIPT_SOURCE_MISMATCH,
+                "The scope receipt describes another snapshot than this observation",
+                item=item, reason="snapshot_differs",
+            ))
+            continue
+        if fact.mtime_ns != candidate.mtime_ns:
+            issues.append(_issue(
+                ObservedPlanIssueCode.RECEIPT_SOURCE_MISMATCH,
+                "The scope receipt records another modification time for this path",
+                item=item, reason="mtime_differs",
+            ))
+            continue
+        if (fact.physical_identity != candidate.physical_identity
+                or fact.size_bytes != candidate.size_bytes):
+            issues.append(_issue(
+                ObservedPlanIssueCode.RECEIPT_SOURCE_MISMATCH,
+                "The scope receipt records another physical object or size",
+                item=item, reason="physical_facts_differ",
+            ))
+            continue
+        if content is not None and fact.content_sha256 is not None and (
+            fact.content_asset_id != content.asset_id
+            or fact.content_revision != content.revision
+            or fact.content_sha256 != content.sha256
+        ):
+            issues.append(_issue(
+                ObservedPlanIssueCode.RECEIPT_SOURCE_MISMATCH,
+                "The scope receipt already binds different content for this path",
+                item=item, reason="content_differs",
+            ))
+    return tuple(issues)
+
+
 def _checked_selection(items: Iterable[ObservedPlanItem]) -> _Selection:
     supplied = tuple(items)
     issues: list[ObservedPlanIssue] = []
@@ -316,7 +387,11 @@ def prepare_observed_plan(
     legality, inventory rules, capacity estimates and plan bounds are likewise
     the core objects' own validation.  Nothing is written and nothing is sealed.
     """
-    selection = _checked_selection(items)
+    supplied = tuple(items)
+    selection = _checked_selection(supplied)
+    receipt_issues = _receipt_source_issues(supplied, receipt)
+    if receipt_issues:
+        raise ObservedPlanEntryError(receipt_issues)
     inventory = build_archive_inventory(
         selection.groups, batch_id=batch_id, policy=inventory_policy,
     )

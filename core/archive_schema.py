@@ -27,7 +27,10 @@ from core.preservation_policy import (
 )
 from core.task_contracts import ContractError, PathRef, canonical_json, normalize_json
 
-ARCHIVE_SCHEMA_VERSION = "3"
+# Schema 4 adds the append-only acceptance table that separates "what a path is
+# currently bound to" from "which diagnostic observations were written"; schema 3
+# copies are refused rather than silently reinterpreted.
+ARCHIVE_SCHEMA_VERSION = "4"
 ARCHIVE_PROTOCOL_VERSION = 2
 # One document budget for plan headers, capacity and inventory JSON at both the
 # writer and the audit.  The previous 1 MiB audit limit rejected a legal plan
@@ -39,7 +42,8 @@ ARCHIVE_PLAN_SEGMENT_COUNT = 128
 ARCHIVE_TABLES = frozenset({
     "archive_batches", "archive_contents", "archive_assets", "archive_transfer_intents",
     "archive_local_checks", "archive_packages", "archive_members", "archive_objects",
-    "archive_path_bindings", "archive_groups", "archive_group_objects", "archive_locations",
+    "archive_path_bindings", "archive_path_acceptances", "archive_groups",
+    "archive_group_objects", "archive_locations",
     "archive_checks", "archive_releases", "archive_plan_segments",
 })
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
@@ -51,6 +55,37 @@ class ArchiveMigrationError(Exception):
 
 class ArchiveSchemaError(ArchiveMigrationError):
     """The source, destination or recorded evidence violates this schema."""
+
+
+class ArchiveTransactionRequiredError(ArchiveSchemaError):
+    """A low-level write was attempted without a caller-owned transaction.
+
+    This module never opens, commits or rolls back a transaction.  Writing inside
+    an implicit autocommit statement is exactly how a failed multi-step accept used
+    to leave content/asset rows behind, so every public writer refuses it before
+    reading or writing anything.
+    """
+
+
+class ArchiveBindingConflictError(ArchiveSchemaError):
+    """The current path binding is not the one the resolution was computed from.
+
+    The resolution carries the expected old binding as immutable input; when the
+    database no longer matches it, the caller must re-observe and re-resolve.  No
+    fact is written and no newer revision is adopted automatically.
+    """
+
+    def __init__(
+        self, path_key: str, expected_content_key: str | None,
+        actual_content_key: str | None, reason: str,
+    ):
+        self.path_key = path_key
+        self.expected_content_key = expected_content_key
+        self.actual_content_key = actual_content_key
+        self.reason = reason
+        super().__init__(
+            "Path binding for %s changed since it was resolved (%s)" % (path_key, reason)
+        )
 
 
 class ArchiveIdentityConfirmationRequired(ArchiveSchemaError):
@@ -76,6 +111,28 @@ def _token(value: object, field: str) -> str:
     if not isinstance(value, str) or _TOKEN.fullmatch(value) is None:
         raise ContractError(f"Invalid {field}")
     return value
+
+
+def _require_write_transaction(conn: sqlite3.Connection, action: str) -> None:
+    """Require a unit of work the caller owns, before the first read.
+
+    Nothing here commits or rolls back: the caller's with-block (or its explicit
+    BEGIN/COMMIT) stays the only owner of durability.  A connection in true
+    autocommit mode (isolation_level is None) has no such unit, so it is refused
+    immediately - that is exactly how a failed multi-step accept used to leave
+    content and asset rows behind.  When the connection is in a managed isolation
+    mode, one BEGIN IMMEDIATE is issued so the expected-binding comparison and every
+    write happen under the same write lock.
+    """
+    if not isinstance(conn, sqlite3.Connection):
+        raise ContractError("An explicit sqlite3 connection is required")
+    if conn.in_transaction:
+        return
+    if conn.isolation_level is None:
+        raise ArchiveTransactionRequiredError(
+            action + " requires a caller-owned transaction"
+        )
+    conn.execute("BEGIN IMMEDIATE")
 
 
 def _plain_json(value: object) -> object:
@@ -179,17 +236,22 @@ def _require_asset_link(
     error: type[Exception] = ContractError,
     message: str = "Asset path is not indexed for this exact content",
 ) -> None:
-    """Require the asset row and its canonical path, independent of source labels."""
+    """Require the asset row for this path key and these exact content facts.
+
+    The comparison is by identity key, not by display spelling: one Windows
+    directory entry reached through another ASCII case spelling is the same
+    asset, and the row keeps the spelling it was first indexed with.
+    """
     if not isinstance(content, ContentVersion) or not isinstance(path, PathRef):
         raise error("Expected content and path facts")
     row = conn.execute(
-        """SELECT content_key,asset_id,revision,path_key,path_json,size_bytes,sha256
+        """SELECT content_key,asset_id,revision,path_key,size_bytes,sha256
            FROM archive_assets WHERE asset_id=? AND revision=? AND path_key=?""",
         (content.asset_id, content.revision, path.identity_key),
     ).fetchone()
     expected = (
         _content_key(content), content.asset_id, content.revision, path.identity_key,
-        _path_json(path), content.size_bytes, content.sha256,
+        content.size_bytes, content.sha256,
     )
     if row is None or tuple(row) != expected:
         raise error(message)
@@ -238,11 +300,36 @@ ARCHIVE_DDL = (
             source_kind != 'download_receipt' AND artifact_id IS NULL
         ))
     )""",
+    """CREATE TABLE archive_path_acceptances (
+        acceptance_id TEXT PRIMARY KEY,
+        path_key TEXT NOT NULL,
+        content_key TEXT NOT NULL REFERENCES archive_contents(content_key),
+        asset_id TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        expected_content_key TEXT REFERENCES archive_contents(content_key),
+        root_revision INTEGER NOT NULL CHECK (root_revision >= 0),
+        check_id TEXT REFERENCES archive_local_checks(check_id),
+        file_device TEXT CHECK (file_device IS NULL OR (
+            length(file_device) BETWEEN 1 AND 32 AND file_device NOT GLOB '*[^0-9]*'
+        )),
+        file_index TEXT CHECK (file_index IS NULL OR (
+            length(file_index) BETWEEN 1 AND 32 AND file_index NOT GLOB '*[^0-9]*'
+        )),
+        accepted_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        FOREIGN KEY (asset_id, revision, path_key) REFERENCES archive_assets(
+            asset_id, revision, path_key
+        ),
+        CHECK ((file_device IS NULL AND file_index IS NULL) OR
+               (file_device IS NOT NULL AND file_index IS NOT NULL)),
+        CHECK (check_id IS NOT NULL OR file_device IS NULL)
+    )""",
     """CREATE TABLE archive_path_bindings (
         path_key TEXT PRIMARY KEY,
         asset_id TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision >= 0),
         bound_at TEXT NOT NULL,
+        acceptance_id TEXT REFERENCES archive_path_acceptances(acceptance_id),
         FOREIGN KEY (asset_id, revision, path_key) REFERENCES archive_assets(
             asset_id, revision, path_key
         )
@@ -447,6 +534,7 @@ ARCHIVE_DDL = (
     )""",
     "CREATE INDEX idx_archive_assets_content ON archive_assets(content_key, path_key)",
     "CREATE INDEX idx_archive_bindings_asset ON archive_path_bindings(asset_id, revision)",
+    "CREATE INDEX idx_archive_acceptances_path ON archive_path_acceptances(path_key, accepted_at, acceptance_id)",
     "CREATE INDEX idx_archive_plan_segments_batch ON archive_plan_segments(batch_id, segment_index)",
     "CREATE INDEX idx_archive_intents_asset ON archive_transfer_intents(asset_id, revision, observed_at)",
     "CREATE INDEX idx_archive_local_run ON archive_local_checks(run_id, path_key, checked_at)",
@@ -699,13 +787,71 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
                 raise ArchiveSchemaError("Download receipt does not prove this exact content")
         assets[(asset_id, revision, path_key)] = (content, path, source_kind, artifact_id)
 
-    for path_key, asset_id, revision, bound_at in conn.execute(
-        "SELECT path_key,asset_id,revision,bound_at FROM archive_path_bindings"
+    content_keys = {key for key, _ in content_facts.values()}
+    acceptances: dict[str, tuple[str, str, int]] = {}
+    for row in conn.execute(
+        """SELECT acceptance_id,path_key,content_key,asset_id,revision,
+                  expected_content_key,root_revision,check_id,file_device,file_index,
+                  accepted_at,reason
+           FROM archive_path_acceptances"""
+    ):
+        (acceptance_id, path_key, content_key, asset_id, revision,
+         expected_content_key, root_revision, check_id, device, index,
+         accepted_at, reason) = row
+        asset = assets.get((asset_id, revision, path_key))
+        if asset is None:
+            raise ArchiveSchemaError("Path acceptance has no exact asset row")
+        content = asset[0]
+        if content_key != _content_key(content):
+            raise ArchiveSchemaError("Path acceptance content differs from its asset")
+        if expected_content_key is not None and expected_content_key not in content_keys:
+            raise ArchiveSchemaError("Path acceptance expects an unknown content row")
+        if type(root_revision) is not int or root_revision < 0:
+            raise ArchiveSchemaError("Path acceptance root revision is invalid")
+        if _TOKEN.fullmatch(reason) is None:
+            raise ArchiveSchemaError("Path acceptance reason is invalid")
+        if not isinstance(accepted_at, str) or not accepted_at or len(accepted_at) > 64:
+            raise ArchiveSchemaError("Path acceptance time is invalid")
+        if (device is None) != (index is None):
+            raise ArchiveSchemaError("Path acceptance physical identity is incomplete")
+        if check_id is None:
+            if device is not None:
+                raise ArchiveSchemaError(
+                    "Path acceptance claims an unobserved physical object")
+        else:
+            check = conn.execute(
+                """SELECT path_key,root_revision,observed_size,observed_sha256,
+                          file_device,file_index
+                   FROM archive_local_checks WHERE check_id=?""",
+                (check_id,),
+            ).fetchone()
+            if check is None:
+                raise ArchiveSchemaError("Path acceptance references a missing local check")
+            if (
+                check[0] != path_key
+                or check[1] != root_revision
+                or check[2] != content.size_bytes
+                or check[3] != content.sha256
+                or check[4] != device
+                or check[5] != index
+            ):
+                raise ArchiveSchemaError("Path acceptance differs from its local check")
+        acceptances[acceptance_id] = (path_key, asset_id, revision)
+
+    for path_key, asset_id, revision, bound_at, acceptance_id in conn.execute(
+        "SELECT path_key,asset_id,revision,bound_at,acceptance_id FROM archive_path_bindings"
     ):
         if (asset_id, revision, path_key) not in assets:
             raise ArchiveSchemaError("Path binding has no exact asset row")
         if not isinstance(bound_at, str) or not bound_at or len(bound_at) > 64:
             raise ArchiveSchemaError("Path binding time is invalid")
+        if acceptance_id is not None:
+            accepted = acceptances.get(acceptance_id)
+            if accepted is None:
+                raise ArchiveSchemaError("Path binding references a missing acceptance")
+            if accepted != (path_key, asset_id, revision):
+                raise ArchiveSchemaError("Path binding does not match its acceptance")
+
     if conn.execute(
         """SELECT COUNT(*) FROM (
                SELECT path_key FROM archive_assets
@@ -750,7 +896,7 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
         if (
             _content_key(content) != row[1]
             or evidence.content != content
-            or evidence.path != path
+            or evidence.path.identity_key != path.identity_key
         ):
             raise ArchiveSchemaError("Local evidence differs from its indexed facts")
         expected = (
@@ -937,6 +1083,7 @@ def ensure_archive_asset(
     source_kind: str, artifact_id: str | None = None,
 ) -> str:
     """Insert one immutable content/path mapping; never relabel a historical asset."""
+    _require_write_transaction(conn, "Indexing an archive asset")
     if not isinstance(content, ContentVersion) or not isinstance(path, PathRef):
         raise ContractError("Expected content and path facts")
     content_key = _content_key(content)
@@ -996,8 +1143,14 @@ def ensure_archive_asset(
         (content.asset_id, content.revision, path.identity_key),
     ).fetchone()
     if existing_asset is not None:
-        if tuple(existing_asset) != values:
-            raise ContractError("Existing asset has different immutable facts")
+        stored = tuple(existing_asset)
+        if stored != values:
+            # Index 4 is path_json: the display spelling.  Two spellings of one
+            # Windows directory entry share the identity key, so they are the same
+            # asset row; the row keeps the spelling it was first indexed with and
+            # the immutable facts must still agree exactly.
+            if stored[:4] != values[:4] or stored[5:] != values[5:]:
+                raise ContractError("Existing asset has different immutable facts")
         return content_key
     conn.execute(
         """INSERT INTO archive_assets (
@@ -1007,26 +1160,150 @@ def ensure_archive_asset(
     return content_key
 
 
+@dataclass(frozen=True, slots=True)
+class PathAcceptance:
+    """One accepted path/content binding event and the evidence behind it."""
+
+    acceptance_id: str
+    path_key: str
+    content: ContentVersion
+    content_key: str
+    expected_content_key: str | None
+    root_revision: int
+    check_id: str | None
+    physical_identity: FileIdentity | None
+    accepted_at: str
+    reason: str
+
+
+def _acceptance_key(path_key: str, content_key: str, check_id: str) -> str:
+    """Deterministic identity of one accepted evidence set.
+
+    The same path, content generation and local check therefore map to the same
+    acceptance row: applying the same observation twice appends nothing, while any
+    different evidence produces a different row.
+    """
+    return hashlib.sha256(
+        canonical_json([path_key, content_key, check_id]).encode("utf-8")
+    ).hexdigest()
+
+
+def record_path_acceptance(
+    conn: sqlite3.Connection, content: ContentVersion, path: PathRef, *,
+    check_id: str, root_revision: int, expected_content_key: str | None,
+    accepted_at: str, reason: str,
+) -> PathAcceptance:
+    """Append one acceptance event for this path and return it.
+
+    The accepted physical object is read from the referenced local check, never
+    from the caller, so a caller cannot claim an object it did not observe.  The
+    check must name this path, this root generation and exactly these bytes.
+    """
+    _require_write_transaction(conn, "Recording a path acceptance")
+    if not isinstance(content, ContentVersion) or not isinstance(path, PathRef):
+        raise ContractError("Expected content and path facts")
+    _token(check_id, "acceptance check ID")
+    _token(reason, "acceptance reason")
+    if type(root_revision) is not int or root_revision < 0:
+        raise ContractError("Invalid acceptance root revision")
+    if not isinstance(accepted_at, str) or not accepted_at or len(accepted_at) > 64:
+        raise ContractError("Invalid acceptance time")
+    if expected_content_key is not None and (
+        not isinstance(expected_content_key, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_content_key) is None
+    ):
+        raise ContractError("Invalid expected content key for a path acceptance")
+    _require_asset_link(conn, content, path)
+    content_key = _content_key(content)
+    check = conn.execute(
+        """SELECT path_key,root_revision,observed_size,observed_sha256,
+                  file_device,file_index
+           FROM archive_local_checks WHERE check_id=?""",
+        (check_id,),
+    ).fetchone()
+    if check is None:
+        raise ContractError("An acceptance must reference a stored local check")
+    if check[0] != path.identity_key or check[1] != root_revision:
+        raise ArchiveSchemaError("Accepted check belongs to another path or root generation")
+    if (
+        content.sha256 is None
+        or check[2] != content.size_bytes
+        or check[3] != content.sha256
+    ):
+        raise ArchiveSchemaError("Accepted check does not prove this exact content")
+    identity = None
+    if check[4] is not None and check[5] is not None:
+        try:
+            identity = FileIdentity(int(check[4]), int(check[5]))
+        except (TypeError, ValueError) as exc:
+            raise ArchiveSchemaError("Stored accepted physical identity is invalid") from exc
+    acceptance = PathAcceptance(
+        _acceptance_key(path.identity_key, content_key, check_id),
+        path.identity_key, content, content_key, expected_content_key, root_revision,
+        check_id, identity, accepted_at, reason,
+    )
+    values = (
+        acceptance.path_key, acceptance.content_key, content.asset_id, content.revision,
+        acceptance.expected_content_key, acceptance.root_revision, acceptance.check_id,
+        None if identity is None else str(identity.device),
+        None if identity is None else str(identity.file_index),
+        acceptance.accepted_at, acceptance.reason,
+    )
+    existing = conn.execute(
+        """SELECT path_key,content_key,asset_id,revision,expected_content_key,
+                  root_revision,check_id,file_device,file_index,accepted_at,reason
+           FROM archive_path_acceptances WHERE acceptance_id=?""",
+        (acceptance.acceptance_id,),
+    ).fetchone()
+    if existing is not None:
+        if tuple(existing) != values:
+            raise ArchiveSchemaError("Acceptance identity already has different facts")
+        return acceptance
+    conn.execute(
+        """INSERT INTO archive_path_acceptances (
+            acceptance_id,path_key,content_key,asset_id,revision,expected_content_key,
+            root_revision,check_id,file_device,file_index,accepted_at,reason
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (acceptance.acceptance_id, *values),
+    )
+    return acceptance
+
+
 def bind_archive_path(
     conn: sqlite3.Connection, content: ContentVersion, path: PathRef, *,
     bound_at: str, expected_content_key: str | None = None,
+    acceptance_id: str | None = None,
 ) -> None:
-    """Point a path at a new content revision only with an explicit expected old key."""
+    """Point a path at a content revision only with an explicit expected old key.
+
+    expected_content_key=None means "this path must still be unbound".  The
+    comparison always uses the stored binding; a value re-read by the caller is
+    never substituted for the resolution input.  acceptance_id records which
+    accepted evidence the binding now points at.
+    """
+    _require_write_transaction(conn, "Binding an archive path")
     if not isinstance(bound_at, str) or not bound_at or len(bound_at) > 64:
         raise ContractError("Invalid path binding time")
+    if acceptance_id is not None:
+        _token(acceptance_id, "path acceptance ID")
+        if conn.execute(
+            "SELECT 1 FROM archive_path_acceptances WHERE acceptance_id=?",
+            (acceptance_id,),
+        ).fetchone() is None:
+            raise ContractError("Path binding references an unknown acceptance")
     _require_asset_link(conn, content, path)
     new_key = _content_key(content)
     current = conn.execute(
-        "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
+        "SELECT asset_id,revision,acceptance_id FROM archive_path_bindings WHERE path_key=?",
         (path.identity_key,),
     ).fetchone()
     if current is None:
         if expected_content_key is not None:
             raise ContractError("First path binding cannot expect a previous content")
         conn.execute(
-            "INSERT INTO archive_path_bindings (path_key,asset_id,revision,bound_at) "
-            "VALUES (?,?,?,?)",
-            (path.identity_key, content.asset_id, content.revision, bound_at),
+            "INSERT INTO archive_path_bindings (path_key,asset_id,revision,bound_at,acceptance_id) "
+            "VALUES (?,?,?,?,?)",
+            (path.identity_key, content.asset_id, content.revision, bound_at, acceptance_id),
         )
         return
     current_key = conn.execute(
@@ -1036,29 +1313,44 @@ def bind_archive_path(
     if current_key is None:
         raise ContractError("Current path binding has no exact asset row")
     if current_key[0] == new_key:
+        if acceptance_id is not None and acceptance_id != current[2]:
+            conn.execute(
+                "UPDATE archive_path_bindings SET bound_at=?, acceptance_id=? WHERE path_key=?",
+                (bound_at, acceptance_id, path.identity_key),
+            )
         return
     if expected_content_key is None or expected_content_key != current_key[0]:
         raise ContractError("Path binding changed without the expected old content")
     conn.execute(
-        "UPDATE archive_path_bindings SET asset_id=?, revision=?, bound_at=? WHERE path_key=?",
-        (content.asset_id, content.revision, bound_at, path.identity_key),
+        """UPDATE archive_path_bindings
+           SET asset_id=?, revision=?, bound_at=?, acceptance_id=? WHERE path_key=?""",
+        (content.asset_id, content.revision, bound_at, acceptance_id, path.identity_key),
     )
 
 
 def load_content_binding(
     conn: sqlite3.Connection, path: PathRef,
 ) -> ContentBinding | None:
-    """Read the current path binding and its last observed physical object."""
+    """Read the current path binding and the evidence it explicitly accepts.
+
+    The accepted physical object comes from the acceptance row the binding points
+    at.  Diagnostic observations are never consulted here: recording a changed,
+    missing or unreadable check cannot move what this path has accepted.
+    """
     if not isinstance(path, PathRef):
         raise ContractError("Expected a path reference")
     row = conn.execute(
-        """SELECT c.content_key,c.asset_id,c.revision,c.size_bytes,c.sha256
+        """SELECT c.content_key,c.asset_id,c.revision,c.size_bytes,c.sha256,
+                  b.acceptance_id,acc.root_revision,acc.check_id,
+                  acc.file_device,acc.file_index
            FROM archive_path_bindings AS b
            JOIN archive_assets AS a
              ON a.asset_id=b.asset_id AND a.revision=b.revision
             AND a.path_key=b.path_key
            JOIN archive_contents AS c
              ON c.asset_id=a.asset_id AND c.revision=a.revision
+           LEFT JOIN archive_path_acceptances AS acc
+             ON acc.acceptance_id=b.acceptance_id
            WHERE b.path_key=?""",
         (path.identity_key,),
     ).fetchone()
@@ -1067,25 +1359,28 @@ def load_content_binding(
     content = ContentVersion(row[1], row[2], row[3], row[4])
     if row[0] != _content_key(content):
         raise ArchiveSchemaError("Path binding content identity differs from its facts")
+    acceptance_id, root_revision = row[5], row[6]
+    if acceptance_id is not None and root_revision is None:
+        raise ArchiveSchemaError("Path binding references a missing acceptance")
     physical = None
-    observed = conn.execute(
-        """SELECT file_device,file_index FROM archive_local_checks
-           WHERE path_key=? AND file_device IS NOT NULL AND file_index IS NOT NULL
-           ORDER BY checked_at DESC, check_id DESC LIMIT 1""",
-        (path.identity_key,),
-    ).fetchone()
-    if observed is not None:
+    if row[8] is not None and row[9] is not None:
         try:
-            physical = FileIdentity(int(observed[0]), int(observed[1]))
+            physical = FileIdentity(int(row[8]), int(row[9]))
         except (TypeError, ValueError) as exc:
-            raise ArchiveSchemaError("Stored observed physical identity is invalid") from exc
-    return ContentBinding(content, physical)
+            raise ArchiveSchemaError("Stored accepted physical identity is invalid") from exc
+    return ContentBinding(content, physical, acceptance_id, root_revision)
+
 
 
 def find_known_content(
     conn: sqlite3.Connection, sha256: str, size_bytes: int,
 ) -> ContentVersion | None:
-    """Find one already indexed content generation for these exact bytes."""
+    """Find one already indexed content generation for these exact bytes.
+
+    The result is byte evidence, not ownership: it says "these bytes are already
+    indexed", not "this path may adopt that asset's generation".  Callers must
+    compare asset_id before reusing a revision.
+    """
     if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise ContractError("Invalid content digest")
     if type(size_bytes) is not int or size_bytes < 0:
@@ -1133,81 +1428,204 @@ def resolve_observed_content(
 def _asset_row_is_exact(
     conn: sqlite3.Connection, content: ContentVersion, path: PathRef,
 ) -> bool:
+    """True when the indexed asset row already carries these exact facts.
+
+    The stored display spelling is not compared: it belongs to the row, and an
+    ASCII case alias of the same directory entry must not rewrite it.
+    """
     row = conn.execute(
-        """SELECT content_key,asset_id,revision,path_key,path_json,size_bytes,sha256
+        """SELECT content_key,asset_id,revision,path_key,size_bytes,sha256
            FROM archive_assets WHERE asset_id=? AND revision=? AND path_key=?""",
         (content.asset_id, content.revision, path.identity_key),
     ).fetchone()
     expected = (
         _content_key(content), content.asset_id, content.revision, path.identity_key,
-        _path_json(path), content.size_bytes, content.sha256,
+        content.size_bytes, content.sha256,
     )
     return row is not None and tuple(row) == expected
 
 
+def _bound_content_key(
+    conn: sqlite3.Connection, path: PathRef,
+) -> tuple[str, int, str, int, str | None] | None:
+    """Return (asset_id, revision, content_key, size, sha256) of this path, or None."""
+    row = conn.execute(
+        "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
+        (path.identity_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    key = conn.execute(
+        """SELECT a.content_key,c.size_bytes,c.sha256
+           FROM archive_assets AS a
+           JOIN archive_contents AS c ON c.content_key=a.content_key
+           WHERE a.asset_id=? AND a.revision=? AND a.path_key=?""",
+        (row[0], row[1], path.identity_key),
+    ).fetchone()
+    if key is None:
+        raise ArchiveSchemaError("Current path binding has no exact asset row")
+    return row[0], row[1], key[0], key[1], key[2]
+
+
 def apply_content_resolution(
     conn: sqlite3.Connection, resolution: ContentResolution, *,
-    observed: ObservedFile | None = None, bound_at: str,
+    observed: ObservedFile, bound_at: str,
     source_kind: str = "observed_existing",
-) -> None:
+) -> PathAcceptance:
     """Write one resolved generation inside the caller's transaction.
 
-    The current binding is re-read here and the update carries the expected old
-    content key, so an out-of-band change cannot be overwritten silently.  A
-    replacement that would change the asset identity is refused with a
-    structured confirmation instead of a generic database error.
+    The expected old binding is the immutable one the resolution was computed
+    from - including "this path must not exist yet".  It is compared with the
+    stored binding before any row is written, so a resolution produced before the
+    rest of the world moved is refused instead of silently applied.  The only
+    tolerated mismatch is the exact one this call would write: the proposed
+    content is already the accepted binding, in which case nothing is overwritten
+    and the same acceptance is returned.
+
+    Every write happens in the caller's transaction, and the path binding always
+    points at the acceptance of the observation that justified it.
     """
+    _require_write_transaction(conn, "Applying a content resolution")
     if not isinstance(resolution, ContentResolution):
         raise ContractError("Expected a content resolution")
     if not isinstance(bound_at, str) or not bound_at or len(bound_at) > 64:
         raise ContractError("Invalid path binding time")
-    if observed is not None:
-        if not isinstance(observed, ObservedFile):
-            raise ContractError("Expected an observed file")
-        if observed.candidate != resolution.candidate:
-            raise ContractError("Observation candidate differs from the resolution")
+    if not isinstance(observed, ObservedFile):
+        raise ContractError("Expected an observed file")
+    if observed.candidate != resolution.candidate:
+        raise ContractError("Observation candidate differs from the resolution")
     if resolution.requires_attention or resolution.content is None:
         raise ArchiveIdentityConfirmationRequired(resolution)
     path = resolution.candidate.path
     content = resolution.content
     expected = resolution.previous_content
-    if (expected is not None and _content_key(expected) != _content_key(content)):
+    # The resolution states which expectation it carries.  "No binding exists" is a
+    # fact of its own: previous_content is then only the unknown placeholder the
+    # observation was probed with, never an expected old binding.
+    absent = resolution.expected_binding_absent
+    previous_key = None if expected is None else _content_key(expected)
+    expected_key = None if absent or expected is None else previous_key
+    new_key = _content_key(content)
+    if expected is not None and content.asset_id != expected.asset_id:
+        # A different logical asset cannot take over a path through a resolver
+        # output alone; that is a replacement decision, not a revision advance.
+        raise ArchiveIdentityConfirmationRequired(resolution)
+    if (not absent and expected is not None and expected_key != new_key
+            and content.revision <= expected.revision):
+        raise ArchiveSchemaError("Resolved content does not advance its revision")
+
+    if observed.observation is None or not observed.digest_complete:
+        raise ContractError("An accepted binding needs one complete observation")
+    check_id = observed.observation.evidence.check_id
+    root_revision = observed.observation.evidence.root_revision
+
+    # Compare the resolution's expected binding with the stored one first.
+    current = _bound_content_key(conn, path)
+    if current is None:
+        if expected_key is not None:
+            raise ArchiveBindingConflictError(
+                path.identity_key, expected_key, None, "expected_binding_missing")
+    elif current[2] != expected_key:
+        if current[2] != new_key:
+            raise ArchiveBindingConflictError(
+                path.identity_key, expected_key, current[2], "expected_binding_changed")
+        if (current[3], current[4]) != (content.size_bytes, content.sha256):
+            raise ArchiveBindingConflictError(
+                path.identity_key, expected_key, current[2], "content_facts_differ")
+        # Already exactly what this call would write: only the accepted evidence
+        # may be appended, never a second revision or an overwrite.
+        acceptance = _accepted_binding_acceptance(conn, path, current[2], check_id)
+        if acceptance is not None:
+            return acceptance
+    elif not absent and expected is not None and current[1] != expected.revision:
+        raise ArchiveBindingConflictError(
+            path.identity_key, expected_key, current[2], "expected_revision_changed")
+
+    rebound = rebind_observation(observed, resolution)
+    if rebound is None:
+        raise ContractError("The observation cannot justify an accepted binding")
+    # The stored diagnostic references the generation it was rebound to, so both
+    # that generation and the resolved one must be indexed before the observation
+    # row.  The raw probe is a read contract (it may carry the new size), never a
+    # stored fact.
+    for referenced in (expected, rebound.evidence.content):
+        if referenced is None or _content_key(referenced) == new_key:
+            continue
+        referenced_key = _content_key(referenced)
         if conn.execute(
-            "SELECT 1 FROM archive_contents WHERE content_key=?",
-            (_content_key(expected),),
+            "SELECT 1 FROM archive_contents WHERE content_key=?", (referenced_key,),
         ).fetchone() is None:
-            ensure_archive_asset(conn, expected, path, source_kind=source_kind)
+            ensure_archive_asset(conn, referenced, path, source_kind=source_kind)
         else:
-            _require_content(conn, expected)
+            _require_content(conn, referenced)
     if not _asset_row_is_exact(conn, content, path):
         ensure_archive_asset(conn, content, path, source_kind=source_kind)
-    if observed is not None:
-        rebound = rebind_observation(observed, resolution)
-        if rebound is not None:
-            record_local_observation(conn, rebound.evidence, result=rebound)
-    current = conn.execute(
-        "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
-        (path.identity_key,),
-    ).fetchone()
-    if current is None:
-        bind_archive_path(conn, content, path, bound_at=bound_at)
-        return
-    current_key = conn.execute(
-        """SELECT content_key FROM archive_assets
-           WHERE asset_id=? AND revision=? AND path_key=?""",
-        (current[0], current[1], path.identity_key),
-    ).fetchone()
-    if current_key is None:
-        raise ArchiveSchemaError("Current path binding has no exact asset row")
-    if current_key[0] == _content_key(content):
-        return
-    if current[0] != content.asset_id:
-        raise ArchiveIdentityConfirmationRequired(resolution)
-    if current[1] >= content.revision:
-        raise ArchiveSchemaError(
-            "Current path binding is not older than the resolved revision")
+    record_local_observation(conn, rebound.evidence, result=rebound)
+    acceptance = record_path_acceptance(
+        conn, content, path, check_id=check_id, root_revision=root_revision,
+        expected_content_key=expected_key, accepted_at=bound_at,
+        reason=resolution.reason,
+    )
     bind_archive_path(
-        conn, content, path, bound_at=bound_at, expected_content_key=current_key[0],
+        conn, content, path, bound_at=bound_at, expected_content_key=expected_key,
+        acceptance_id=acceptance.acceptance_id,
+    )
+    return acceptance
+
+
+def _accepted_binding_acceptance(
+    conn: sqlite3.Connection, path: PathRef, content_key: str, check_id: str,
+) -> PathAcceptance | None:
+    """Return the acceptance for this exact evidence when it is already current."""
+    if conn.execute(
+        "SELECT 1 FROM archive_local_checks WHERE check_id=?", (check_id,),
+    ).fetchone() is None:
+        return None
+    row = conn.execute(
+        """SELECT archive_path_acceptances.acceptance_id
+           FROM archive_path_bindings
+           JOIN archive_path_acceptances
+             ON archive_path_acceptances.acceptance_id=archive_path_bindings.acceptance_id
+           WHERE archive_path_bindings.path_key=?
+             AND archive_path_acceptances.content_key=?
+             AND archive_path_acceptances.check_id=?""",
+        (path.identity_key, content_key, check_id),
+    ).fetchone()
+    return None if row is None else _acceptance_by_id(conn, row[0])
+
+
+def _acceptance_by_id(
+    conn: sqlite3.Connection, acceptance_id: str,
+) -> PathAcceptance | None:
+    row = conn.execute(
+        """SELECT archive_path_acceptances.acceptance_id,
+                  archive_path_acceptances.path_key,
+                  archive_path_acceptances.content_key,
+                  archive_path_acceptances.asset_id,
+                  archive_path_acceptances.revision,
+                  archive_path_acceptances.expected_content_key,
+                  archive_path_acceptances.root_revision,
+                  archive_path_acceptances.check_id,
+                  archive_path_acceptances.file_device,
+                  archive_path_acceptances.file_index,
+                  archive_path_acceptances.accepted_at,
+                  archive_path_acceptances.reason,
+                  archive_contents.size_bytes,
+                  archive_contents.sha256
+           FROM archive_path_acceptances
+           JOIN archive_contents
+             ON archive_contents.content_key=archive_path_acceptances.content_key
+           WHERE archive_path_acceptances.acceptance_id=?""",
+        (acceptance_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    identity = None
+    if row[8] is not None and row[9] is not None:
+        identity = FileIdentity(int(row[8]), int(row[9]))
+    return PathAcceptance(
+        row[0], row[1], ContentVersion(row[3], row[4], row[12], row[13]), row[2],
+        row[5], row[6], row[7], identity, row[10], row[11],
     )
 
 
@@ -1216,6 +1634,7 @@ def record_transfer_intent(
     intent_id: str, root_revision: int, intent: RemovalIntent,
     source: str, observed_at: str, details: object = None,
 ) -> None:
+    _require_write_transaction(conn, "Recording a transfer intent")
     if not isinstance(intent, RemovalIntent) or source not in {
         "user_reported", "program_observed", "excluded_scope"
     }:
@@ -1242,7 +1661,14 @@ def record_local_observation(
     conn: sqlite3.Connection, evidence: LocalEvidence, *,
     result: LocalObservation | None = None,
 ) -> None:
-    """Persist exact evidence and, when supplied, its physical observation facts."""
+    """Persist exact evidence and, when supplied, its physical observation facts.
+
+    This is the append-only diagnostic stream; it never moves which evidence a
+    path has accepted.  Re-recording the same check ID with the same facts is
+    idempotent, because a diagnostic written before a confirmation is applied is
+    otherwise re-inserted by the acceptance step.
+    """
+    _require_write_transaction(conn, "Recording a local observation")
     if not isinstance(evidence, LocalEvidence):
         raise ContractError("Expected LocalEvidence")
     if result is not None and (
@@ -1262,6 +1688,24 @@ def record_local_observation(
             str(identity.device) if identity is not None else None,
             str(identity.file_index) if identity is not None else None,
         )
+    values = (
+        evidence.check_id, _content_key(content), content.asset_id, content.revision,
+        path.identity_key, evidence.root_revision, evidence.run_id, evidence.checked_at,
+        evidence.state.value, evidence.observed_size, evidence.observed_sha256,
+        _json(asdict(evidence)), *physical,
+    )
+    existing = conn.execute(
+        """SELECT content_key,asset_id,revision,path_key,root_revision,run_id,
+                  checked_at,state,observed_size,observed_sha256,evidence_json,
+                  observation_status,observation_reason,digest_complete,bytes_read,
+                  physical_size,physical_mtime_ns,file_device,file_index
+           FROM archive_local_checks WHERE check_id=?""",
+        (evidence.check_id,),
+    ).fetchone()
+    if existing is not None:
+        if tuple(existing) != values[1:]:
+            raise ArchiveSchemaError("Local check ID already has different facts")
+        return
     conn.execute(
         """INSERT INTO archive_local_checks (
             check_id,content_key,asset_id,revision,path_key,root_revision,run_id,
@@ -1269,10 +1713,7 @@ def record_local_observation(
             observation_status,observation_reason,digest_complete,bytes_read,
             physical_size,physical_mtime_ns,file_device,file_index
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (evidence.check_id, _content_key(content), content.asset_id, content.revision,
-         path.identity_key, evidence.root_revision, evidence.run_id, evidence.checked_at,
-         evidence.state.value, evidence.observed_size, evidence.observed_sha256,
-         _json(asdict(evidence)), *physical),
+        values,
     )
 
 
@@ -1281,6 +1722,7 @@ def record_archive_observation(
     observed_size: int | None = None, observed_sha256: str | None = None,
 ) -> None:
     """Store observations without turning a reported upload into a verified one."""
+    _require_write_transaction(conn, "Recording an archive observation")
     if not isinstance(evidence, ArchiveEvidence):
         raise ContractError("Expected ArchiveEvidence")
     content = evidence.content
@@ -1333,6 +1775,7 @@ def record_release_event(
     evidence: object = None,
 ) -> None:
     """Append one release event after proving both evidence checks are verified."""
+    _require_write_transaction(conn, "Recording a release event")
     _token(operation_id, "release operation ID")
     _token(event_id, "release event ID")
     _token(local_check_id, "local check ID")
@@ -1427,7 +1870,10 @@ def _inspect_source(conn: sqlite3.Connection) -> str:
     if version == ARCHIVE_SCHEMA_VERSION:
         _check_existing_objects(conn)
     elif version != "1":
-        raise ArchiveSchemaError("Unsupported schema version; schema 2 is a draft and cannot migrate")
+        raise ArchiveSchemaError(
+            "Unsupported schema version; only the schema 1 base library migrates "
+            "(schema 2 was a draft and schema 3 is superseded by schema 4)"
+        )
     return version
 
 
@@ -1541,5 +1987,8 @@ def _inspect_source_for_migration(conn: sqlite3.Connection) -> str:
     if version == ARCHIVE_SCHEMA_VERSION:
         _check_existing_objects(conn)
     elif version != "1":
-        raise ArchiveSchemaError("Unsupported schema version; schema 2 is a draft")
+        raise ArchiveSchemaError(
+            "Unsupported schema version; only the schema 1 base library migrates "
+            "(schema 2 was a draft and schema 3 is superseded by schema 4)"
+        )
     return version

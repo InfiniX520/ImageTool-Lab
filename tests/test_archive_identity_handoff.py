@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -61,6 +62,19 @@ def conn(tmp_path):
         yield connection
     finally:
         connection.close()
+
+
+@contextmanager
+def transaction(conn):
+    """A transaction the caller owns; the archive writers never open one."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 def write(root: Path, relative: str, data: bytes) -> Path:
@@ -130,11 +144,11 @@ def resolve_and_apply(
     )
     if resolution.requires_attention:
         return resolution, observed
-    apply_content_resolution(
-        conn, resolution, observed=observed, bound_at=TIME,
-        source_kind="observed_existing",
-    )
-    conn.commit()
+    with transaction(conn):
+        apply_content_resolution(
+            conn, resolution, observed=observed, bound_at=TIME,
+            source_kind="observed_existing",
+        )
     return resolution, observed
 
 
@@ -183,7 +197,9 @@ def test_first_baseline_creates_observation_and_content_generation(conn, tmp_pat
     assert resolution.kind is ResolutionKind.BASELINE
     assert resolution.content is not None and resolution.content.revision == 1
     assert resolution.content.sha256 == sha(payload)
-    assert resolution.previous_content is not None and resolution.previous_content.sha256 is None
+    # A first binding has no previous generation; the probe is not a binding.
+    assert resolution.previous_content is None
+    assert resolution.expected_binding_absent is True
 
     binding = load_content_binding(conn, entry.path)
     assert binding is not None and binding.content == resolution.content
@@ -347,11 +363,11 @@ def test_os_replace_same_name_returns_structured_confirmation_then_replacement(c
     assert resolution.next_action == "confirm_same_name_replacement"
     assert load_content_binding(conn, entry.path).content == first.content
     with pytest.raises(ArchiveIdentityConfirmationRequired):
-        apply_content_resolution(
-            conn, resolution, observed=observed, bound_at=TIME,
-            source_kind="observed_existing",
-        )
-    conn.rollback()
+        with transaction(conn):
+            apply_content_resolution(
+                conn, resolution, observed=observed, bound_at=TIME,
+                source_kind="observed_existing",
+            )
 
     confirmed_content = ContentVersion(
         new_entry.content.asset_id, 0, new_entry.content.size_bytes, sha(b"CCCC"),

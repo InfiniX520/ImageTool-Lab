@@ -750,10 +750,19 @@ class ResolutionKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ContentBinding:
-    """The current path binding plus the last observed physical object."""
+    """The current path binding and the last *accepted* physical evidence.
+
+    ``physical_identity`` and ``root_revision`` come from the acceptance the
+    binding points at (``acceptance_id``), never from the newest diagnostic
+    observation of this path.  A binding created by a plan has no acceptance, so
+    its physical object stays explicitly unknown and a later content change still
+    needs a human decision rather than a guessed "same object".
+    """
 
     content: ContentVersion
     physical_identity: FileIdentity | None = None
+    acceptance_id: str | None = None
+    root_revision: int | None = None
 
     def __post_init__(self):
         if not isinstance(self.content, ContentVersion):
@@ -761,6 +770,13 @@ class ContentBinding:
         if self.physical_identity is not None and not isinstance(
                 self.physical_identity, FileIdentity):
             raise ContractError("Invalid bound physical identity")
+        if self.acceptance_id is not None and (
+                not isinstance(self.acceptance_id, str) or not self.acceptance_id):
+            raise ContractError("Invalid accepted evidence reference")
+        if self.root_revision is not None:
+            _integer(self.root_revision, "binding root revision", 0, 2**63 - 1)
+        if self.physical_identity is not None and self.root_revision is None:
+            raise ContractError("An accepted physical object needs its root revision")
 
 
 @dataclass(frozen=True, slots=True)
@@ -775,10 +791,17 @@ class ContentResolution:
     next_action: str = "none"
     requires_confirmation: bool = False
     scope_complete: bool = True
+    # True when the resolver saw no binding at all for this path, so the expected
+    # old state is "must not exist".  previous_content is then only the unknown
+    # historical placeholder the observation was probed with; it is not a binding
+    # and must never be used as an expected old value.
+    expected_binding_absent: bool = False
 
     def __post_init__(self):
         if not isinstance(self.kind, ResolutionKind):
             raise ContractError("Invalid content resolution kind")
+        if type(self.expected_binding_absent) is not bool:
+            raise ContractError("Invalid absent-binding flag")
         if not isinstance(self.candidate, CandidateSnapshot):
             raise ContractError("Invalid content resolution candidate")
         for value, name in ((self.content, "content"),
@@ -817,10 +840,11 @@ def _resolution(
     content: ContentVersion | None, previous: ContentVersion | None,
     reason: str, *, next_action: str = "none",
     requires_confirmation: bool = False, scope_complete: bool = True,
+    expected_binding_absent: bool = False,
 ) -> ContentResolution:
     return ContentResolution(
         kind, candidate, content, previous, reason, next_action,
-        requires_confirmation, scope_complete,
+        requires_confirmation, scope_complete, expected_binding_absent,
     )
 
 
@@ -845,6 +869,15 @@ def resolve_content_version(
     Order is fixed: prove the observed bytes belong to the enumerated physical
     object first, then reuse, advance a revision, or stop for a replacement
     decision.  Nothing here writes a database or guesses a missing digest.
+
+    Logical asset identity is separate from byte de-duplication.  ``known_content``
+    is evidence that "these exact bytes are already indexed"; it may be reused only
+    when it belongs to this candidate's own logical asset.  A second, independent
+    file with identical bytes therefore always establishes its own generation
+    instead of inheriting another asset's revision, and ``digest_known`` alone can
+    never authorize adopting a generation whose owner is unknown.  Two paths over
+    one physical object (hardlinks) carry the same asset identity from the
+    enumerator, so they still reuse one generation.
     """
     if not isinstance(candidate, CandidateSnapshot) or not isinstance(observed, ObservedFile):
         raise ContractError("Expected a candidate and its observation")
@@ -882,25 +915,27 @@ def resolve_content_version(
             "reobserve")
 
     if existing is None:
+        # Byte de-duplication may reuse a generation only when it belongs to this
+        # exact logical asset.  Another asset's identical bytes are evidence, not
+        # an identity: adopting them would give one asset two owners.
         if (known_content is not None
+                and known_content.asset_id == observed_content.asset_id
                 and known_content.sha256 == observed_content.sha256
                 and known_content.size_bytes == observed_content.size_bytes):
             return _resolution(
                 ResolutionKind.REUSE, candidate, known_content, None,
-                "known_content_first_binding")
-        if digest_known:
-            return _resolution(
-                ResolutionKind.REUSE, candidate, observed_content, None,
-                "known_digest_first_binding")
+                "known_content_first_binding", expected_binding_absent=True)
         baseline_revision = max(
             observed.expected_content.revision, observed_content.revision) + 1
         baseline = ContentVersion(
             observed_content.asset_id, baseline_revision,
             observed_content.size_bytes, observed_content.sha256,
         )
+        # No previous binding exists, so previous_content stays None: the probe the
+        # observation was taken with is not a bound generation.
         return _resolution(
-            ResolutionKind.BASELINE, candidate, baseline, observed.expected_content,
-            "first_observation_baseline")
+            ResolutionKind.BASELINE, candidate, baseline, None,
+            "first_observation_baseline", expected_binding_absent=True)
 
     if not isinstance(existing, ContentBinding):
         raise ContractError("Invalid existing content binding")
@@ -910,8 +945,15 @@ def resolve_content_version(
         and previous.sha256 == observed_content.sha256
         and previous.size_bytes == observed_content.size_bytes
     )
+    # The accepted physical object is only comparable inside the same root
+    # generation: after a remap the same path may name a different directory, so
+    # a recycled device/file index is not proof of "the same file".
+    root_generation_differs = (
+        existing.root_revision is not None
+        and existing.root_revision != candidate.root_revision
+    )
     same_object = (
-        None if existing.physical_identity is None
+        None if existing.physical_identity is None or root_generation_differs
         else existing.physical_identity == observed.observed_identity
     )
     if same_object is False:
@@ -962,7 +1004,9 @@ def resolve_content_version(
                 "confirmed_replacement_unknown_prior_identity")
         return _unresolved(
             ResolutionKind.NEEDS_CONFIRMATION, candidate,
-            "previous_physical_identity_unknown", "reobserve_or_confirm")
+            "root_generation_changed" if root_generation_differs
+            else "previous_physical_identity_unknown",
+            "reobserve_or_confirm")
     revision = max(previous.revision, observed_content.revision) + 1
     newer = ContentVersion(
         previous.asset_id, revision, observed_content.size_bytes,
@@ -1012,6 +1056,17 @@ def observe_candidate(
     ))
     if not isinstance(result, LocalObservation):
         raise ContractError("The observer returned an invalid result")
+    # The handoff may only verify the observer's own facts.  A candidate from root
+    # generation 2 handed to an observer bound to generation 1 used to be relabelled
+    # with the candidate's value, so an old observation became evidence for a new
+    # root; refuse the pairing instead of rewriting it.
+    if (
+        result.evidence.root_revision != candidate.root_revision
+        or result.evidence.run_id != run_id
+        or result.evidence.check_id != check_id
+        or result.evidence.path != candidate.path
+    ):
+        raise ContractError("The observation does not belong to this candidate")
     content = None
     if result.digest_complete:
         if result.evidence.observed_sha256 is None or result.size_bytes is None:
@@ -1044,6 +1099,8 @@ def rebind_observation(
     if resolution.requires_attention or resolution.content is None:
         return None
     raw = observed.observation
+    if raw.evidence.root_revision != observed.candidate.root_revision:
+        raise ContractError("Observation root generation differs from its candidate")
     observed_sha = raw.evidence.observed_sha256
     if observed_sha is None or raw.size_bytes is None:
         return None
@@ -1065,7 +1122,7 @@ def rebind_observation(
             state, status, reason = LocalState.CHANGED, ObservationStatus.CHANGED, "hash_mismatch"
     evidence = LocalEvidence(
         content=target, path=observed.candidate.path,
-        root_revision=observed.candidate.root_revision, run_id=raw.evidence.run_id,
+        root_revision=raw.evidence.root_revision, run_id=raw.evidence.run_id,
         check_id=raw.evidence.check_id, checked_at=raw.evidence.checked_at,
         state=state, observed_size=raw.size_bytes, observed_sha256=observed_sha,
     )

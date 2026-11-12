@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -74,6 +75,19 @@ def migrated_copy(tmp_path):
         yield conn, old_rows
     finally:
         conn.close()
+
+
+@contextmanager
+def transaction(conn):
+    """A caller-owned transaction; the archive writers never open one."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 def make_plan(batch_id: str = "batch-synthetic", *, digest: str | None = "a"):
@@ -180,8 +194,8 @@ def test_content_fact_conflict_is_structured_without_resolver(migrated_copy):
         asset.content.asset_id, asset.content.revision,
         asset.content.size_bytes + 1, "b" * 64,
     )
-    ensure_archive_asset(conn, conflicting, asset.path, source_kind="observed_existing")
-    conn.commit()
+    with transaction(conn):
+        ensure_archive_asset(conn, conflicting, asset.path, source_kind="observed_existing")
     with pytest.raises(ArchiveContentConflictError) as caught:
         save_plan(conn, inventory, capacity)
     error = caught.value
@@ -254,8 +268,8 @@ def test_late_content_conflict_rolls_back_entire_new_batch(migrated_copy):
     # A valid existing immutable row collides only after the new batch was inserted.
     original_content = ContentVersion("old-asset", 1, 8, "d" * 64)
     from core.archive_schema import ensure_archive_asset
-    ensure_archive_asset(conn, original_content, path, source_kind="observed_existing")
-    conn.commit()
+    with transaction(conn):
+        ensure_archive_asset(conn, original_content, path, source_kind="observed_existing")
     before_assets = conn.execute("SELECT * FROM archive_assets").fetchall()
     with pytest.raises(ArchivePlanStoreError):
         save_plan(conn, inventory, capacity)
@@ -276,14 +290,14 @@ def test_schema_and_version_gates_reject_wrong_connections(tmp_path, migrated_co
         with pytest.raises(ArchivePlanStoreError, match="explicit sqlite3"):
             load_archive_plan(bad, "batch-synthetic")
     assert not (tmp_path / "never-open.sqlite3").exists()
-    conn.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
+    conn.execute("UPDATE schema_meta SET value='5' WHERE key='schema_version'")
     conn.commit()
     with pytest.raises(ArchivePlanStoreError, match="schema 3|schema version"):
         save_plan(conn, inventory, capacity)
     with pytest.raises(ArchivePlanStoreError, match="schema 3|schema version"):
         load_archive_plan(conn, "batch-synthetic")
     assert not conn.in_transaction
-    conn.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
+    conn.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
     conn.commit()
 
     save_plan(conn, inventory, capacity)
@@ -537,10 +551,10 @@ def test_cross_batch_reuses_observed_asset_without_relabelling(migrated_copy):
     conn, _ = migrated_copy
     inventory, capacity = make_plan("cross-batch")
     asset = inventory.assets[0]
-    ensure_archive_asset(
-        conn, asset.content, asset.path, source_kind="observed_existing",
-    )
-    conn.commit()
+    with transaction(conn):
+        ensure_archive_asset(
+            conn, asset.content, asset.path, source_kind="observed_existing",
+        )
     saved = save_plan(conn, inventory, capacity)
     assert saved.plan.inventory == inventory
     assert conn.execute(

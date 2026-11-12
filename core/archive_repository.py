@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.archive_inventory import ArchiveInventory, CapacityPlan
-from core.archive_scope import ScopeReceipt
+from core.archive_scope import ContentResolution, ObservedFile, ScopeReceipt
 from core.archive_plan_store import (
     ArchivePlanSaveResult, ArchivePlanStoreError, PreparedArchivePlan,
     StoredArchivePlan, load_archive_plan_in_transaction, prepare_archive_plan,
     save_prepared_plan_in_transaction,
 )
 from core.archive_schema import (
-    ARCHIVE_SCHEMA_VERSION, ARCHIVE_TABLES, ArchiveMigrationError, _check_existing_objects,
+    ARCHIVE_SCHEMA_VERSION, ARCHIVE_TABLES, ArchiveMigrationError, PathAcceptance,
+    _check_existing_objects, apply_content_resolution,
 )
 from core.library_repository import (
     LibraryBusyError, LibraryRepository, SchemaVersionError, _LIBRARY_FORMAT,
@@ -75,7 +77,9 @@ class ArchiveLibraryRepository(LibraryRepository):
             if metadata.get("format") != _LIBRARY_FORMAT:
                 raise SchemaVersionError("Archive copy belongs to a different product")
             if metadata.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
-                raise SchemaVersionError("Archive repository requires exactly schema 3")
+                raise SchemaVersionError(
+                    "Archive repository requires exactly schema " + ARCHIVE_SCHEMA_VERSION
+                )
             if not ARCHIVE_TABLES <= tables:
                 raise SchemaVersionError("Archive copy has incomplete archive tables")
             _check_existing_objects(conn)
@@ -97,6 +101,22 @@ class ArchiveLibraryRepository(LibraryRepository):
                     return save_prepared_plan_in_transaction(conn, prepared)
             except ContractError as exc:
                 raise ArchiveLibraryError("Archive plan facts were rejected") from exc
+        if command.kind == "apply_archive_resolutions":
+            items = command.payload["items"]
+            bound_at = command.payload["bound_at"]
+            try:
+                with self._transaction(conn):
+                    return tuple(sorted(
+                        (
+                            apply_content_resolution(
+                                conn, resolution, observed=observed, bound_at=bound_at,
+                            )
+                            for resolution, observed in items
+                        ),
+                        key=lambda acceptance: acceptance.path_key,
+                    ))
+            except ContractError as exc:
+                raise ArchiveLibraryError("Archive resolution facts were rejected") from exc
         if command.kind == "load_archive_plan":
             try:
                 with self._transaction(conn):
@@ -147,6 +167,53 @@ class ArchiveLibraryRepository(LibraryRepository):
             if "locked" in str(exc).lower() or "busy" in str(exc).lower():
                 raise ArchiveLibraryBusyError("Archive library is busy") from exc
             raise
+
+    def apply_archive_resolutions(
+        self, items,
+    ) -> tuple[PathAcceptance, ...]:
+        """Accept one batch of resolved observations in a single transaction.
+
+        This is the only write path for an accepted generation: every expected old
+        binding is rechecked inside this writer's transaction, the observations,
+        acceptances and path bindings are committed together, and any refusal
+        rolls the whole batch back.  Callers resolve outside this transaction.
+        """
+        self._ensure_open()
+        supplied = tuple(items)
+        if not supplied:
+            raise ArchiveLibraryError("At least one resolved observation is required")
+        for item in supplied:
+            if (not isinstance(item, (tuple, list)) or len(item) != 2
+                    or not isinstance(item[0], ContentResolution)
+                    or not isinstance(item[1], ObservedFile)):
+                raise ArchiveLibraryError(
+                    "Each item must pair one content resolution with its observation"
+                )
+            if item[0].requires_attention or item[0].content is None:
+                raise ArchiveLibraryError(
+                    "An unresolved or unconfirmed decision cannot be applied"
+                )
+            if item[0].candidate != item[1].candidate:
+                raise ArchiveLibraryError(
+                    "A resolution and its observation must name the same candidate"
+                )
+        bound_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            return self._enqueue(
+                "apply_archive_resolutions",
+                {"items": supplied, "bound_at": bound_at},
+                size_payload={
+                    "kind": "apply_archive_resolutions",
+                    "bound_at": bound_at,
+                    "path_keys": sorted(
+                        item[0].candidate.path.identity_key for item in supplied
+                    ),
+                },
+            )
+        except LibraryBusyError as exc:
+            raise ArchiveLibraryBusyError("Archive library is busy") from exc
+        except ContractError as exc:
+            raise ArchiveLibraryError("Archive resolution input was rejected") from exc
 
     def load_archive_plan(self, batch_id: str) -> StoredArchivePlan:
         """Run strict validation in a short inherited read transaction."""
