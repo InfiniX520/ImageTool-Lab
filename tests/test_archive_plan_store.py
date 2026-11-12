@@ -25,6 +25,7 @@ from core.archive_inventory import (
 from core.archive_plan_store import save_archive_plan as _save_archive_plan
 from core.archive_plan_store import (
     ARCHIVE_PLAN_MAX_BYTES,
+    ArchiveContentConflictError,
     ArchivePlanConflictError,
     ArchivePlanEntryLimitError,
     ArchivePlanStoreError,
@@ -169,6 +170,28 @@ def test_v1_migration_save_reload_and_exact_replay_preserve_history(migrated_cop
     assert_history(conn, old_rows)
     assert_history(conn, before)
     validate_archive_facts(conn)
+
+
+def test_content_fact_conflict_is_structured_without_resolver(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("content-conflict")
+    asset = inventory.assets[0]
+    conflicting = ContentVersion(
+        asset.content.asset_id, asset.content.revision,
+        asset.content.size_bytes + 1, "b" * 64,
+    )
+    ensure_archive_asset(conn, conflicting, asset.path, source_kind="observed_existing")
+    conn.commit()
+    with pytest.raises(ArchiveContentConflictError) as caught:
+        save_plan(conn, inventory, capacity)
+    error = caught.value
+    assert error.asset_id == asset.content.asset_id
+    assert error.revision == asset.content.revision
+    assert error.relative_path == asset.path.relative_path
+    assert error.path_key == asset.path_key
+    assert "different facts" in error.reason
+    assert conn.execute("SELECT COUNT(*) FROM archive_batches").fetchone()[0] == 0
+    assert not conn.in_transaction
 
 
 def test_separate_batch_does_not_relabel_existing_path(migrated_copy):

@@ -101,6 +101,21 @@ class ArchivePathConfirmation:
     next_action: str = "confirm_same_name_replacement"
 
 
+class ArchiveContentConflictError(ArchivePlanStoreError):
+    """A path already has different immutable facts for the same asset revision."""
+
+    def __init__(self, asset_id: str, revision: int, relative_path: str, path_key: str, reason: str):
+        self.asset_id = asset_id
+        self.revision = revision
+        self.relative_path = relative_path
+        self.path_key = path_key
+        self.reason = reason
+        super().__init__(
+            "Content conflict for %s at %s (asset %s revision %s): %s"
+            % (relative_path, path_key, asset_id, revision, reason)
+        )
+
+
 class ArchiveConfirmationRequiredError(ArchivePlanStoreError):
     """A same-name physical replacement is not auto-accepted by this batch.
 
@@ -1047,9 +1062,15 @@ def save_prepared_plan_in_transaction(
             ),
         ).fetchone()
         if existing_asset is None:
-            ensure_archive_asset(
-                conn, content, asset.path, source_kind="user_selected", artifact_id=None,
-            )
+            try:
+                ensure_archive_asset(
+                    conn, content, asset.path, source_kind="user_selected", artifact_id=None,
+                )
+            except ContractError as exc:
+                raise ArchiveContentConflictError(
+                    content.asset_id, content.revision, asset.path.relative_path,
+                    asset.path_key, str(exc),
+                ) from exc
         current_binding = conn.execute(
             "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
             (asset.path_key,),
