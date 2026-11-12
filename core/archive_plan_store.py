@@ -701,6 +701,7 @@ def prepare_archive_plan(
         "inventory_sha256": digest,
         "inventory_bytes": len(inventory_json.encode("utf-8")),
         "segment_count": len(segments),
+        "root_revision": None if receipt is None else receipt.root_revision,
         "scope_receipt": None if receipt_json is None else json.loads(receipt_json),
         "asset_sources_sha256": "0" * 64,
     })
@@ -737,8 +738,8 @@ def _decode_scope(
         raise ArchivePlanStoreError("Unsupported stored archive plan version")
     expected_keys = {
         "format", "plan_schema_version", "batch_id", "scope",
-        "inventory_sha256", "inventory_bytes", "segment_count", "scope_receipt",
-        "asset_sources_sha256",
+        "inventory_sha256", "inventory_bytes", "segment_count", "root_revision",
+        "scope_receipt", "asset_sources_sha256",
     }
     if set(raw) != expected_keys:
         raise ArchivePlanStoreError("Stored scope JSON has missing or unknown fields")
@@ -749,6 +750,7 @@ def _decode_scope(
         or type(raw["inventory_bytes"]) is not int
         or type(raw["segment_count"]) is not int
         or not 1 <= raw["segment_count"] <= ARCHIVE_PLAN_MAX_SEGMENTS
+        or (raw["root_revision"] is not None and type(raw["root_revision"]) is not int)
         or type(raw["inventory_bytes"]) is not int
         or not 0 <= raw["inventory_bytes"] <= ARCHIVE_PLAN_MAX_BYTES
     ):
@@ -776,6 +778,8 @@ def _decode_scope(
         raise ArchivePlanStoreError("Stored archive plan requires a scope receipt")
     try:
         receipt = ScopeReceipt.from_json(canonical_json(scope_receipt))
+        if raw["root_revision"] != receipt.root_revision:
+            raise ArchivePlanStoreError("Stored plan root generation differs from its receipt")
         _receipt_json(receipt, inventory, bind_content=False)
     except (ContractError, TypeError, ValueError, UnicodeError) as exc:
         raise ArchivePlanStoreError("Stored scope receipt is invalid") from exc
