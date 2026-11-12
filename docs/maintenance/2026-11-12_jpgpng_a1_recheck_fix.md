@@ -48,6 +48,14 @@
 - 繁忙目录可能 `directory_changed`；名称索引超限无降级；单次阻塞 OS 调用不可中断。
 - 未做真实图库、RSS、2,000 文件整链（F5）、崩溃/WAL。
 
+### F4 独立复审追加（pre-existing，已转 F3 修复）
+
+- P1：枚举期间父目录出现无关新条目被误判 `root_changed`、0 条目；祖先链不应比较完整 NodeState。
+- P1：父前缀+子前缀/后缀显式文件重叠选择被遍历两次，预算翻倍、自指 duplicate、`scope_complete` 假通过。
+- P2：首页即 abort 页时 `consume_scope_pages` 的 `last_page_index=-1` 抛 ContractError，应返回未完成回执。
+- P3：prefix 的两种大小写拼写优先级受输入顺序影响。
+- 这些不是 F4 提交新引入；F4 的最终 checkpoint 让 abort 首页路径更容易触发。
+
 ## 4. F3/F5 并行状态
 
 - F3（AR2-03/04/07）长任务实现中；设计见 `docs/archiving/A1_IDENTITY_HANDOFF.md`。F3 允许修改 `PathRef.identity_key`，但 `target_key` 不变。
