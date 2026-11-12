@@ -347,12 +347,12 @@
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-12",
       "phase": "A1 repair independently re-audited; boundary gaps open",
-      "status": "independent_regression_passed_eight_findings_open_not_production_ready",
+      "status": "offline_f1_f6_complete_final_review_pending_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated.",
+      "next_step": "Final independent audit on HEAD f516bb1; close FR-02/03/04/05, rerun F5 2k on v2; production integration remains gated.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-A1-REAUDIT-20261112-01",
+      "latest_batch": "JPGPNG-A1-RECHECK-FIX-20261112-01",
       "foundation": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
       "evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
       "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
@@ -362,7 +362,7 @@
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
       "date": "2026-11-11",
-      "status": "independent_reaudit_findings_open_not_production_ready",
+      "status": "offline_f1_f6_complete_final_review_pending_not_production_ready",
       "overview": "docs/archiving/README.md",
       "design": "docs/archiving/DESIGN.md",
       "acceptance": "docs/archiving/ACCEPTANCE.md",
@@ -398,7 +398,7 @@
         "A5": "not_started",
         "A6": "not_started"
       },
-      "next_step": "F0 baseline/regressions; F1 receipt and referenced-fact closure; F2 bounded strict reads; F3 physical observation/content-version/path resolution; F4 actual IO/cancellation; F5 independent integration. Production integration remains gated.",
+      "next_step": "Final independent audit on HEAD f516bb1; close FR-02/03/04/05, rerun F5 2k on v2; production integration remains gated.",
       "user_action_now": "No retrieval, password or account access needed",
       "later_user_action": "A4 upload and retrieve generated harmless test packages, approximately several hundred MiB to 2 GiB",
       "gates": [
@@ -411,14 +411,14 @@
       "scope_note": "Offline repair batch passed focused tests; production ArchiveLibraryRepository enforces ScopeReceipt, low-level synthetic compatibility and PathRef downstream collision remain open. No real archive/readback/release.",
       "current_foundation": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
       "current_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
-      "latest_batch": "JPGPNG-A1-REAUDIT-20261112-01",
+      "latest_batch": "JPGPNG-A1-RECHECK-FIX-20261112-01",
       "latest_overview": "docs/audits/2026-11-12-a1-recheck/README.md",
       "latest_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json"
     },
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
       "date": "2026-11-11",
-      "status": "independent_reaudit_findings_open_not_production_ready",
+      "status": "offline_f1_f6_complete_final_review_pending_not_production_ready",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
       "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
@@ -451,7 +451,7 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-A1-REAUDIT-20261112-01",
+      "latest_batch": "JPGPNG-A1-RECHECK-FIX-20261112-01",
       "latest_overview": "docs/audits/2026-11-12-a1-recheck/README.md",
       "latest_evidence": "../.runtime/jpgpng_a1_reaudit_20261112_01/validation.json",
       "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_implementation_audit"
@@ -519,7 +519,7 @@
     "a1_reaudit": {
       "id": "JPGPNG-A1-REAUDIT-20261112-01",
       "date": "2026-11-12",
-      "status": "completed_product_findings_open",
+      "status": "completed_offline_f1_f6_final_review_pending",
       "overview": "docs/audits/2026-11-12-a1-recheck/README.md",
       "findings": "docs/audits/2026-11-12-a1-recheck/FINDINGS.md",
       "guide": "docs/audits/2026-11-12-a1-recheck/DEVELOPMENT_GUIDE.md",
