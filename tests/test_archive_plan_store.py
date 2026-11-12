@@ -981,6 +981,15 @@ def test_transactional_reload_wraps_timestamp_value_errors(migrated_copy):
         conn.rollback()
 
 
+def test_scope_declared_root_revision_must_match_receipt():
+    inventory, capacity = make_plan("scope-root-mismatch")
+    with pytest.raises(ArchivePlanStoreError, match="scope root generation"):
+        prepare_archive_plan(
+            inventory, capacity, scope={"kind": "explicit", "root_revision": 9},
+            receipt=make_receipt(inventory),
+        )
+
+
 def test_prepared_scope_is_a_frozen_copy():
     inventory, capacity = make_plan("frozen-batch")
     scope = {"kind": "explicit", "selected": ["one"]}

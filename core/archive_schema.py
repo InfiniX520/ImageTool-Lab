@@ -564,7 +564,7 @@ def _check_stored_plan_segments(
     the two entry points disagree about the same database.
     """
     version = scope.get("plan_schema_version")
-    if type(version) is not int or version != 2:
+    if type(version) is not int or version != 3:
         raise ArchiveSchemaError("Unsupported stored archive plan version")
     if scope.get("batch_id") != batch_id:
         raise ArchiveSchemaError("Stored archive plan batch identity differs")

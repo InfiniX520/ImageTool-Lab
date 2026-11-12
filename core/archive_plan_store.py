@@ -58,7 +58,7 @@ from core.preservation_policy import ContentVersion
 from core.task_contracts import ContractError, PathRef, canonical_json, normalize_json
 
 _ARCHIVE_PLAN_FORMAT = "jpgpng-archive-plan"
-_ARCHIVE_PLAN_VERSION = 2
+_ARCHIVE_PLAN_VERSION = 3
 _ARCHIVE_PLAN_SEGMENT_CHARS = 200_000
 ARCHIVE_PLAN_MAX_BYTES = ARCHIVE_PLAN_DOCUMENT_LIMIT
 ARCHIVE_PLAN_MAX_ENTRIES = 9_000
@@ -523,6 +523,19 @@ def _strict_object(value: object, label: str) -> dict:
         raise ArchivePlanStoreError("Invalid stored " + label) from exc
 
 
+def _check_scope_root_revision(scope: dict[str, object], expected: int) -> None:
+    """Refuse a scope header whose declared root generation differs from its receipt."""
+    candidates = []
+    if "root_revision" in scope:
+        candidates.append(scope["root_revision"])
+    root = scope.get("root")
+    if isinstance(root, dict) and "root_revision" in root:
+        candidates.append(root["root_revision"])
+    for value in candidates:
+        if type(value) is not int or value != expected:
+            raise ArchivePlanStoreError("Archive plan scope root generation differs from its receipt")
+
+
 def _canonical_scope(scope: dict[str, object] | None) -> str:
     if scope is None:
         scope = {"kind": "explicit_inventory"}
@@ -682,6 +695,8 @@ def prepare_archive_plan(
         inventory_json, segments = _inventory_segments(inventory, raw_inventory)
         receipt_json = None if receipt is None else _receipt_json(
             receipt, checked_inventory, root_revision=root_revision)
+        if receipt is not None:
+            _check_scope_root_revision(json.loads(scope_json), receipt.root_revision)
         capacity_json = canonical_json(capacity.to_dict())
         checked_capacity = _capacity(json.loads(capacity_json), checked_inventory)
         if checked_inventory != inventory or checked_capacity != capacity:
@@ -780,6 +795,7 @@ def _decode_scope(
         receipt = ScopeReceipt.from_json(canonical_json(scope_receipt))
         if raw["root_revision"] != receipt.root_revision:
             raise ArchivePlanStoreError("Stored plan root generation differs from its receipt")
+        _check_scope_root_revision(raw["scope"], receipt.root_revision)
         _receipt_json(receipt, inventory, bind_content=False)
     except (ContractError, TypeError, ValueError, UnicodeError) as exc:
         raise ArchivePlanStoreError("Stored scope receipt is invalid") from exc
