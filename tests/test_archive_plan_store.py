@@ -735,6 +735,17 @@ def test_non_planned_plan_also_requires_full_receipt_protocol(migrated_copy):
         validate_archive_facts(conn)
 
 
+def test_completed_plan_with_intact_receipt_passes_audit(migrated_copy):
+    conn, _ = migrated_copy
+    inventory, capacity = make_plan("completed-valid-receipt")
+    save_plan(conn, inventory, capacity)
+    with conn:
+        conn.execute(
+            "UPDATE archive_batches SET state='completed' WHERE batch_id='completed-valid-receipt'"
+        )
+    validate_archive_facts(conn)
+
+
 def test_referenced_content_digest_is_checked_on_load_and_replay(migrated_copy):
     conn, _ = migrated_copy
     inventory, capacity = make_plan("content-corruption")

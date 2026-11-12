@@ -613,6 +613,7 @@ def validate_archive_facts(conn: sqlite3.Connection) -> None:
             # plan store imports this module at import time.
             from core.archive_plan_store import (
                 _capacity, _check_assets, _decode_scope, _load_in_transaction,
+                _strict_object,
             )
             try:
                 if state == "planned":
