@@ -79,6 +79,16 @@
 - 15 个负向对照均被计划加载拒绝；但**全库审计仍接受删除一个计划段**（只查预算上限，不核对 header segment_count/inventory_sha256），已转 F3 修复。范围凭据仍只绑路径+大小（AR2-03），已在 F5 真实数据复现。
 - 相关归档 328 passed/3 skipped；全量 1,337 passed/3 skipped。未覆盖真实图片/解码、500 GB 吞吐、并发/崩溃/WAL、symlink/硬链接，不能称 F3 完成。
 
+## 3C. F6 崩溃/WAL/多进程
+
+- 61 项合成 schema-3 测试全通过；真实子进程 + 真硬杀；BEGIN 后 COMMIT 前注入、原始连接对照。
+- 结论：跨进程锁有效；并发写恰好一个写者；同计划重放、不同 scope 冲突；崩溃后 0 行、integrity/FK 正常、重开可再保存；WAL 未提交帧丢弃；关闭后连接/句柄/WAL 释放。
+- 修复 F6-1：`migrate_archive_copy` 改用 `closing()` 并在返回前 `wal_checkpoint(TRUNCATE)`；新增“只拷主文件仍为 schema 3”回归。
+- 修复 F6-2：`ArchiveLibraryRepository.save_archive_plan` 将 SQLITE_BUSY 翻译为 `ArchiveLibraryBusyError`。
+- 记录 F6-3：单写者是应用层协作锁；绕过仓库直接用 `save_archive_plan(conn,…)` 仍可写，需文档化，不能宣称数据库级排他。
+- 未覆盖：断电报错、网络盘/SMB、真实工具/数据、生产接线、>200 资产、杀软、长读检查点饥饿、其他 SQLite 版本、磁盘满/权限中途失败。
+- 提交：`c1b5306`（迁移/忙错误）；F6 原始报告 `f6_agent/REPORT_F6.md`。
+
 ## 4. F3/F5 并行状态
 
 - F3（AR2-03/04/07）长任务实现中；设计见 `docs/archiving/A1_IDENTITY_HANDOFF.md`。F3 允许修改 `PathRef.identity_key`，但 `target_key` 不变。
