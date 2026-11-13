@@ -1,7 +1,7 @@
 {
   "project": "PixivKeep",
   "description": "Pixiv 原图收藏与整理工具；长期归档与恢复开发中",
-  "last_updated": "2026-11-13",
+  "last_updated": "2026-11-14",
   "sessions": [
     {
       "session_date": "2026-07-30",
@@ -1880,6 +1880,68 @@
       "organization": "One integration worktree plus four lane worktrees and a read-only measure checkout; audit reports, old worktrees and checkpoints preserved.",
       "limitations": "Synthetic offline tests only; no real gallery, account, network, external volume, migration or deployment. Tk same-process re-initialisation remains environment-flaky; the four existing skips are unchanged.",
       "history_errata": "The RFA round reported the line budget as 300 seconds and 512 MiB per page; the RFB round raised the page ceiling to 8 GiB after the audit showed a 660 MB work could never be accepted."
+    },
+    {
+      "session_date": "2026-11-14",
+      "batch": "JPGPNG-U1A-W5-W6-20261114-01",
+      "branch": "fix/a1-u1a-w5-w6-20261114",
+      "summary": "W5/W6 交付：待核验页只读列表、全库巡检（只报告）、白蓝界面「核验」面板、库预检/备份/副本校验 CLI（maintain.py + maintain.cmd + scan 子命令）。开工只读实测真实库与新代码声明逐条相同（49 对象、quick/integrity ok、WAL 0 字节），因此不需要 schema 迁移，W6 变为预检+备份+副本演练。非 Tk 全量 2,068 项 2,064 通过/4 跳过/0 失败/0 错误；Tk 逐条隔离 9/9；只读审计 0 P1、2 项 P2 已修。日常目录已切到 daily/u1a-w5-w6-20261114，可用一条 git checkout 回退。",
+      "w5_w6": {
+        "id": "JPGPNG-U1A-W5-W6-20261114-01",
+        "base": "482eb03",
+        "fixed_commit": "01b91c3",
+        "daily_branch": "daily/u1a-w5-w6-20261114",
+        "scope": "docs/optimization/2026-11-14/U1A_W5_W6_SCOPE.md",
+        "record": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
+        "runbook": "docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md",
+        "lane_tests": {
+          "library_maintenance": 60,
+          "verification_list": 26,
+          "library_audit": 30,
+          "verification_panel": 45,
+          "scan_cli": 10,
+          "total": 171
+        },
+        "non_tk": {
+          "tests": 2068,
+          "passed": 2064,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4,
+          "seconds": 649.4
+        },
+        "tk": {
+          "tests": 9,
+          "passed": 9
+        },
+        "rehearsal": {
+          "inspect_real": "compatible/healthy, 49 of 49 objects, main bytes and sha256 unchanged",
+          "backup_real": "online_backup verified, source group unchanged",
+          "verify_copy": "ok and healthy",
+          "open_copy": "897 suspended / 11 completed / 0 needs_verification",
+          "scan_real_gallery": "11 of 11 match, 95574715 bytes",
+          "w5_three_paths": "reused / repair_queued / held (same-size rewrite still held)"
+        },
+        "audit": {
+          "P1": 0,
+          "P2": 2,
+          "P3": 6,
+          "result": "P2 fixed, P3 handled or recorded"
+        },
+        "schema_changed": false,
+        "dependencies_added": false,
+        "business_data_changed": false,
+        "deployed": true,
+        "deployed_scope": "daily checkout switched; no download or resume started"
+      },
+      "organization": "四条 lane 并行（maint/list/scan/gui），文件归属互斥；主线程合流后跑全量矩阵并派只读 fork 审计；审计 P2 由主线程在同一分支修复并补回归测试。",
+      "limitations": [
+        "面板只列前 50 行，不分页；全量巡检走 maintain.py scan",
+        "无批量授权补下载入口；missing 只报告不修复",
+        "每页字节上限仍是模块常量 8 GiB，config 未加字段（需 settings v2 迁移）",
+        "真实外置卷掉线仍用目录改名模拟"
+      ],
+      "history_errata": "full/wp2_after_merge.xml 因 basetemp 被删而含 112 个 setup error，不能作为证据；以审计重跑的 recomputed_combo.xml（152 通过）与最终矩阵 verify2/ 为准。"
     }
   ]
 }

@@ -1,6 +1,8 @@
 # 版本留档与恢复
 
-**最新审计基线（2026-11-13）**：功能分支 `fix/a1-u1a-j01-20261113` 的 `8b1c751` 已作[独立复审](audits/2026-11-13-u1a-independent/README.md)，发现待修问题；报告分支 `audit/u1a-independent-20261113` 只保存文档与反例。主目录源码未由本轮升级，勿把 default main 当作最新功能树。
+**当前（2026-11-14）**：U1-A 的 W5/W6 已在 `fix/a1-u1a-w5-w6-20261114` 交付并打 `checkpoint-2026-11-14-u1a-w5-w6`；日常目录 `JpgPng` 当天切到 `daily/u1a-w5-w6-20261114`（库预检 compatible/healthy、11 个 artifact 全部 match），回退是一条 `git checkout fix/a1-ar3-20261112`。main 仍未合并这些分支，勿把 default main 当作最新功能树。详见[维护记录](maintenance/2026-11-14_jpgpng_u1a_w5_w6.md)。
+
+**上一轮审计基线（2026-11-13）**：功能分支 `fix/a1-u1a-j01-20261113` 的 `8b1c751` 已作[独立复审](audits/2026-11-13-u1a-independent/README.md)，发现待修问题；报告分支 `audit/u1a-independent-20261113` 只保存文档与反例。
 
 **AR4 前置阶段修复（2026-11-13，dda6fc1）**：AR4-01..08 已在 `dda6fc1` 关闭，schema 5；A1 离线验收完成，产品尚未接生产。当前记录见[维护记录](maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)。早期标签与历史审计保留，不能当最新稳定发布。
 
@@ -8,12 +10,14 @@
 
 ## 当前检查点
 
-当前保留四个标签：
+当前保留六个标签（后两个是 2026-11-14 的两轮修复）：
 
 - `checkpoint-2026-11-12-a1-audit`：与审计基线一致的 173 个 Python 文件，archive_schema 为 schema 2。
 - `checkpoint-2026-11-12-a1-wip`：开始留档时实际工作树，保留 archive_schema 已有的 schema 3 未验收草稿。
 - `checkpoint-2026-11-13-a1-ar4`：AR4-01..08 关闭、schema 5、独立测试与 2,000 文件/进程退出证据齐全的离线验收点；仍未生产接线。可用 `git rev-parse checkpoint-2026-11-13-a1-ar4^{}` 复核确切提交。
 - `checkpoint-2026-11-13-u1a-review`：U1-A/J-01 生产复用评审完成，7 项独立红测试与 W0–W6 已留档；J-01 未修复，产品未改。
+- `checkpoint-2026-11-14-u1a-rfb-fix`：RFB-01..06 按行为关闭（12 探针 12/12、非 Tk 1,897 项 1,893 通过/4 跳过、Tk 逐条 9/9），含只读审计追加的 2 项 P2 与 1 项 P3 修复。
+- `checkpoint-2026-11-14-u1a-w5-w6`：U1-A 的 W5/W6 交付（待核验列表、全库巡检、白蓝「核验」面板、库预检/备份/副本校验 CLI 与 `maintain.cmd`），非 Tk 2,068 项 2,064 通过/4 跳过、Tk 逐条 9/9、只读审计 0 P1；日常目录当天切到 `daily/u1a-w5-w6-20261114`，回退见[切换 runbook](optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)。
 
 这些标签都包含下载器重构、整理 CLI、优化/归档设计和审计文档。只在 Git 索引中取回已核验的旧 schema 文件形成前一个版本，当前工作树不被回退；随后保存现有草稿。版本边界见[本次说明](maintenance/2026-11-12_version_checkpoint.md)。
 

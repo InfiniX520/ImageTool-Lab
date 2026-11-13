@@ -346,23 +346,23 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "RFB fix merged at 482eb03; RFB-01..06 closed; not deployed",
-      "status": "fix_completed_pending_user_acceptance_not_production_ready",
+      "phase": "W5/W6 delivered on fix/a1-u1a-w5-w6-20261114; RFB-01..06 plus the W5 surfaces and the W6 preflight/backup are closed; not merged to main",
+      "status": "batch_completed_offline_rehearsed_daily_checkout_switched",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "W5 wiring and the registered gaps (finish_source final-result query, intent projection/index, carry long transaction, claim statement count, per-install page ceiling, real migration/backup/external volume) before any production gate.",
+      "next_step": "User keeps or rolls back the switched daily checkout (docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md). Registered gaps stay open: finish_source final-result query, intent projection/index, carry long transaction, claim statement count, per-install page ceiling, legacy record_manager health wiring, real external-volume drill.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-RFB-FIX-20261114-01",
-      "foundation": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md",
-      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md",
-      "previous_completed_batch": "JPGPNG-U1A-RFA-FIX-20261114-01",
-      "unfinished_draft": "RFB-01..06 closed; the read-only audit's two P2 and one P3 also fixed; the remaining P3 are recorded as boundaries.",
-      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md",
-      "latest_overview": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md",
-      "latest_evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
+      "latest_batch": "JPGPNG-U1A-W5-W6-20261114-01",
+      "foundation": "docs/optimization/2026-11-14/U1A_W5_W6_SCOPE.md",
+      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
+      "previous_completed_batch": "JPGPNG-U1A-RFB-FIX-20261114-01",
+      "unfinished_draft": "W5 list, read-only audit, panel and the maintain CLI shipped; the panel lists 50 rows without paging and offers no batch redownload on purpose.",
+      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
+      "latest_overview": "docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md",
+      "latest_evidence": "../.runtime/jpgpng_u1a_w5_w6_20261114_01/verify2/final_nontk.xml",
       "audited_commit": "de50f805c3ab0610edf20c6a21a21d42790c2024",
-      "fixed_commit": "482eb03",
-      "runtime_checkout_note": "Daily JpgPng checkout remains 5465e0c; the fix branch is not deployed."
+      "fixed_commit": "01b91c3",
+      "runtime_checkout_note": "Daily JpgPng checkout tracks daily/u1a-w5-w6-20261114 at 01b91c3; library preflight is compatible/healthy and 11/11 artifacts match; rollback is git checkout fix/a1-ar3-20261112."
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -943,6 +943,68 @@
       "business_data_changed": false,
       "deployed": false,
       "next_step": "W5 wiring and registered gaps; real migration/backup/external-volume rehearsal remains a separate gate."
+    },
+    "u1a_w5_w6": {
+      "id": "JPGPNG-U1A-W5-W6-20261114-01",
+      "date": "2026-11-14",
+      "status": "batch_completed_offline_rehearsed_daily_checkout_switched",
+      "base": "482eb03",
+      "branch": "fix/a1-u1a-w5-w6-20261114",
+      "daily_branch": "daily/u1a-w5-w6-20261114",
+      "scope": "docs/optimization/2026-11-14/U1A_W5_W6_SCOPE.md",
+      "record": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
+      "runbook": "docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md",
+      "contract": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md",
+      "delivered": {
+        "wp1_library_maintenance": "inspect / backup (online snapshot default, file group second) / verify copy / switch plan + maintain.py and maintain.cmd",
+        "wp2_verification_list": "read-only list_verification_pages + verification_summary with a stable cursor",
+        "wp3_library_audit": "scan_library_artifacts, read-only verdicts with budgets and cancellation",
+        "wp4_gui": "verification panel on a new nav page, desktop query/command ports, serial chained recovery",
+        "main": "maintain.py scan subcommand"
+      },
+      "lane_tests": {
+        "library_maintenance": 60,
+        "verification_list": 26,
+        "library_audit": 30,
+        "verification_panel": 45,
+        "scan_cli": 10,
+        "total": 171
+      },
+      "non_tk": {
+        "tests": 2068,
+        "passed": 2064,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 4,
+        "seconds": 649.4
+      },
+      "tk": {
+        "tests": 9,
+        "passed": 9,
+        "note": "per-test isolation; two tk.Tk() calls in one process is environment-flaky"
+      },
+      "rehearsal": {
+        "inspect_real": "compatible / healthy / 49 of 49 objects; main bytes and sha256 unchanged, only -shm mtime moves",
+        "backup_real": "online_backup, verified, source group unchanged",
+        "verify_copy": "ok=true, healthy=true, counts and objects match",
+        "open_copy": "897 suspended / 11 completed / 0 needs_verification, phase paused, 908 pages linked",
+        "scan_real_gallery": "11 rows all match, 95574715 bytes, 0.12-0.23 s",
+        "w5_three_paths": "restored -> reused/hash_match; absent -> repair_queued/artifact_missing; same-size rewrite -> held/artifact_changed"
+      },
+      "audit": {
+        "P1": 0,
+        "P2": 2,
+        "P3": 6,
+        "result": "P2 fixed (scan argument exit code, invalid evidence XML); P3 handled or recorded",
+        "report": "../.runtime/jpgpng_u1a_w5_w6_20261114_01/audit/REPORT.md"
+      },
+      "schema_changed": false,
+      "dependencies_added": false,
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "deployed": true,
+      "deployed_scope": "daily checkout switched to daily/u1a-w5-w6-20261114; no download or resume was started by the tools",
+      "next_step": "User keeps or rolls back the switch; then the registered gaps (finish_source query, intent projection, carry transaction, page ceiling config, legacy health gate, external-volume drill)."
     },
     "u1a_rfa_reaudit": {
       "id": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
