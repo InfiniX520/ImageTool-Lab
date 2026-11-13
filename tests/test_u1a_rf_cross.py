@@ -91,10 +91,15 @@ def test_a_third_task_never_breaks_a_completed_handover_rotation(tmp_path):
         _settle(repo, resumed_b)
 
         third = h.submit(repo, request_id="third")
-        accepted = repo.accept_source_page(
+        repo.accept_source_page(
             third["batch_id"], h.source((h.candidate(),), page_identity="third")
         )
-        assert accepted
+        # Trusted reuse links the existing artifact without creating a delivery,
+        # so an empty accept result is correct.  The page must still point at
+        # real bytes.
+        link = _page_link(repo, third["batch_id"])
+        assert link is not None, "the third task did not link the page"
+        assert link[1] is not None, "trusted reuse must link the recorded artifact"
         assert h.pages(repo, third)["completed"] == 1
         _settle(repo, third)
 
