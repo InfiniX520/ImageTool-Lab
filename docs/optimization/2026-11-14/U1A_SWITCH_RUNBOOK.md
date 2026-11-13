@@ -16,9 +16,11 @@
 
 ## 1. 预检（只读，随时可跑）
 
+本机的 `python` 默认是 Windows 商店占位符，直接敲 `python` 会失败。用仓库自带的 `maintain.cmd`（解释器解析顺序与 `启动.bat` 一致：`.venv-path` → 上级 `.venv-path` → `CONDA_PREFIX` → PATH），或者先 `conda activate JuiLiu` 再用 `python maintain.py`。
+
 ```powershell
-cd E:\Zero9\JuiLiu\.runtime\jpgpng_u1a_w5_w6_20261114_01\integration_worktree
-python maintain.py inspect E:\Zero9\JuiLiu\JpgPng\download_logs\library.sqlite3
+cd E:\Zero9\JuiLiu\JpgPng
+.\maintain.cmd inspect E:\Zero9\JuiLiu\JpgPng\download_logs\library.sqlite3
 ```
 
 通过标准：`状态: compatible`，`完整性: quick_check=ok integrity_check=ok 外键冲突=0`。
@@ -27,8 +29,8 @@ python maintain.py inspect E:\Zero9\JuiLiu\JpgPng\download_logs\library.sqlite3
 ## 2. 备份（写目标目录，不写源库）
 
 ```powershell
-python maintain.py backup E:\Zero9\JuiLiu\JpgPng\download_logs\library.sqlite3 E:\Zero9\JuiLiu\.runtime\jpgpng_u1a_w5_w6_20261114_01\rehearsal --label pre-switch
-```
+.\maintain.cmd backup E:\Zero9\JuiLiu\JpgPng\download_logs\library.sqlite3 E:\Zero9\JuiLiu\JpgPng\record_backups --label pre-w5w6-switch
+````
 
 通过标准：`校验: verified=True 对象一致=True 计数一致=True`、`源库: 主文件未变=True 整组未变=True`。
 产物：目录内一个自包含的 `library.sqlite3`（在线快照会把副本的 journal 归一成 delete，所以还原时**不能**配旧 `-wal`）+ `manifest.json`（含每文件 sha256 与还原步骤）。
@@ -37,8 +39,8 @@ python maintain.py backup E:\Zero9\JuiLiu\JpgPng\download_logs\library.sqlite3 E
 ## 3. 副本演练（确认新代码能对它做完整的事）
 
 ```powershell
-python maintain.py verify <源库> <备份目录>\library.sqlite3
-python maintain.py scan   <备份目录>\library.sqlite3 --root E:\Zero9\JuiLiu\JpgPng
+.\maintain.cmd verify <源库> <备份目录>\library.sqlite3
+.\maintain.cmd scan   <备份目录>\library.sqlite3 --root E:\Zero9\JuiLiu\JpgPng
 ```
 
 通过标准：`verify` 输出 `ok=True`；`scan` 输出 `核验: N 行（匹配 N，无法核验 0）` 且 `结论: 本次核验的每一行都与记录一致。`
