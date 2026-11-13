@@ -2,11 +2,25 @@
 from __future__ import annotations
 
 import os
+from enum import StrEnum
 from pathlib import Path
 from threading import Lock
 
 from core.app_paths import AppPaths
 from core.task_contracts import ContractError, PathRef
+
+
+class RootState(StrEnum):
+    """Whether a bound output root can receive a file right now.
+
+    The three values separate "create the first output subdirectory" from
+    "the volume that held the library is gone".  Only AVAILABLE permits a new
+    file or directory below the root.
+    """
+
+    AVAILABLE = "available"
+    MISSING_BOUND = "missing_bound"
+    UNBOUND = "unbound"
 
 
 class AlreadyRunningError(RuntimeError):
@@ -91,6 +105,35 @@ class PathResolver:
         """
         self.root_path(ref)
         return 1
+
+    def root_state(self, ref: PathRef) -> RootState:
+        """Classify the bound root without creating anything.
+
+        AVAILABLE     the root directory exists and can receive files;
+        MISSING_BOUND the identity is bound but its directory is absent, so a
+                      worker must not `mkdir` it back (unplugged external
+                      volume, moved library, deleted project root);
+        UNBOUND       no mapping exists for this identity; that is not a
+                      permission to create a root either.
+
+        The classification only reads the immutable mapping and the
+        directory entry; it never probes by creating a directory.
+        """
+        if not isinstance(ref, PathRef):
+            raise ContractError("Expected a validated path reference")
+        if ref.kind == "project":
+            root = self.project_root
+        else:
+            root = self._external.get(ref.root_id.casefold())
+            if root is None:
+                return RootState.UNBOUND
+        try:
+            if root.is_dir():
+                return RootState.AVAILABLE
+        except OSError:
+            # An unreadable parent is not evidence that the root is new.
+            pass
+        return RootState.MISSING_BOUND
 
     def display(self, ref: PathRef) -> str:
         """A UI label from the known mapping; no filesystem access."""

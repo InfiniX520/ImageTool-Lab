@@ -25,6 +25,7 @@ import requests
 from core.http_client import request_get
 from core.image_validation import (ImageNeedsVerification, ImageValidationError,
                                    ImageValidationStopped, inspect_image)
+from core.library_paths import RootState
 from core.library_repository import LibraryError
 from core.task_contracts import ContractError, PageSpec, PathRef, canonical_json
 from core.task_coordinator import DeliveryOutcome
@@ -195,6 +196,11 @@ class PageDeliveryExecutor:
 
     def _new_stage(self, row, final_ref, source):
         final = self.resolver.resolve(final_ref)
+        # A bound root that disappeared (unplugged volume, moved library,
+        # deleted project root) is not a directory to recreate.  Only a live
+        # root may gain its first output subdirectory.
+        if self.resolver.root_state(final_ref) is not RootState.AVAILABLE:
+            raise _Fault("root_unavailable", block=True)
         final.parent.mkdir(parents=True, exist_ok=True)
         self.resolver.resolve(final_ref)  # reject a replaced parent/link before creating
         descriptor, raw = tempfile.mkstemp(prefix=f".{row['delivery_id']}.", suffix=".part", dir=final.parent)
@@ -494,6 +500,10 @@ class PageDeliveryExecutor:
             page = PageSpec(raw_page["page_index"], final_ref, raw_page["url"], raw_page.get("expected_size"))
             if row["quality"]["original"] and "/img-original/" not in page.url.split("?", 1)[0]:
                 raise _Fault("original_url_required")
+            if self.resolver.root_state(final_ref) is RootState.MISSING_BOUND:
+                # Refuse before the first GET: the volume that holds the
+                # library is gone, not a directory to create.
+                raise _Fault("root_unavailable", block=True)
             if self.resolver.resolve(final_ref).exists():
                 raise _Fault("output_file_conflict", block=True)
             source = _source_identity(row, page)
