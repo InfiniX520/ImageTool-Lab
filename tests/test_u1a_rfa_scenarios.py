@@ -31,8 +31,18 @@ Mapping (contract section -> test):
 * R-C  Sec.3.1/3.3      a wide fan expands each node at most once
 * R-C  Sec.3.1          the read path follows the recorded handover
 * R-C  Sec.3.1          the write path (recovery) follows the same handover
+* R-B  Sec.2.4          the retry reserve keeps a failed row reachable under load
+* R-A  Sec.1.3.7        recent negative records hold a large page in two attempts
+* R-A  Sec.1.3.7        an offline root is not relaxed and the 120 s window holds
+* R-B  Sec.2.6          a refused cancel reports the winner instead of a fault
 
-Measured red baseline at 336541b: 21 tests, 21 failed, 0 errors, 42.9 s
+Two baselines matter for this file.  Against product 336541b (S0 only) every case
+below fails; against the merged product c24becd (S1+S2+S3 landed, before the
+v3.2-v3.4 fixes) the file is 25 tests, 21 passed, 4 failed, 0 errors, 88.8 s
+(`lanes/tests/run15.xml`), and the four failures are exactly the last four
+entries above (P2-1, P2-2, the P2-2 boundary and P3-2).
+
+Red baseline at 336541b: 21 tests, 21 failed, 0 errors, 42.9 s
 (`lanes/tests/run09.xml`), none for a fixture or syntax reason:
 
 * missing interface x3: `PageBudget(max_slices=...)` (two cases) and
@@ -1311,3 +1321,400 @@ def test_the_write_path_follows_the_recorded_handover(tmp_path):
             "the recovered page must link the handed-over artifact, not "
             f"{links!r}"
         )
+
+# ---------------------------------------------------------------------------
+# v3.2-v3.4 acceptance additions (audit P2-1, P2-2, P2-2 boundary, P3-2)
+# ---------------------------------------------------------------------------
+
+
+def write_cleanup_fact(repo, delivery_id, *, outcome, error_code="", completed=None):
+    """Persist one cleanup fact the way a completed sweep would (Sec.2.3)."""
+    payload = {
+        "delivery_id": delivery_id,
+        "batch_id": None,
+        "outcome": outcome,
+        "error_code": error_code,
+    }
+    if completed is not None:
+        payload["cleanup_completed"] = completed
+    with sqlite3.connect(repo.database_path) as conn:
+        row = conn.execute(
+            "SELECT job_id FROM deliveries WHERE delivery_id = ?", (delivery_id,)
+        ).fetchone()
+        assert row is not None, f"unknown delivery {delivery_id}"
+        conn.execute(
+            "INSERT INTO events(event_uuid, job_id, batch_id, kind, safe_payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                uuid.uuid4().hex,
+                str(row[0]),
+                None,
+                "delivery_cleanup",
+                canonical_json(payload),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+
+
+def add_cancelled_rows(repo, base_id, count, *, start_generation):
+    """Append cancelled rows with valid prepared evidence (new work arriving)."""
+    new_ids = []
+    with sqlite3.connect(repo.database_path) as conn:
+        for index in range(count):
+            new_id = uuid.uuid4().hex
+            clone_cleanup_row(conn, base_id, new_id, generation=start_generation + index)
+            new_ids.append(new_id)
+        conn.commit()
+    return new_ids
+
+
+def seed_many_pages(repo, root, *, pages, request_id):
+    """Deliver one synthetic work of 'pages' pages so a reuse page has candidates."""
+    job = h.submit(repo, request_id=request_id)
+    page = h.source(
+        (g.candidate(pages=tuple(range(pages))),),
+        page_identity="seed-" + request_id,
+    )
+    ids = h.accept(repo, job["batch_id"], page)
+    service = h.executor(repo, root, h.Transport(*(h.Response() for _ in ids)))
+    for delivery in ids:
+        assert h.run(repo, job, delivery, service).state == "completed"
+    settle(repo, job)
+    return job, ids
+
+
+def unreadable_observer(repo, monkeypatch, state, *, reason, counter=None, age_seconds=0):
+    """Replace the file observation with the product's own fail-closed record."""
+    from core.artifact_health import ArtifactExpectation, unobserved_health
+    from core.delivery_repository import path_ref_from_object
+    from core.library_repository import _ARTIFACT_HEALTH_POLICY
+
+    original = repo._observe_artifact
+
+    def observer(artifact, **kwargs):
+        if counter is not None:
+            counter.append(str(artifact["artifact_id"]))
+        resolver = kwargs["resolver"]
+        path = path_ref_from_object(json.loads(artifact["output_ref_json"]))
+        expectation = ArtifactExpectation.from_artifact_row(
+            artifact,
+            path=path,
+            root_revision=resolver.root_revision(path),
+            quality_key=kwargs["quality_key"],
+            policy_version=_ARTIFACT_HEALTH_POLICY.version,
+        )
+        checked_at = (
+            datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        ).isoformat()
+        return unobserved_health(
+            expectation,
+            state=state,
+            reason=reason,
+            checked_at=checked_at,
+            policy=_ARTIFACT_HEALTH_POLICY,
+        )
+
+    monkeypatch.setattr(repo, "_observe_artifact", observer)
+    return original
+
+
+def test_the_cleanup_retry_is_reached_under_continuous_load(tmp_path, monkeypatch):
+    """Sec.2.4: the retry reserve keeps a failed row reachable while work arrives."""
+    root = tmp_path / "library"
+    root.mkdir()
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, failed, _ = cancelled_with_temp(repo, root, monkeypatch)
+        write_cleanup_fact(repo, failed, outcome="failed", error_code="cleanup_failed")
+        add_cancelled_rows(repo, failed, 300, start_generation=1000)
+
+        stats: dict[str, int] = {}
+        window = [
+            fact["delivery_id"]
+            for fact in repo.list_cleanup_candidates(limit=200, stats=stats)
+        ]
+        assert failed in window, (
+            "Sec.2.4: retry_reserve=25 must surface a failed row inside a full "
+            f"tier-0 window; got {len(window)} fresh rows and no retry"
+        )
+
+        for limit in (1, 2, 7):
+            narrow = [
+                fact["delivery_id"]
+                for fact in repo.list_cleanup_candidates(limit=limit)
+            ]
+            assert len(narrow) == limit and failed not in narrow, (
+                f"Sec.2.4: limit={limit} has no retry reserve, so only fresh rows "
+                f"may be returned; got {len(narrow)} rows, failed present="
+                f"{failed in narrow}"
+            )
+
+        after = after_retry = 0
+        for round_no in range(6):
+            stats = {}
+            facts = repo.list_cleanup_candidates(
+                limit=200,
+                after_rowid=after,
+                after_retry_rowid=after_retry,
+                stats=stats,
+            )
+            ids = [fact["delivery_id"] for fact in facts]
+            assert failed in ids, (
+                f"Sec.2.4: round {round_no} lost the failed row under continuous "
+                f"load (tier cursors {after}/{after_retry})"
+            )
+            after = int(stats["next_rowid"])
+            after_retry = int(stats["next_retry_rowid"])
+            for delivery_id in ids:
+                if delivery_id == failed:
+                    continue  # the permanently failing row stays retryable
+                write_cleanup_fact(
+                    repo, delivery_id, outcome="cleaned", completed=True
+                )
+            add_cancelled_rows(
+                repo, failed, 200, start_generation=2000 + round_no * 200
+            )
+
+
+def test_a_large_page_of_unreadable_observations_still_commits(tmp_path, monkeypatch):
+    """Sec.1.3.7: a recent negative record may be reused for a hold, so the
+    second acceptance of a 300 file page must commit instead of slicing forever."""
+    root = tmp_path / "library"
+    root.mkdir()
+    from core.observation_snapshot import PageBudget, PreflightCancelled
+    from core.preservation_policy import LocalState
+
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        seed_many_pages(repo, root, pages=300, request_id="seed-300-unreadable")
+        job = h.submit(repo, request_id="reuse-300-unreadable")
+        page = h.source((g.candidate(pages=tuple(range(300))),))
+        observed: list[str] = []
+        unreadable_observer(
+            repo, monkeypatch, LocalState.UNREADABLE,
+            reason="observation_failed", counter=observed,
+        )
+
+        with pytest.raises(PreflightCancelled) as caught:
+            repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        assert caught.value.reason == "page_slice_limit", (
+            "Sec.1.1: 300 files need more slices than one call may take"
+        )
+        assert checkpoint(repo, job) is None, (
+            "Sec.1.6.1: a partial slice must not advance the cursor"
+        )
+
+        try:
+            ids = repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        except PreflightCancelled as exc:
+            pytest.fail(
+                "Sec.1.3.7: a recent UNREADABLE record may be reused to hold the "
+                "page, so the second acceptance must commit, but it raised "
+                f"{exc.reason!r}"
+            )
+        assert len(ids) == 300, f"one hold per page is expected, got {len(ids)}"
+        rows = [repo.get_delivery(item) for item in ids]
+        assert {row["state"] for row in rows} == {"needs_verification"}, (
+            "Sec.1.3.7: an unreadable file becomes a hold, never a failure or a "
+            "silent completion"
+        )
+        assert {row["error_code"] for row in rows} == {"artifact_unreadable"}, (
+            "Sec.1.3.7: the hold keeps the diagnostic code, got "
+            f"{sorted({row['error_code'] for row in rows})}"
+        )
+        current = checkpoint(repo, job)
+        assert current is not None and current["cursor_json"] == '"cursor-1"', (
+            "Sec.1.6.1: the page commits atomically and only then advances the cursor"
+        )
+        with sqlite3.connect(repo.database_path) as conn:
+            completed = conn.execute(
+                "SELECT COUNT(*) FROM deliveries WHERE job_id = ? AND state = 'completed'",
+                (job["job_id"],),
+            ).fetchone()[0]
+            artifacts = conn.execute(
+                "SELECT COUNT(*) FROM artifacts WHERE delivery_id IN "
+                "(SELECT delivery_id FROM deliveries WHERE job_id = ?)",
+                (job["job_id"],),
+            ).fetchone()[0]
+            links = conn.execute(
+                "SELECT COUNT(*) FROM batch_item_pages "
+                "WHERE batch_id = ? AND artifact_id IS NOT NULL",
+                (job["batch_id"],),
+            ).fetchone()[0]
+        assert completed == 0, "an unreadable page must not report a completion"
+        assert artifacts == 0, "no artifact may be recorded for an unreadable file"
+        assert links == 0, "no artifact link may be created for an unreadable file"
+
+
+def negative_progress(repo, job, page, captured, *, age_seconds):
+    """Replace the first captured record with a negative one of a given age."""
+    from core.artifact_health import unobserved_health
+    from core.library_repository import _ARTIFACT_HEALTH_POLICY
+    from core.preservation_policy import LocalState
+
+    records = progress_records(captured)
+    checked_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    ).isoformat()
+    records[0]["health"] = unobserved_health(
+        captured[0].expectation,
+        state=LocalState.UNREADABLE,
+        reason="observation_failed",
+        checked_at=checked_at,
+        policy=_ARTIFACT_HEALTH_POLICY,
+    ).to_payload()
+    write_progress_event(repo, job, page, records)
+    return records
+
+
+def test_a_root_unavailable_page_is_not_relaxed_and_an_old_negative_record_is_reobserved(
+    tmp_path, monkeypatch
+):
+    """Sec.1.3.7 boundary: an offline root stops the page, the 120 s negative
+    window is honoured, and an older negative record is observed again."""
+    from core.observation_snapshot import PageBudget, PreflightCancelled
+    from core.preservation_policy import LocalState
+
+    # A: an unavailable root is not a hold and never commits the page.
+    offline_root = tmp_path / "library-offline"
+    offline_root.mkdir()
+    with LibraryRepository(tmp_path / "offline-ledger.sqlite3") as repo:
+        seed_many_pages(repo, offline_root, pages=300, request_id="seed-300-offline")
+        job = h.submit(repo, request_id="reuse-300-offline")
+        page = h.source((g.candidate(pages=tuple(range(300))),))
+        unreadable_observer(
+            repo, monkeypatch, LocalState.ROOT_UNAVAILABLE, reason="root_unavailable"
+        )
+        for attempt in range(2):
+            with pytest.raises(PreflightCancelled) as caught:
+                repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+            assert caught.value.reason == "page_slice_limit", (
+                "Sec.1.3.7: an offline root must stop the page and wait for the "
+                f"volume, not hold it (attempt {attempt})"
+            )
+            assert checkpoint(repo, job) is None, (
+                "Sec.1.6.1: nothing may commit while the root is unavailable"
+            )
+        with sqlite3.connect(repo.database_path) as conn:
+            held = conn.execute(
+                "SELECT COUNT(*) FROM deliveries WHERE job_id = ? "
+                "AND state = 'needs_verification'",
+                (job["job_id"],),
+            ).fetchone()[0]
+        assert held == 0, "an unavailable root must never become a hold"
+
+    # B: a 10 s old negative record is inside the 120 s window and is reused.
+    recent_root = tmp_path / "library-recent"
+    recent_root.mkdir()
+    with LibraryRepository(tmp_path / "recent-ledger.sqlite3") as repo:
+        job, page, captured, seen = prepared_reuse_page(
+            repo, recent_root, monkeypatch, request_id="reuse-33-recent-negative"
+        )
+        records = negative_progress(repo, job, page, captured, age_seconds=10)
+        unobserved = set(all_artifacts(repo)) - {
+            record["artifact_id"] for record in records
+        }
+        try:
+            repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        except PreflightCancelled as exc:
+            pytest.fail(
+                "Sec.1.3.7: a recent negative record may be reused so the page "
+                f"commits, but the acceptance raised {exc.reason!r}"
+            )
+        assert set(seen) == unobserved, (
+            "Sec.1.3.7: a 10 s old UNREADABLE record is inside the 120 s window "
+            "and must not be opened again; observed "
+            + repr(sorted(seen))
+        )
+
+    # C: a 130 s old negative record is outside the window and is re-observed.
+    stale_root = tmp_path / "library-stale"
+    stale_root.mkdir()
+    with LibraryRepository(tmp_path / "stale-ledger.sqlite3") as repo:
+        job, page, captured, seen = prepared_reuse_page(
+            repo, stale_root, monkeypatch, request_id="reuse-33-stale-negative"
+        )
+        records = negative_progress(repo, job, page, captured, age_seconds=130)
+        stale_id = records[0]["artifact_id"]
+        unobserved = set(all_artifacts(repo)) - {
+            record["artifact_id"] for record in records
+        }
+        try:
+            repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        except PreflightCancelled as exc:
+            pytest.fail(
+                "Sec.1.3.7: a 130 s old negative record is outside the 120 s window "
+                f"and must be re-observed so the page commits; raised {exc.reason!r}"
+            )
+        assert set(seen) == {stale_id} | unobserved, (
+            "Sec.1.3.7: only the stale negative record and the never-observed file "
+            f"may be opened again; got {sorted(seen)}"
+        )
+        assert len(page_links(repo, job["batch_id"])) == 33
+
+
+
+def test_a_refused_cancel_does_not_escape_a_storage_fault(tmp_path, monkeypatch):
+    """Sec.2.6: a refusal that races a completion reports the winner."""
+    from core.page_delivery import _Fault
+
+    root = tmp_path / "library"
+    root.mkdir()
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job = h.submit(repo)
+        (delivery,) = h.accept(repo, job["batch_id"], h.source((h.candidate(),)))
+
+        def stop_before_publish(stage, row):
+            if stage == "before_publish":
+                raise _Fault("audit_stop_before_publish")
+
+        seed_service = h.executor(
+            repo, root, h.Transport(h.Response()), fault_hook=stop_before_publish
+        )
+        assert h.run(repo, job, delivery, seed_service).state == "recovery_needed"
+        assert not h.target(root).exists()
+
+        winner = h.executor(repo, root, h.Transport())
+        original_authorize = repo.publish_authorized
+        armed = {"value": True}
+        winner_row: dict = {}
+
+        def authorize(delivery_id):
+            if armed["value"]:
+                armed["value"] = False
+                assert winner.recover_local() == ((delivery, "completed"),), (
+                    "precondition: the winner publishes and confirms the same page"
+                )
+                winner_row.update(repo.get_delivery(delivery))
+                repo.record_removal_intent(
+                    job["batch_id"],
+                    TARGET,
+                    0,
+                    h.OUTPUT_REF,
+                    intent="excluded",
+                    command_id="exclude-after-win",
+                )
+            return original_authorize(delivery_id)
+
+        monkeypatch.setattr(repo, "publish_authorized", authorize)
+        loser = h.executor(repo, root, h.Transport())
+        try:
+            result = loser.recover_local()
+        except Exception as exc:
+            pytest.fail(
+                "Sec.2.6: a refused cancel must not raise, but it raised "
+                f"{type(exc).__name__}: {exc}"
+            )
+        assert result == ((delivery, "completed"),), (
+            "Sec.2.6/2.7: the refusal lost the race to a completion and must report "
+            f"the winner's state, got {result!r}"
+        )
+        row = repo.get_delivery(delivery)
+        assert row["state"] == "completed", "the winner's row must not be rewritten"
+        assert row["error_code"] == winner_row["error_code"], (
+            "Sec.2.6: the refusal must not write an issue over a completed row"
+        )
+        assert row["generation"] == winner_row["generation"], (
+            "Sec.2.6: the refusal must not create another generation"
+        )
+        assert repo.get_artifact(delivery) is not None
+
