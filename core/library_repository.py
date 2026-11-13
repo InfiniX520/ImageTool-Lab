@@ -47,14 +47,23 @@ from core.delivery_repository import (
 from core.follow_repository import FOLLOW_DDL, FOLLOW_TABLES, FOLLOW_COMMANDS, FollowRepositoryMixin
 from core.local_observation import LocalObserver, ObservationBudget, ObservationRequest
 from core.observation_snapshot import (
+    MAX_PROGRESS_EVENTS,
+    MAX_PROGRESS_EVENT_RECORDS,
+    MAX_PROGRESS_RECORDS,
+    PROGRESS_EVENT_KIND,
+    ObservationKey,
     PageBudget,
     PageKey,
+    PageObservationProgress,
     PageSnapshot,
     PreflightCancelled,
     PreflightSnapshot,
     PreflightUnavailable,
+    ProgressRecord,
     RetryPreflight,
     SnapshotError,
+    progress_event_payload,
+    progress_from_event,
 )
 from core.preservation_policy import LocalState, RemovalIntent
 from core.removal_scope import (
@@ -299,6 +308,22 @@ class _Command:
     payload: dict[str, Any]
     future: Future
     size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PagePlan:
+    """One read-only snapshot of every candidate this page would observe.
+
+    Built once per acceptance attempt, outside any write transaction.  Slices
+    and retries reuse it so the database is not re-read file by file.
+    """
+
+    batch_id: str
+    job_id: str
+    run_id: str
+    quality_key: str
+    resolver: PathResolver
+    selected: dict[tuple[str, int, str, str], tuple[PageKey, int, str | None, list[Any]]]
 
 
 def _utcnow() -> str:
@@ -699,6 +724,9 @@ class LibraryRepository(
         # is currently observing files on this thread.  Thread-local keeps one
         # observer's context from leaking into another repository call.
         self._accept_context = threading.local()
+        # Diagnostics only: a progress fact that the writer rejected.  It never
+        # fails an acceptance, so it is recorded instead of raised.
+        self._progress_write_error: str | None = None
 
         self._lock = InstanceLock(self._path.parent / ".writer.lock")
         try:
@@ -768,6 +796,9 @@ class LibraryRepository(
 
     def _accept_budget(self) -> PageBudget | None:
         return getattr(self._accept_context, "budget", None)
+
+    def _accept_page_digest(self) -> str | None:
+        return getattr(self._accept_context, "page_digest", None)
 
     def _path_resolver_snapshot(self) -> PathResolver | None:
         with self._path_resolver_lock:
@@ -1125,6 +1156,8 @@ class LibraryRepository(
             return self._activate_next(conn)
         if command.kind == "accept_source_page":
             return self._accept_source_page(conn, command.payload)
+        if command.kind == "record_page_observation":
+            return self._record_page_observation(conn, command.payload)
         if command.kind == "record_removal_intent":
             return self._record_removal_intent(conn, command.payload)
         if command.kind == "claim_delivery":
@@ -1292,6 +1325,9 @@ class LibraryRepository(
         last_reason = "preflight_incomplete"
         self._accept_context.cancel = cancel
         self._accept_context.budget = page_budget
+        # The digest names the exact page content; it is the identity a later
+        # slice or a resumed batch may reuse observations for.
+        self._accept_context.page_digest = digest
         try:
             while True:
                 if cancel is not None and cancel.is_set():
@@ -1338,6 +1374,76 @@ class LibraryRepository(
         finally:
             self._accept_context.cancel = None
             self._accept_context.budget = None
+            self._accept_context.page_digest = None
+
+    def record_page_observation(
+        self,
+        job_id: str,
+        key: ObservationKey,
+        records: Iterable[ProgressRecord],
+        *,
+        batch_id: str | None = None,
+        observed_files: int = 0,
+        observed_bytes: int = 0,
+        slice_seq: int = 0,
+    ) -> int:
+        """Append one slice of page observations as an immutable fact.
+
+        Progress never advances a cursor, writes a receipt or claims a delivery:
+        it records which artifact bytes were observed for which page content,
+        so a later slice or a resumed batch can skip hashing them again.  The
+        page identity deliberately excludes the batch, because a resume creates
+        a new batch for the same page.
+        """
+        job_id = _validate_identifier(job_id, "job id")
+        if not isinstance(key, ObservationKey):
+            raise LibraryError("record_page_observation requires ObservationKey")
+        if key.job_id != job_id:
+            raise LibraryError("Observation progress key does not belong to the job")
+        if batch_id is not None:
+            batch_id = _validate_identifier(batch_id, "batch id")
+        for value, name in (
+            (observed_files, "observed files"),
+            (observed_bytes, "observed bytes"),
+            (slice_seq, "slice sequence"),
+        ):
+            if type(value) is not int or value < 0:
+                raise LibraryError(f"Invalid {name}")
+        items = tuple(records)
+        if not all(isinstance(item, ProgressRecord) for item in items):
+            raise LibraryError("Observation progress records must be ProgressRecord")
+        if not items:
+            return 0
+        self._ensure_open()
+        stored = 0
+        for start in range(0, len(items), MAX_PROGRESS_EVENT_RECORDS):
+            chunk = items[start : start + MAX_PROGRESS_EVENT_RECORDS]
+            roots = {
+                record.health.expectation.path.root_id: record.root_revision
+                for record in chunk
+            }
+            event = progress_event_payload(
+                key,
+                chunk,
+                observed_files=observed_files,
+                observed_bytes=observed_bytes,
+                slice_seq=slice_seq,
+                root_revisions=roots,
+                policy_version=_ARTIFACT_HEALTH_POLICY.version,
+            )
+            stored += int(
+                self._enqueue(
+                    "record_page_observation",
+                    {"job_id": job_id, "batch_id": batch_id, "event": event},
+                    size_payload={
+                        "kind": "record_page_observation",
+                        "job_id": job_id,
+                        "event": event,
+                    },
+                )
+                or 0
+            )
+        return stored
 
     def record_removal_intent(
         self,
@@ -2263,6 +2369,13 @@ class LibraryRepository(
 
         Every database read happens in one read-only snapshot before any file
         is opened; the writer revalidates each record against its own row.
+
+        One budget is one *slice*, not the page's permanent limit: observations
+        an earlier slice already persisted are reused, a page that needs more
+        files than one slice continues in the next slice, and only a candidate
+        that cannot fit a slice at all stops the page.  Nothing here writes a
+        delivery, receipt or cursor: the caller's atomic acceptance remains the
+        only point where a page becomes committed.
         """
         run_id = f"batch-{batch_id}"
         resolver = self._path_resolver_snapshot()
@@ -2270,6 +2383,20 @@ class LibraryRepository(
             return PreflightSnapshot(
                 run_id=run_id, pages={}, degraded=True, reason="no_resolver"
             )
+        plan = self._plan_page_health(batch_id, page, resolver=resolver, run_id=run_id)
+        if isinstance(plan, PreflightSnapshot):
+            return plan
+        return self._observe_page_plan(plan, page)
+
+    def _plan_page_health(
+        self,
+        batch_id: str,
+        page: SourcePage,
+        *,
+        resolver: PathResolver,
+        run_id: str,
+    ) -> _PagePlan | PreflightSnapshot:
+        """Read every candidate row this page would observe, in one snapshot."""
         selected: dict[
             tuple[str, int, str, str], tuple[PageKey, int, str | None, list[Any]]
         ] = {}
@@ -2344,79 +2471,186 @@ class LibraryRepository(
             return PreflightSnapshot(
                 run_id=run_id, pages={}, degraded=True, reason="preflight_failed"
             )
-
         # The read snapshot is closed before any file is opened.
-        records: dict[str, ArtifactHealth | None] = {}
+        return _PagePlan(
+            batch_id=batch_id,
+            job_id=str(job["job_id"]),
+            run_id=run_id,
+            quality_key=quality_key,
+            resolver=resolver,
+            selected=selected,
+        )
+
+    def _observe_page_plan(
+        self, plan: _PagePlan, page: SourcePage
+    ) -> PreflightSnapshot:
+        """Observe one planned page in slices, reusing usable observations."""
         cancel = self._accept_cancel()
         budget = self._accept_budget()
-        started = time.monotonic()
-        observed_files = 0
-        observed_bytes = 0
-        for _, _, _, artifacts in selected.values():
+        digest = self._accept_page_digest()
+        key: ObservationKey | None = None
+        if digest is not None:
+            try:
+                key = ObservationKey(
+                    job_id=plan.job_id,
+                    source_id=page.source_id,
+                    pass_id=page.pass_id,
+                    entity_id=page.entity_id,
+                    page_identity=page.page_identity,
+                    page_digest=digest,
+                )
+            except SnapshotError:
+                key = None
+        progress = None if key is None else self._load_observation_progress(key)
+        slices_enabled = progress is not None and budget is not None
+        records: dict[str, ArtifactHealth | None] = {}
+        ordered: list[tuple[Any, str]] = []
+        seen: set[str] = set()
+        for _, _, _, artifacts in plan.selected.values():
             for artifact in artifacts:
-                if cancel is not None and cancel.is_set():
-                    # A pause/close stops the remaining candidates instead of
-                    # hashing the whole page; this is a control result, not a
-                    # file-health verdict.
-                    raise PreflightCancelled("cancelled")
-                if budget is not None:
-                    # Check before starting the next file: a page budget of N
-                    # must never open N+1 files and then complain.
-                    if observed_files >= budget.max_files:
-                        raise PreflightCancelled("page_file_budget")
-                    if observed_bytes > budget.max_bytes:
-                        raise PreflightCancelled("page_byte_budget")
-                    if time.monotonic() - started > float(budget.max_seconds):
-                        raise PreflightCancelled("page_time_budget")
                 artifact_id = str(artifact["artifact_id"])
-                if artifact_id in records:
+                if artifact_id in seen:
                     continue
-                try:
-                    artifact_path = path_ref_from_object(
-                        _parse_json_object(
-                            artifact["output_ref_json"], "artifact output reference"
+                seen.add(artifact_id)
+                ordered.append((artifact, artifact_id))
+        new_records: list[ProgressRecord] = []
+        fresh_files = 0
+        fresh_bytes = 0
+        slices = 0
+        slice_started = time.monotonic()
+
+        def flush() -> None:
+            """Hand this slice's new observations to the progress log."""
+            nonlocal new_records, fresh_files, fresh_bytes
+            pending = new_records
+            new_records = []
+            if not pending or key is None:
+                fresh_files, fresh_bytes = 0, 0
+                return
+            self._persist_progress(
+                key,
+                tuple(pending),
+                batch_id=plan.batch_id,
+                observed_files=fresh_files,
+                observed_bytes=fresh_bytes,
+                slice_seq=slices + 1,
+            )
+            fresh_files, fresh_bytes = 0, 0
+
+        def close_slice() -> None:
+            """Persist the finished slice, then open the next one or stop.
+
+            A call may take at most `max_slices` slices, so a page that fills the
+            last allowed slice returns a budget result even when nothing is left
+            to observe; the following call then commits without opening a file.
+            """
+            nonlocal slices, slice_started
+            flush()
+            slices += 1
+            slice_started = time.monotonic()
+            if budget is not None and slices >= budget.max_slices:
+                raise PreflightCancelled("page_slice_limit")
+
+        index = 0
+        while index < len(ordered):
+            artifact, artifact_id = ordered[index]
+            if cancel is not None and cancel.is_set():
+                # A pause/close stops the remaining candidates instead of
+                # hashing the whole page; this is a control result, not a
+                # file-health verdict.
+                flush()
+                raise PreflightCancelled("cancelled")
+            reused = None
+            if progress is not None:
+                reused = self._progress_health(
+                    progress.record(artifact_id),
+                    artifact,
+                    quality_key=plan.quality_key,
+                    resolver=plan.resolver,
+                )
+            if reused is not None:
+                # An earlier slice already observed these exact bytes within
+                # the freshness window; do not open the file again.
+                records[artifact_id] = reused
+                index += 1
+                continue
+            if budget is not None:
+                exhausted = self._slice_exhausted(
+                    budget, fresh_files, fresh_bytes, slice_started
+                )
+                if exhausted is not None:
+                    if not slices_enabled:
+                        raise PreflightCancelled(exhausted)
+                    # The slice is full (or over its byte/time budget): the
+                    # next file starts a fresh slice, never an N+1 in this one.
+                    close_slice()
+                    continue
+            try:
+                artifact_path = path_ref_from_object(
+                    _parse_json_object(
+                        artifact["output_ref_json"], "artifact output reference"
+                    )
+                )
+                plan.resolver.root_path(artifact_path)
+            except (ContractError, LibraryError, KeyError, TypeError, ValueError):
+                records[artifact_id] = None
+                index += 1
+                continue
+            try:
+                record = self._observe_artifact(
+                    artifact,
+                    resolver=plan.resolver,
+                    run_id=plan.run_id,
+                    quality_key=plan.quality_key,
+                )
+            except (ContractError, OSError, ValueError):
+                flush()
+                return PreflightSnapshot(
+                    run_id=plan.run_id,
+                    pages={},
+                    degraded=True,
+                    reason="observation_failed",
+                )
+            records[artifact_id] = record
+            fresh_files += 1
+            if record is not None:
+                fresh_bytes += int(record.bytes_read or 0)
+                if key is not None:
+                    new_records.append(
+                        ProgressRecord(
+                            artifact_id=artifact_id,
+                            root_revision=record.expectation.root_revision,
+                            health=record,
                         )
                     )
-                    resolver.root_path(artifact_path)
-                except (ContractError, LibraryError, KeyError, TypeError, ValueError):
-                    records[artifact_id] = None
-                    continue
-                try:
-                    record = self._observe_artifact(
-                        artifact,
-                        resolver=resolver,
-                        run_id=run_id,
-                        quality_key=quality_key,
-                    )
-                except (ContractError, OSError, ValueError):
-                    return PreflightSnapshot(
-                        run_id=run_id, pages={}, degraded=True, reason="observation_failed"
-                    )
-                records[artifact_id] = record
-                observed_files += 1
-                if record is not None:
-                    observed_bytes += int(record.bytes_read or 0)
-                if budget is not None:
-                    if observed_files > budget.max_files:
-                        raise PreflightCancelled("page_file_budget")
-                    if observed_bytes > budget.max_bytes:
-                        raise PreflightCancelled("page_byte_budget")
-                    if time.monotonic() - started > float(budget.max_seconds):
-                        raise PreflightCancelled("page_time_budget")
+            index += 1
+            if (
+                slices_enabled
+                and budget is not None
+                and fresh_files >= budget.max_files
+            ):
+                # A full slice ends as soon as it is full: one call may take at
+                # most max_slices slices, and the next call continues from the
+                # durable progress instead of re-reading these files.
+                close_slice()
+        # Every slice, including the last one, leaves its observations behind:
+        # a crash between the last observation and the atomic commit must not
+        # force the same files to be hashed again.
+        flush()
         try:
             pages: dict[tuple[str, int, str, str], PageSnapshot] = {}
-            for key, generation, delivery_id, artifacts in selected.values():
+            for page_key, generation, delivery_id, artifacts in plan.selected.values():
                 observed: list[ArtifactHealth] = []
                 unobserved: list[str] = []
                 for artifact in artifacts:
                     artifact_id = str(artifact["artifact_id"])
-                    record = records.get(artifact_id)
-                    if record is None:
+                    health = records.get(artifact_id)
+                    if health is None:
                         unobserved.append(artifact_id)
                     else:
-                        observed.append(record)
-                pages[key.storage_key] = PageSnapshot(
-                    key=key,
+                        observed.append(health)
+                pages[page_key.storage_key] = PageSnapshot(
+                    key=page_key,
                     generation=generation,
                     delivery_id=delivery_id,
                     observed=tuple(observed),
@@ -2424,11 +2658,165 @@ class LibraryRepository(
                     degraded=False,
                     reason="ok",
                 )
-            return PreflightSnapshot(run_id=run_id, pages=pages)
+            return PreflightSnapshot(run_id=plan.run_id, pages=pages)
         except SnapshotError:
             return PreflightSnapshot(
-                run_id=run_id, pages={}, degraded=True, reason="snapshot_invalid"
+                run_id=plan.run_id,
+                pages={},
+                degraded=True,
+                reason="snapshot_invalid",
             )
+
+    @staticmethod
+    def _slice_exhausted(
+        budget: PageBudget, fresh_files: int, fresh_bytes: int, started: float
+    ) -> str | None:
+        """Name the budget a slice has used up, or None while it still fits."""
+        if fresh_files >= budget.max_files:
+            return "page_file_budget"
+        if fresh_bytes > budget.max_bytes:
+            return "page_byte_budget"
+        if time.monotonic() - started > float(budget.max_seconds):
+            return "page_time_budget"
+        return None
+
+    def _load_observation_progress(
+        self, key: ObservationKey
+    ) -> PageObservationProgress | None:
+        """Read the newest progress facts for this page.
+
+        None means "start over": losing progress only costs hashes, never
+        correctness, so an unreadable event log is not a page failure.  A
+        malformed fact is skipped instead of being trusted.
+        """
+        try:
+            with contextlib_closing(self._readonly_connection()) as conn:
+                rows = conn.execute(
+                    "SELECT safe_payload FROM events WHERE kind = ? AND job_id = ? "
+                    "ORDER BY event_seq DESC LIMIT ?",
+                    (PROGRESS_EVENT_KIND, key.job_id, MAX_PROGRESS_EVENTS),
+                ).fetchall()
+        except (sqlite3.Error, LibraryError):
+            return None
+        records: dict[str, ProgressRecord] = {}
+        truncated = False
+        for row in rows:
+            try:
+                stored_key, stored = progress_from_event(
+                    json.loads(str(row["safe_payload"]))
+                )
+            except (TypeError, ValueError, SnapshotError):
+                continue
+            if stored_key != key:
+                continue
+            for record in stored:
+                if len(records) >= MAX_PROGRESS_RECORDS:
+                    truncated = True
+                    break
+                # Newest event first: the first record per artifact wins.
+                records.setdefault(record.artifact_id, record)
+        return PageObservationProgress(key=key, records=records, truncated=truncated)
+
+    def _persist_progress(
+        self,
+        key: ObservationKey,
+        records: tuple[ProgressRecord, ...],
+        *,
+        batch_id: str,
+        observed_files: int,
+        observed_bytes: int,
+        slice_seq: int,
+    ) -> None:
+        """Persist one slice of observations; never fail the acceptance.
+
+        A progress fact is an accelerator, not a precondition.  If the writer
+        rejects it, this page is still observed and accepted; the only cost is
+        that a later slice hashes the same files again.
+        """
+        try:
+            self.record_page_observation(
+                key.job_id,
+                key,
+                records,
+                batch_id=batch_id,
+                observed_files=observed_files,
+                observed_bytes=observed_bytes,
+                slice_seq=slice_seq,
+            )
+        except (LibraryError, ContractError, OSError, sqlite3.Error) as exc:
+            self._progress_write_error = type(exc).__name__
+
+    def _progress_health(
+        self,
+        record: ProgressRecord | None,
+        artifact: Any,
+        *,
+        quality_key: str,
+        resolver: PathResolver,
+    ) -> ArtifactHealth | None:
+        """Return a recorded observation that still counts as current evidence.
+
+        Every condition of the frozen reuse rule is re-checked against the row
+        read for *this* attempt: artifact identity and bytes, page quality
+        decision, mapped root revision, policy version and observation age.
+        Anything else is dropped and observed again: an absent or unreadable
+        artifact is never promoted to healthy, and a stale record is never
+        treated as current proof.
+        """
+        if record is None or not _artifact_is_valid(artifact):
+            return None
+        health = record.health
+        if health.policy != _ARTIFACT_HEALTH_POLICY:
+            return None
+        if health.state in {
+            LocalState.UNKNOWN,
+            LocalState.UNREADABLE,
+            LocalState.ROOT_UNAVAILABLE,
+        }:
+            return None
+        expectation = health.expectation
+        if not expectation.matches_row(artifact):
+            return None
+        if expectation.quality_key != quality_key or record.quality_key != quality_key:
+            return None
+        if expectation.policy_version != _ARTIFACT_HEALTH_POLICY.version:
+            return None
+        try:
+            revision = resolver.root_revision(expectation.path)
+        except ContractError:
+            return None
+        if revision != expectation.root_revision or revision != record.root_revision:
+            return None
+        if not health.is_fresh(_utcnow()):
+            return None
+        if not self._progress_object_is_unchanged(health, resolver):
+            return None
+        return health
+
+    @staticmethod
+    def _progress_object_is_unchanged(
+        health: ArtifactHealth, resolver: PathResolver
+    ) -> bool:
+        """Compare the recorded object identity with the file on disk now.
+
+        A stat is not a read: it costs one metadata lookup, never a hash.  It
+        catches the file that was replaced, moved or resized between slices
+        while the record was still inside its freshness window.  A same-size
+        in-place rewrite keeps the identity and is deliberately left to the
+        publication/confirmation gates instead of re-hashing every page.
+        """
+        identity = health.identity
+        if identity is None or health.observed_size is None:
+            return False
+        try:
+            info = os.stat(resolver.resolve(health.expectation.path))
+        except (OSError, ContractError, ValueError):
+            return False
+        return (
+            int(identity.device) == int(info.st_dev)
+            and int(identity.file_index) == int(info.st_ino)
+            and int(health.observed_size) == int(info.st_size)
+        )
 
     def _observe_artifact(
         self,
@@ -2654,6 +3042,36 @@ class LibraryRepository(
                     )
                     self._refresh_items_for_delivery(conn, str(row["delivery_id"]), now)
             return result
+
+    def _record_page_observation(
+        self, conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> int:
+        """Store one progress fact; a deleted job simply has nothing to record."""
+        job_id = str(payload["job_id"])
+        event = payload.get("event")
+        batch_id = payload.get("batch_id")
+        if not isinstance(event, dict):
+            raise CorruptDataError("Corrupt observation progress event")
+        # Parse before writing: a malformed progress fact is never stored, so
+        # the reader can trust every stored fact.
+        progress_from_event(event)
+        with self._transaction(conn):
+            if self._get_job_row(conn, job_id) is None:
+                return 0
+            stored_batch: str | None = None
+            if (
+                batch_id is not None
+                and self._get_batch_row(conn, str(batch_id)) is not None
+            ):
+                stored_batch = str(batch_id)
+            self._insert_event(
+                conn,
+                job_id=job_id,
+                batch_id=stored_batch,
+                kind=PROGRESS_EVENT_KIND,
+                payload=event,
+            )
+            return len(event["records"])
 
     def _accept_source_page(
         self, conn: sqlite3.Connection, payload: dict[str, Any]

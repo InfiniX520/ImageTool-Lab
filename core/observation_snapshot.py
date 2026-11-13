@@ -16,6 +16,17 @@ generation and the same artifact.  Anything else raises `RetryPreflight` so the
 caller can hash again outside the write transaction; it must never be turned
 into a new `needs_verification` row.
 
+A page may hold more candidates than one observation slice can hash.  The
+progress types at the end of this module describe the append-only facts a slice
+leaves behind: an `ObservationKey` binds them to the exact page content and job
+(never to a batch, so a resume keeps them), a `ProgressRecord` binds one
+observation to one artifact row, and `PageBudget.max_slices` bounds how many
+slices one call may take.  Records are reusable only as current evidence for
+the identical row: the writer re-checks the row, the quality decision, the root
+revision, the policy, the age and (with one stat, never a hash) that the object
+on disk is the one that was observed.  Anything stale or mismatched is observed
+again.
+
 No file or database I/O happens here.
 """
 from __future__ import annotations
@@ -325,13 +336,245 @@ def empty_snapshot(run_id: str) -> PreflightSnapshot:
     """A snapshot that claims nothing; the writer must retry on any candidate."""
     return PreflightSnapshot(run_id=run_id, pages={}, degraded=True, reason="no_candidates")
 
+
+PROGRESS_SCHEMA = 1
+PROGRESS_EVENT_KIND = "page_observation_progress"
+MAX_PROGRESS_RECORDS = 4096
+MAX_PROGRESS_EVENT_RECORDS = 512
+MAX_PROGRESS_EVENTS = 200
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationKey:
+    """Identity of one page acceptance, stable across resume and batches.
+
+    The batch is deliberately absent: a resume creates a new batch, yet the
+    observations taken for the same page must still be usable.  The page digest
+    pins the exact page content, so a changed page starts over instead of
+    reusing evidence for a different candidate set.
+    """
+
+    job_id: str
+    source_id: str
+    pass_id: str
+    entity_id: str
+    page_identity: str
+    page_digest: str
+
+    def __post_init__(self):
+        for value, name in (
+            (self.job_id, "job id"),
+            (self.source_id, "source id"),
+            (self.pass_id, "pass id"),
+            (self.entity_id, "entity id"),
+            (self.page_identity, "page identity"),
+        ):
+            _token(value, name)
+        if (
+            not isinstance(self.page_digest, str)
+            or _DIGEST_RE.fullmatch(self.page_digest) is None
+        ):
+            raise SnapshotError("Invalid page digest")
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "source_id": self.source_id,
+            "pass_id": self.pass_id,
+            "entity_id": self.entity_id,
+            "page_identity": self.page_identity,
+            "page_digest": self.page_digest,
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> "ObservationKey":
+        if not isinstance(value, Mapping):
+            raise SnapshotError("Invalid observation page key")
+        try:
+            return cls(
+                job_id=str(value["job_id"]),
+                source_id=str(value["source_id"]),
+                pass_id=str(value["pass_id"]),
+                entity_id=str(value["entity_id"]),
+                page_identity=str(value["page_identity"]),
+                page_digest=str(value["page_digest"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SnapshotError("Invalid observation page key") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressRecord:
+    """One artifact observation a later slice may reuse under §1.3."""
+
+    artifact_id: str
+    root_revision: int
+    health: ArtifactHealth
+
+    def __post_init__(self):
+        _token(self.artifact_id, "artifact id")
+        if not isinstance(self.health, ArtifactHealth):
+            raise SnapshotError("Invalid observation progress health")
+        if self.health.expectation.artifact_id != self.artifact_id:
+            raise SnapshotError("Progress record does not bind its artifact")
+        if (
+            type(self.root_revision) is not int
+            or self.root_revision != self.health.expectation.root_revision
+        ):
+            raise SnapshotError("Progress record does not bind its root revision")
+
+    @property
+    def output_key(self) -> str:
+        return self.health.expectation.output_key
+
+    @property
+    def quality_key(self) -> str:
+        return self.health.expectation.quality_key
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "artifact_id": self.artifact_id,
+            "output_key": self.output_key,
+            "quality_key": self.quality_key,
+            "root_revision": self.root_revision,
+            "health": self.health.to_payload(),
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> "ProgressRecord":
+        if not isinstance(value, Mapping):
+            raise SnapshotError("Invalid observation progress record")
+        try:
+            health = ArtifactHealth.from_payload(value["health"])
+            record = cls(
+                artifact_id=str(value["artifact_id"]),
+                root_revision=value["root_revision"],
+                health=health,
+            )
+            if str(value.get("output_key")) != record.output_key:
+                raise SnapshotError("Progress record output key does not match its health")
+            if str(value.get("quality_key")) != record.quality_key:
+                raise SnapshotError(
+                    "Progress record quality key does not match its health"
+                )
+            return record
+        except SnapshotError:
+            raise
+        except (ContractError, KeyError, TypeError, ValueError) as exc:
+            raise SnapshotError("Invalid observation progress record") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class PageObservationProgress:
+    """Observations an earlier slice already produced for one page."""
+
+    key: ObservationKey
+    records: Mapping[str, ProgressRecord]
+    schema: int = PROGRESS_SCHEMA
+    truncated: bool = False
+
+    def __post_init__(self):
+        if not isinstance(self.key, ObservationKey):
+            raise SnapshotError("Invalid observation progress key")
+        if self.schema != PROGRESS_SCHEMA:
+            raise SnapshotError("Unsupported observation progress schema")
+        if type(self.truncated) is not bool:
+            raise SnapshotError("Invalid observation progress truncation flag")
+        frozen: dict[str, ProgressRecord] = {}
+        for artifact_id, record in self.records.items():
+            if not isinstance(record, ProgressRecord):
+                raise SnapshotError("Invalid observation progress record")
+            if str(artifact_id) != record.artifact_id:
+                raise SnapshotError("Progress record key does not match its artifact")
+            frozen[record.artifact_id] = record
+        if len(frozen) > MAX_PROGRESS_RECORDS:
+            raise SnapshotError("Too many observation progress records")
+        object.__setattr__(self, "records", MappingProxyType(frozen))
+
+    def record(self, artifact_id: str) -> ProgressRecord | None:
+        return self.records.get(artifact_id)
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+
+def progress_event_payload(
+    key: ObservationKey,
+    records: Iterable[ProgressRecord],
+    *,
+    observed_files: int,
+    observed_bytes: int,
+    slice_seq: int,
+    root_revisions: Mapping[str, int],
+    policy_version: int,
+) -> dict[str, Any]:
+    """Freeze one slice of observations as an append-only progress fact."""
+    if not isinstance(key, ObservationKey):
+        raise SnapshotError("Invalid observation key")
+    items = tuple(records)
+    if not items or len(items) > MAX_PROGRESS_EVENT_RECORDS:
+        raise SnapshotError("Invalid observation progress record count")
+    if not all(isinstance(item, ProgressRecord) for item in items):
+        raise SnapshotError("Invalid observation progress record")
+    for value, name in (
+        (observed_files, "observed files"),
+        (observed_bytes, "observed bytes"),
+        (slice_seq, "slice sequence"),
+    ):
+        if type(value) is not int or value < 0:
+            raise SnapshotError(f"Invalid {name}")
+    if type(policy_version) is not int or policy_version < 1:
+        raise SnapshotError("Invalid observation policy version")
+    roots: dict[str, int] = {}
+    for root_id, revision in dict(root_revisions).items():
+        if type(revision) is not int or revision < 1:
+            raise SnapshotError("Invalid observation root revision")
+        roots[_token(str(root_id), "root id")] = revision
+    return {
+        "schema_version": PROGRESS_SCHEMA,
+        "page_key": key.to_payload(),
+        "records": [item.to_payload() for item in items],
+        "observed_files": observed_files,
+        "observed_bytes": observed_bytes,
+        "slice_seq": slice_seq,
+        "root_revisions": roots,
+        "policy_version": policy_version,
+    }
+
+
+def progress_from_event(
+    value: object,
+) -> tuple[ObservationKey, tuple[ProgressRecord, ...]]:
+    """Parse a stored progress fact; a malformed fact is never trusted."""
+    if not isinstance(value, Mapping):
+        raise SnapshotError("Invalid observation progress event")
+    if value.get("schema_version") != PROGRESS_SCHEMA:
+        raise SnapshotError("Unsupported observation progress schema")
+    records = value.get("records")
+    if not isinstance(records, (list, tuple)) or not records:
+        raise SnapshotError("Invalid observation progress records")
+    if len(records) > MAX_PROGRESS_EVENT_RECORDS:
+        raise SnapshotError("Too many observation progress records")
+    return (
+        ObservationKey.from_payload(value.get("page_key")),
+        tuple(ProgressRecord.from_payload(item) for item in records),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PageBudget:
-    """Whole-page observation budget, independent of the per-file budget."""
+    """One observation slice, independent of the per-file budget.
+
+    A source page may hold more candidates than one slice can hash.  The budget
+    therefore bounds a *slice*, not the page: a page makes progress across
+    slices and across resumes instead of failing the same first N files forever.
+    """
 
     max_files: int = 32
     max_bytes: int = 512 * 1024 * 1024
     max_seconds: float = 30.0
+    max_slices: int = 8
 
     def __post_init__(self):
         if type(self.max_files) is not int or not 1 <= self.max_files <= 4096:
@@ -343,6 +586,8 @@ class PageBudget:
             and type(self.max_seconds) is not int
         ) or not 0.1 <= float(self.max_seconds) <= 3600:
             raise SnapshotError("Invalid page time budget")
+        if type(self.max_slices) is not int or not 1 <= self.max_slices <= 1024:
+            raise SnapshotError("Invalid page slice budget")
 
 
 class PreflightCancelled(Exception):
