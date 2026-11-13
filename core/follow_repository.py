@@ -165,6 +165,12 @@ class FollowRepositoryMixin:
                 "WHERE bip.batch_id=bi.batch_id AND bip.illust_id=bi.illust_id AND d.state IN ('pending','transferring','validating','suspended','retry_wait')))) "
                 'ORDER BY bi.illust_id LIMIT ?', (job['job_id'],batch['batch_id'],payload['after'],payload['limit'])).fetchall()
             now=lib._utcnow()
+            # UA-08: one parse per command.  `_health_map` applies the policy,
+            # freshness and root-revision checks once; every carried work then
+            # looks its artifact up in this same index.  `_health_allows_reuse`
+            # still re-checks the root revision at the point of use.
+            health_by_artifact=self._health_map(payload.get('health'))
+            enforce_completed_health=bool(payload.get('enforce_health'))
             for item in rows:
                 reasons=json.loads(item['reason_codes_json'])
                 if 'carried_unresolved' not in reasons:
@@ -177,8 +183,8 @@ class FollowRepositoryMixin:
                      canonical_json(reasons),item['required_pages_json'],item['result_state'],item['bookmarks'],item['ai_flag'],canonical_json(provenance),now,now))
                 self._copy_batch_item_page_links(
                     conn,item['batch_id'],batch['batch_id'],item['illust_id'],
-                    health_by_artifact=self._health_map(payload.get('health')),
-                    enforce_completed_health=bool(payload.get('enforce_health')),
+                    health_by_artifact=health_by_artifact,
+                    enforce_completed_health=enforce_completed_health,
                 )
                 self._refresh_batch_item_result(conn,batch['batch_id'],item['illust_id'],now)
             if rows:

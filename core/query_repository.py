@@ -394,6 +394,11 @@ class QueryRepositoryMixin:
                 (job['job_id'], batch['batch_id'], payload['after'], payload['limit']),
             ).fetchall()
             now = lib._utcnow()
+            # UA-08: one parse per command, exactly like the follow path.  The
+            # index is built inside this transaction so a queued command cannot
+            # trust a map that was filtered against an older root binding.
+            health_by_artifact = self._health_map(payload.get('health'))
+            enforce_completed_health = bool(payload.get('enforce_health'))
             for item in rows:
                 reasons = json.loads(item['reason_codes_json'])
                 if 'carried_unresolved' not in reasons:
@@ -414,8 +419,8 @@ class QueryRepositoryMixin:
                 )
                 self._copy_batch_item_page_links(
                     conn, item['batch_id'], batch['batch_id'], item['illust_id'],
-                    health_by_artifact=self._health_map(payload.get('health')),
-                    enforce_completed_health=bool(payload.get('enforce_health')),
+                    health_by_artifact=health_by_artifact,
+                    enforce_completed_health=enforce_completed_health,
                 )
                 self._refresh_batch_item_result(
                     conn, batch['batch_id'], item['illust_id'], now
