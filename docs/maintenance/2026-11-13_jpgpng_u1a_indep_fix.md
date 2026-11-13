@@ -5,7 +5,7 @@
 - 分支：`fix/a1-u1a-indep-20261113`
 - 审计基线：`8b1c751`（产品）/ `892a140`（含审计文档与 14 项反例）
 - 契约基线：`8d8c62c`（[U1A_STATE_CONTRACT.md](../optimization/2026-11-13/U1A_STATE_CONTRACT.md)）
-- 最终提交：`bff7c61`
+- 产品最终提交：`bff7c61`（本记录所在的文档提交紧随其后）
 - 环境：`D:\Miniconda3\envs\JuiLiu\python.exe`，`-s -B -X utf8`、`PYTHONNOUSERSITE=1`；只用合成 PNG、临时 SQLite、假 HTTP。未访问真实图库、生产数据库、账号或网络。
 
 ## 1. 结果
