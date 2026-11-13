@@ -1628,6 +1628,62 @@
         "真实迁移/备份/外置卷、W5 UI、completed 重新核验、旧 record_manager 未做"
       ],
       "next_step": "意图投影/迁移门禁；finish_source 等待协议；carry 可续窗口；W5 UI；真实迁移与备份演练"
+    },
+    {
+      "session_date": "2026-11-13",
+      "batch": "JPGPNG-U1A-RF-AUDIT-20261113-01",
+      "branch": "audit/u1a-rf-recheck-20261113",
+      "summary": "3839c90（产品 b07c2ed）独立复审：旧 15 项与旧 14 项反例仍全部通过；本轮确认 7 项问题（2 P1、5 P2），12 项独立检查为 10 失败/2 通过。非 Tk 1,717 通过/4 跳过，Tk 首轮 9/9；未改产品、未部署。",
+      "audit": {
+        "id": "JPGPNG-U1A-RF-AUDIT-20261113-01",
+        "date": "2026-11-13",
+        "status": "audit_completed_findings_open_not_production_ready",
+        "audited_commit": "3839c90c3370673be6e0ea01096cbcc53a13a818",
+        "product_commit": "b07c2ed",
+        "branch": "audit/u1a-rf-recheck-20261113",
+        "report": "docs/audits/2026-11-13-u1a-rf-recheck/README.md",
+        "findings": "docs/audits/2026-11-13-u1a-rf-recheck/FINDINGS.md",
+        "guide": "docs/audits/2026-11-13-u1a-rf-recheck/DEVELOPMENT_GUIDE.md",
+        "evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
+        "findings_open": {
+          "P1": 2,
+          "P2": 5,
+          "total": 7
+        },
+        "non_tk": {
+          "tests": 1721,
+          "passed": 1717,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "tk": {
+          "tests": 9,
+          "passed": 9,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "independent": {
+          "tests": 12,
+          "passed": 2,
+          "failures": 10,
+          "errors": 0,
+          "skipped": 0
+        },
+        "previous_regressions": {
+          "RF": 15,
+          "UA": 14,
+          "result": "all passed in current full suite"
+        },
+        "product_source_changed": false,
+        "business_data_changed": false,
+        "product_ready": false,
+        "next_step": "S0 freeze progress/evidence/lineage contracts; S1 resumable observation; S2 root-aware cancellation and cleanup/CAS; S3 authoritative bounded lineage; S4 integrated audit before W5/production gates."
+      },
+      "organization": "One audit worktree/report directory; current entry points consolidated; history/checkpoints preserved.",
+      "limitations": "Synthetic offline tests only; no actual external-volume, cloud, account, migration or deployment. Four existing skips retained.",
+      "history_errata": "Fix branch current header was b07c2ed while README, current table and machine evidence still referenced 3ee638f; current pointers corrected, old reports/sessions untouched."
     }
   ]
 }

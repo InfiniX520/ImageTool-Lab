@@ -1,6 +1,8 @@
 # 项目目录说明
 
-**当前补充（2026-11-13）**：dda6fc1：AR4-01..08 已关闭；schema 5；全量 1,494 项 1,491 通过/3 跳过（Tk 文件单独 4/4），独立 29/29；A1 离线验收完成，尚未接生产。历史问题见[接受事务复审](audits/2026-11-13-a1-acceptance/README.md)与[修复记录](maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)；原轮次证据保留。
+**当前入口**：版本与开发排期见[联合实施总入口](optimization/IMPLEMENTATION.md)；本页说明目录/归档边界，历史验收不替代当前审计。
+
+**前置 A1 阶段（2026-11-13，历史）**：dda6fc1：AR4-01..08 已关闭；schema 5；全量 1,494 项 1,491 通过/3 跳过（Tk 文件单独 4/4），独立 29/29；A1 离线验收完成，尚未接生产。历史问题见[接受事务复审](audits/2026-11-13-a1-acceptance/README.md)与[修复记录](maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)；原轮次证据保留。
 
 下载器双击 `启动.bat`，AI 整理工具使用 `organize.cmd`；操作分别见 [使用说明](../使用说明.md) 和 [CLI 说明](../ORGANIZER_CLI.md)。计划和历史统一从 [文档导航](README.md) 查找。
 

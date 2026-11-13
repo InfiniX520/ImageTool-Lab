@@ -1,0 +1,354 @@
+{
+  "full01.xml": {
+    "tests": 1721,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 4,
+    "passed": 1717,
+    "seconds_xml": 313.234,
+    "sha256": "5df158f7dd5d4de8ec43dc9a02ad54cd3d5754dbd01f5e7f1cf4058bd70bef45",
+    "previous_15": [
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_foreign_handover_does_not_strand_original_owner[reuse]",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_foreign_handover_does_not_strand_original_owner[repair]",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_pending_with_unobservable_artifact_is_not_dispatchable",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_pending_without_bound_resolver_is_not_dispatchable",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_negative_recovery_binds_the_recorded_artifact[artifact_id]",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_negative_recovery_binds_the_recorded_artifact[sha256]",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_negative_recovery_binds_the_recorded_artifact[size_bytes]",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_fatal_owner_stops_the_new_service_threads",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_pause_admission_cannot_be_based_on_a_stale_database_read",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_accept_corruption_stops_activation_of_later_jobs",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_pause_cancels_remaining_file_observation",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_publication_gate_wins_over_a_later_exclusion_boundary_probe",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_intact_reuse_and_history_still_work",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_excluded_recovery_needed_can_finish_local_recovery",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_fix_boundaries",
+        "name": "test_cancelled_owned_temp_can_be_cleaned_after_transient_unlink_failure",
+        "status": "passed"
+      }
+    ],
+    "previous_14": [
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_excluded_from_historical_task_stops_other_task_pending_repair",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_excluded_from_historical_task_prevents_recovery_repair",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_recovery_uses_matching_older_artifact_when_latest_version_differs",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_recovery_rejects_stale_missing_evidence",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_carried_foreign_hold_can_be_recovered_by_its_current_batch",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_pending_recovery_with_root_offline_is_really_held",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_same_page_receipt_replay_does_not_hash_again",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_intact_recovery_preserves_original_receipt",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_changed_recovery_preserves_foreign_bytes",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_corrupt_intent_does_not_silently_allow_automatic_repair",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_exclusion_during_transfer_prevents_publication",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_hash_preflight_does_not_block_coordinator_control_commands",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_completion_between_preflight_and_accept_does_not_create_a_false_hold",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_u1a_independent_regressions",
+        "name": "test_carry_parses_the_batch_health_map_once",
+        "status": "passed"
+      }
+    ],
+    "skip_details": [
+      {
+        "name": "test_real_symlink_file_is_rejected_when_platform_supports_it",
+        "reason": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+        "reason": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_root_is_rejected",
+        "reason": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_w_phase_local_boundaries_are_not_wired_into_reuse_yet",
+        "reason": "W 阶段剩余边界（本轮只登记，不强行通过）：根不可用/重解析点/读取中变化已能进入 needs_verification（见 test_u1a_reuse_gate 与 artifact_health 契约），但仍缺：①根不可用/外置卷的 UI 与恢复动作，不把整库当成丢失；②链接/重解析点指向根外时的端到端拒绝断言；③同一批次同一 artifact 只观察一次的缓存；④跨会话不复用旧缓存；⑤快速核验不得升级为严格复用的端到端用例。"
+      }
+    ]
+  },
+  "tk01.xml": {
+    "tests": 9,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 9,
+    "seconds_xml": 6.85,
+    "sha256": "da7cfd8fe43dee675e83a20bf94f2362a76ae3d7c5081c494a1384d4509af680",
+    "cases": [
+      {
+        "class": "tests.test_collection_presentation",
+        "name": "test_filtering_out_the_selection_cannot_operate_on_a_hidden_task",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_collection_presentation",
+        "name": "test_counts_are_supplied_facts_and_survive_metadata_refresh",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_collection_presentation",
+        "name": "test_task_details_are_bound_to_the_selected_task_and_never_replace_record_details",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_collection_presentation",
+        "name": "test_new_works_mode_labels_match_the_command_and_artist_scope_is_visible",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_source_presentation",
+        "name": "test_shared_conditions_update_both_pages_and_disabled_value_does_not_apply",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_source_presentation",
+        "name": "test_source_switch_keeps_each_draft_and_never_starts_download",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_source_presentation",
+        "name": "test_related_seed_enabled_only_for_related_recommendations",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_source_presentation",
+        "name": "test_unknown_metadata_is_selectable_in_batch_records",
+        "status": "passed"
+      },
+      {
+        "class": "tests.test_source_presentation",
+        "name": "test_demo_filters_produce_distinct_known_unknown_and_filtered_counts",
+        "status": "passed"
+      }
+    ]
+  },
+  "probe04.xml": {
+    "tests": 12,
+    "failures": 10,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 2,
+    "seconds_xml": 8.113,
+    "sha256": "65096582054b0e29bcbe3ebc8e6c1225df6d580890f83f95e258df70f41f4750",
+    "cases": [
+      {
+        "class": "test_rf_recheck",
+        "name": "test_cleanup_fact_written_by_real_executor_is_excluded_from_candidates",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_cleanup_window_advances_past_a_cleaned_delivery",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_default_page_budget_can_progress_a_33_image_work_after_resume",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_explicit_handover_is_authoritative_over_a_new_unrelated_pending",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_cancel_preserves_temp_replaced_while_waiting_for_writer",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_offline_root_does_not_prove_an_unpublished_delivery",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_cleanup_offline_root_does_not_claim_completion",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_lineage_resolves_each_candidate_at_most_once_per_operation",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_foreign_temp_present_before_verification_is_preserved",
+        "status": "passed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_already_published_file_is_not_cancelled_when_root_goes_offline",
+        "status": "failed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_gate_wins_and_history_controls_still_pass",
+        "status": "passed"
+      },
+      {
+        "class": "test_rf_recheck",
+        "name": "test_local_recovery_fault_handler_tolerates_another_recovery_winner",
+        "status": "failed"
+      }
+    ]
+  },
+  "lineage_measurements": [
+    {
+      "superseded_rows": 8,
+      "statements": 329,
+      "seconds": 0.007444699999950899,
+      "status": "resolved"
+    },
+    {
+      "superseded_rows": 16,
+      "statements": 5037,
+      "seconds": 0.12006619999999657,
+      "status": "resolved"
+    },
+    {
+      "superseded_rows": 24,
+      "statements": 25905,
+      "seconds": 0.7532782999999199,
+      "status": "resolved"
+    },
+    {
+      "superseded_rows": 32,
+      "statements": 82901,
+      "seconds": 2.7079709999999295,
+      "status": "resolved"
+    }
+  ],
+  "classification": {
+    "P1": 2,
+    "P2": 5,
+    "total_findings": 7,
+    "regression_cases": 12
+  },
+  "portable_evidence_script": {
+    "tests": 12,
+    "failures": 10,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 2,
+    "note": "Same twelve cases, rerun only to verify repository-root discovery; do not add to independent case counts."
+  },
+  "documentation_verification": {
+    "source_and_test_files_unchanged": 213,
+    "historical_documents_content_unchanged": 51,
+    "existing_log_sessions_preserved": 35,
+    "links_verified": 41,
+    "utf8_no_bom_lf": true,
+    "json_ast_diff_check": true,
+    "daily_checkout_unchanged": true
+  }
+}

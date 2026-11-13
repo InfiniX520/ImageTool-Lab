@@ -346,21 +346,21 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-13",
-      "phase": "U1-A RF re-audit findings fixed on fix/a1-u1a-rf-20261113; not merged or deployed",
-      "status": "u1a_rf_fix_verified_not_production_ready",
+      "phase": "RF fix re-audited at 3839c90; RFA-01..07 open; not deployed",
+      "status": "audit_completed_findings_open_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "Intent projection/index behind a migration gate; finish_source wait/query protocol; carry long transaction; W5 UI; real migration/backup rehearsal.",
+      "next_step": "S0 freeze progress/evidence/lineage contracts; S1 resumable observation; S2 root-aware cancellation and cleanup/CAS; S3 authoritative bounded lineage; S4 integrated audit before W5/production gates.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-RF-FIX-20261113-01",
-      "foundation": "docs/audits/2026-11-13-u1a-fix-recheck/DEVELOPMENT_GUIDE.md",
-      "evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
-      "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
-      "unfinished_draft": "RF-01..09 closed on the fix branch; intent projection migration, finish_source wait protocol, carry long transaction, W5 UI and real archival remain gated.",
+      "latest_batch": "JPGPNG-U1A-RF-AUDIT-20261113-01",
+      "foundation": "docs/audits/2026-11-13-u1a-rf-recheck/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
+      "previous_completed_batch": "JPGPNG-U1A-RF-FIX-20261113-01",
+      "unfinished_draft": "Old RF/UA regression cases pass; seven newly verified progress/cleanup/recovery issues remain.",
       "latest_repair_evidence": "docs/maintenance/2026-11-13_jpgpng_u1a_rf_fix.md",
-      "latest_overview": "docs/maintenance/2026-11-13_jpgpng_u1a_rf_fix.md",
-      "latest_evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
-      "audited_commit": "3ee638f065c6fb18f73ad7dcaf273a86afc77f12",
+      "latest_overview": "docs/audits/2026-11-13-u1a-rf-recheck/README.md",
+      "latest_evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
+      "audited_commit": "3839c90c3370673be6e0ea01096cbcc53a13a818",
       "fixed_commit": "b07c2ed",
       "runtime_checkout_note": "Daily JpgPng checkout remains 5465e0c; the fix branch is not deployed."
     },
@@ -423,7 +423,7 @@
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
       "date": "2026-11-11",
-      "status": "completed_findings_open_not_production_ready",
+      "status": "audit_completed_findings_open_not_production_ready",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
       "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
@@ -443,7 +443,7 @@
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
-        "U1-A_A1": "AR4 retained closed; old 14 U1-A regressions pass on 3ee638f; new RF-01..09 open. Not deployed.",
+        "U1-A_A1": "AR4 retained closed; old RF 15 and UA 14 cases pass at 3839c90. RFA-01..07 open; not deployed.",
         "U1-B": "Shared dependency maintenance pending; separate governed environment change",
         "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
         "U2-A": "Coverage and pending-reason summaries pending",
@@ -456,12 +456,12 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-U1A-FIX-REAUDIT-20261113-01",
-      "latest_overview": "docs/audits/2026-11-13-u1a-fix-recheck/README.md",
-      "latest_evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
-      "historical_tests_note": "tests and implemented above describe the first pure-policy batch; current results and open findings are in u1a_independent_audit.",
-      "next_step": "S0 pin regressions/contracts; S1 exclusion/recovery/cleanup; S2 handover/evidence; S3 control/admission/shutdown/cancellation; S4 measured performance and gated UI/migration.",
-      "latest_audit": "docs/audits/2026-11-13-u1a-fix-recheck/README.md"
+      "latest_batch": "JPGPNG-U1A-RF-AUDIT-20261113-01",
+      "latest_overview": "docs/audits/2026-11-13-u1a-rf-recheck/README.md",
+      "latest_evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
+      "historical_tests_note": "tests/implemented above describe the original pure-policy batch; current results/open findings are in u1a_rf_reaudit.",
+      "next_step": "S0 freeze progress/evidence/lineage contracts; S1 resumable observation; S2 root-aware cancellation and cleanup/CAS; S3 authoritative bounded lineage; S4 integrated audit before W5/production gates.",
+      "latest_audit": "docs/audits/2026-11-13-u1a-rf-recheck/README.md"
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
@@ -825,6 +825,53 @@
       "business_data_changed": false,
       "product_ready": false,
       "next_step": "S0 pin regressions/contracts; S1 exclusion/recovery/cleanup; S2 handover/evidence; S3 control/admission/shutdown/cancellation; S4 measured performance and gated UI/migration."
+    },
+    "u1a_rf_reaudit": {
+      "id": "JPGPNG-U1A-RF-AUDIT-20261113-01",
+      "date": "2026-11-13",
+      "status": "audit_completed_findings_open_not_production_ready",
+      "audited_commit": "3839c90c3370673be6e0ea01096cbcc53a13a818",
+      "product_commit": "b07c2ed",
+      "branch": "audit/u1a-rf-recheck-20261113",
+      "report": "docs/audits/2026-11-13-u1a-rf-recheck/README.md",
+      "findings": "docs/audits/2026-11-13-u1a-rf-recheck/FINDINGS.md",
+      "guide": "docs/audits/2026-11-13-u1a-rf-recheck/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
+      "findings_open": {
+        "P1": 2,
+        "P2": 5,
+        "total": 7
+      },
+      "non_tk": {
+        "tests": 1721,
+        "passed": 1717,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 4
+      },
+      "tk": {
+        "tests": 9,
+        "passed": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "independent": {
+        "tests": 12,
+        "passed": 2,
+        "failures": 10,
+        "errors": 0,
+        "skipped": 0
+      },
+      "previous_regressions": {
+        "RF": 15,
+        "UA": 14,
+        "result": "all passed in current full suite"
+      },
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "product_ready": false,
+      "next_step": "S0 freeze progress/evidence/lineage contracts; S1 resumable observation; S2 root-aware cancellation and cleanup/CAS; S3 authoritative bounded lineage; S4 integrated audit before W5/production gates."
     }
   }
 }
