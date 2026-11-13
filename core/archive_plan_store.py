@@ -830,6 +830,33 @@ def _check_package_index(
         raise ArchivePlanStoreError("Package index differs from the immutable plan JSON")
 
 
+def _same_stored_path(stored_json: object, path: PathRef) -> bool:
+    """True when the stored path document is canonical and names this same entry.
+
+    The asset row keeps the spelling it was first indexed with, so an ASCII case
+    alias of one Windows directory entry is the same path.  A re-ordered,
+    re-spaced or otherwise non-canonical document is not accepted, and neither is
+    a genuinely different entry.
+    """
+    if not isinstance(stored_json, str):
+        return False
+    try:
+        if normalize_json(stored_json, object_only=True) != stored_json:
+            return False
+        parsed = json.loads(stored_json)
+        if not isinstance(parsed, dict) or set(parsed) != {
+                "kind", "root_id", "relative_path"}:
+            return False
+        stored = PathRef(parsed["kind"], parsed["root_id"], parsed["relative_path"])
+    except (ContractError, ValueError, TypeError, KeyError, UnicodeError):
+        return False
+    return (
+        stored.kind == path.kind
+        and stored.root_id.casefold() == path.root_id.casefold()
+        and stored.identity_key == path.identity_key
+    )
+
+
 def _check_assets(
     conn: sqlite3.Connection, inventory: ArchiveInventory,
     asset_sources_sha256: object,
@@ -858,9 +885,14 @@ def _check_assets(
         stored = None if row is None else tuple(row[:7])
         # Index 4 is path_json: the display spelling recorded when the row was first
         # indexed.  One directory entry reached through another case spelling is the
-        # same asset, so that column is not compared here and is never rewritten;
-        # the identity key, content and byte facts still must match exactly.
-        if stored is None or stored[:4] != expected[:4] or stored[5:] != expected[5:]:
+        # same asset, so that spelling may differ; the document itself must still be
+        # canonical and must still name this entry, and it is never rewritten.
+        if (
+            stored is None
+            or stored[:4] != expected[:4]
+            or stored[5:] != expected[5:]
+            or not _same_stored_path(stored[4], asset.path)
+        ):
             raise ArchivePlanStoreError("Content/path facts differ from the immutable plan JSON")
         source_facts.append([asset.path_key, row[7]])
         content_row = conn.execute(
