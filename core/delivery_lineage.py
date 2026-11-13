@@ -5,21 +5,33 @@ job keeps its historical rows; its next active batch must nevertheless be able
 to find the newer delivery that now owns the same page.  This module resolves
 that link strictly by page identity and quality, never by "any cancelled row".
 
-The frozen contract (U1A_STATE_CONTRACT_V3 section 3) fixes one authority
-order, and this module is its only implementation:
+The frozen contract (U1A_STATE_CONTRACT_V4 section 7) fixes one authority
+order, and this module is its only implementation.  Every node of the bounded
+node set is decided by the same order:
 
-1. the delivery's own recovery_owner_transfer event, newest first: the
+1. the node's own recovery_owner_transfer event, newest usable first: the
    artifact it names may be older than the retired row, so rowid alone can
    never express that handover;
 2. the newest completed row newer than this one on the same page and quality,
    read through one bounded window;
 3. the newest active follow-up in that same window;
-4. the bounded superseded chain inside that window.
+4. the bounded superseded chain inside that window, where each superseded node
+   contributes its own recorded handover.
 
-The walk reads its candidates once.  The previous implementation re-issued the
-"later rows on this page" query for every superseded row it met, so a page
-with 32 retired generations cost 82,901 statements for one resolution; the
-cost here is at most MAX_LINEAGE_QUERIES statements and one visit per node.
+The node set is the anchor, the rows of one window read and the delivery rows
+that own the named handover artifacts.  The previous implementation only
+looked for a handover on the anchor, so an intermediate superseded row that
+pointed at an earlier completed delivery was silently dropped: the chain read
+as "superseded only" and the public recovery refused a legal history.  The
+handover events of the whole node set are now read in one statement and the
+walk visits every node once.
+
+The walk reads its candidates once.  An earlier recursive implementation
+re-issued the "later rows on this page" query for every superseded row it met,
+so a page with 32 retired generations cost 82,901 statements for one
+resolution; the cost here is at most MAX_LINEAGE_QUERIES statements and one
+visit per node, and a budget that runs out is reported as budget_exhausted
+instead of being mistaken for "no successor".
 
 Nothing in this module touches the file system.  It is safe to call inside a
 writer transaction, and both the read-only preflight and the write-time check
@@ -35,19 +47,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 MAX_SUPERSEDE_HOPS = 4
 """Legacy depth bound, kept for callers.
 
-The walk no longer recurses, so a chain is bounded by MAX_SUPERSEDE_NODES and
+The walk is iterative, so a chain is bounded by MAX_SUPERSEDE_NODES and
 MAX_LINEAGE_QUERIES instead of by depth.  The constant stays exported because
 it documents the historical limit and because callers may still pass hops to
 resolve_successor.
 """
 
 MAX_SUPERSEDE_NODES = 64
-"""Most candidate rows one resolution may examine before it refuses."""
+"""Most nodes (events plus window rows) one resolution may examine."""
 
 MAX_LINEAGE_QUERIES = 4
 """Most statements one resolution may issue."""
@@ -56,7 +68,10 @@ WINDOW_LIMIT = 64
 """Rows read by the single "newer rows on this page" statement."""
 
 EVENT_LIMIT = 8
-"""Handover events read for one delivery, newest first."""
+"""Handover events considered per delivery, newest first."""
+
+MAX_EVENTS = 64
+"""Handover events read for the whole node set by the batched statement."""
 
 TERMINAL_SUCCESS = ("completed",)
 ACTIVE_FOLLOWUP = (
@@ -79,8 +94,10 @@ _EVENT_KIND = "recovery_owner_transfer"
 _SUPPORTED_MEDIA = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 _HEX = frozenset("0123456789abcdef")
 
+# One statement covers the whole node set: every delivery id is matched against
+# the serialized payload, and only the newest MAX_EVENTS rows are parsed.
 _EVENT_SQL = (
-    "SELECT safe_payload FROM events WHERE kind = ? AND safe_payload LIKE ? "
+    "SELECT safe_payload FROM events WHERE kind = ? AND ({matches}) "
     "ORDER BY event_seq DESC LIMIT ?"
 )
 _EVENT_TARGET_SQL = (
@@ -92,7 +109,7 @@ _EVENT_TARGET_SQL = (
     "d.current_batch_id AS owner_batch_id, d.generation AS owner_generation, "
     "d.quality_key AS owner_quality_key, d.state AS owner_state "
     "FROM artifacts AS a JOIN deliveries AS d ON d.delivery_id = a.delivery_id "
-    "WHERE a.artifact_id = ?"
+    "WHERE a.artifact_id IN ({placeholders})"
 )
 # The delivery table is intentionally not aliased: the single window read keeps
 # the historical statement shape ("AND rowid > ("), so a trace-based audit can
@@ -140,11 +157,15 @@ class LineageResult:
     reason is the branch that decided the result: "event", "rowid_completed",
     "rowid_active", "supersede_chain", "none", "event_target_unusable" or
     "budget_exhausted".  "cycle" is reserved for a future multi-hop walk: this
-    implementation follows at most one handover hop and one window, so it can
-    never loop, and a handover that names its own delivery is refused as
-    event:self_reference.  Callers that only need the successor keep using
-    resolve_successor; callers that must explain a refusal use
-    reason/diagnostics instead of guessing.
+    implementation follows at most one recorded handover per node and one
+    window, keeps a visited set, and refuses a handover that names its own
+    delivery as event:self_reference, so it can never loop.  Callers that only
+    need the successor keep using resolve_successor; callers that must explain
+    a refusal use reason/diagnostics instead of guessing.
+
+    nodes counts the handover events and window rows this resolution examined;
+    events counts the event rows and targets the distinct artifact rows that
+    were validated.
     """
 
     successor: Successor | None
@@ -152,6 +173,8 @@ class LineageResult:
     diagnostics: tuple[str, ...] = ()
     queries: int = 0
     nodes: int = 0
+    events: int = 0
+    targets: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,23 +205,80 @@ def resolve_successor_ex(conn: Any, delivery: Any, *, hops: int = 0) -> LineageR
     """Resolve one successor and report how it was decided.
 
     The function performs at most MAX_LINEAGE_QUERIES statements, visits every
-    candidate once and never caches anything across calls: a caller that
-    resolves in a preflight and again inside its write transaction always sees
-    the current rows, and a candidate that appeared in between produces a
-    different successor, which the caller reports as a retry.
+    node once and never caches anything across calls: a caller that resolves in
+    a preflight and again inside its write transaction always sees the current
+    rows, and a candidate that appeared in between produces a different
+    successor, which the caller reports as a retry.
     """
     if type(hops) is not int or hops < 0:
         raise LineageError("hops must be a non-negative integer")
     page = _page_identity(delivery)
     probe = _Probe(conn)
     try:
-        recorded = probe.recorded_successor(page)
-        if recorded is not None:
-            return recorded
-        return probe.window_successor(page)
+        return _resolve(probe, page)
     except _BudgetExceeded:
         probe.diagnostics.append("statement_budget")
         return probe.result(None, "budget_exhausted")
+
+
+def _resolve(probe: "_Probe", page: _PageIdentity) -> LineageResult:
+    # 1. The anchor's own handover decides before any rowid reasoning: the
+    #    artifact it names may be older than the anchor itself.
+    anchor_events, corrupt = probe.events_for((page.delivery_id,))
+    if corrupt:
+        return probe.result(None, "event_target_unusable", "corrupt_event")
+    payloads = anchor_events.get(page.delivery_id, ())
+    if payloads:
+        named = _named_targets(payloads)
+        targets = probe.event_targets(named) if named else {}
+        decision = _decide_by_events(probe, page, payloads, targets, reason="event")
+        if decision is not None:
+            return decision
+
+    # 2. One bounded window read supplies the rest of the node set.
+    rows = probe.window_rows(page)
+    if not rows:
+        return probe.result(None, "none")
+    completed, behind, active, superseded = _classify_window(probe, rows)
+    if completed is not None:
+        reason = "supersede_chain" if behind else "rowid_completed"
+        return probe.result(completed, reason)
+    if active is not None:
+        return probe.result(active, "rowid_active")
+    # 3. Only superseded rows can carry a decisive handover, so their events
+    #    (and the artifacts they name) are read in one batch each.
+    if superseded:
+        node_events, corrupt = probe.events_for(superseded)
+        if corrupt:
+            return probe.result(None, "event_target_unusable", "corrupt_event")
+        named = _named_targets(
+            payload for payloads in node_events.values() for payload in payloads
+        )
+        targets = probe.event_targets(named) if named else {}
+        for key in superseded:
+            decision = _decide_by_events(
+                probe,
+                page,
+                node_events.get(key, ()),
+                targets,
+                reason="supersede_chain",
+                via=key,
+            )
+            if decision is None:
+                continue
+            if decision.successor is not None:
+                return decision
+            if decision.reason == "event_target_unusable":
+                # A named but unusable handover is a refusal, never a silent
+                # fallback to another completed row.
+                return decision
+    if len(rows) >= WINDOW_LIMIT:
+        # The window is full and nothing terminal was found: older rows could
+        # still decide the page, so refusing is the only honest answer.
+        return probe.result(None, "budget_exhausted", "window_full")
+    if superseded:
+        probe.diagnostics.append(f"superseded_only:{len(superseded)}")
+    return probe.result(None, "none")
 
 
 class _Probe:
@@ -208,6 +288,8 @@ class _Probe:
         self._conn = conn
         self.queries = 0
         self.nodes = 0
+        self.events = 0
+        self.targets = 0
         self.diagnostics: list[str] = []
         self.visited: set[str] = set()
 
@@ -221,6 +303,8 @@ class _Probe:
             diagnostics=diagnostics,
             queries=self.queries,
             nodes=self.nodes,
+            events=self.events,
+            targets=self.targets,
         )
 
     def execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> list[Any]:
@@ -229,99 +313,79 @@ class _Probe:
         self.queries += 1
         return self._conn.execute(sql, parameters).fetchall()
 
-    # -- 1. exact handover ---------------------------------------------
-    def recorded_successor(self, page: _PageIdentity) -> LineageResult | None:
-        """Follow the newest usable handover event, or fall through.
+    def _count_node(self) -> None:
+        self.nodes += 1
+        if self.nodes > MAX_SUPERSEDE_NODES:
+            # The node set is bounded even when a page has a long history.
+            raise _BudgetExceeded()
 
-        An event without artifact_id records that ownership moved to a live
-        successor (a hold or a queued repair); it names no artifact, so it
-        cannot decide this page and the window still has to be read.  An event
-        that does name an artifact decides the page: if none of the named
-        targets is usable the resolution refuses instead of silently falling
-        back to "newest row", because that would discard an explicit decision.
+    # -- handover events of the whole node set --------------------------
+    def events_for(
+        self, delivery_ids: Iterable[str]
+    ) -> tuple[dict[str, tuple[dict[str, Any], ...]], bool]:
+        """Read the handover events of several deliveries in one statement.
+
+        Returns the parsed payloads per delivery id (newest first, at most
+        EVENT_LIMIT each) and whether any matching payload could not be
+        parsed.  A payload that mentions one of our ids but is corrupt is a
+        data fault, not an absent record.
         """
-        rows = self.execute(
-            _EVENT_SQL,
-            (_EVENT_KIND, f'%"delivery_id":"{page.delivery_id}"%', EVENT_LIMIT),
+        ids = [
+            value
+            for value in dict.fromkeys(delivery_ids)
+            if isinstance(value, str) and value
+        ]
+        if not ids:
+            return {}, False
+        matches = " OR ".join("safe_payload LIKE ?" for _ in ids)
+        parameters = (
+            _EVENT_KIND,
+            *(f'%"delivery_id":"{value}"%' for value in ids),
+            MAX_EVENTS,
         )
-        named = 0
+        rows = self.execute(_EVENT_SQL.format(matches=matches), parameters)
+        allowed = set(ids)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        corrupt = False
         for row in rows:
             payload = _event_payload(row)
             if payload is None:
-                # A payload that mentions this delivery but cannot be parsed
-                # is a data fault, not an absent record.
-                return self.result(None, "event_target_unusable", "corrupt_event")
-            if str(payload.get("delivery_id")) != page.delivery_id:
+                corrupt = True
+                continue
+            key = payload.get("delivery_id")
+            if not isinstance(key, str) or key not in allowed:
                 # The LIKE also matches payloads that merely contain the id.
                 continue
-            self.nodes += 1
-            target = payload.get("artifact_id")
-            if target is None:
-                self.diagnostics.append("event_without_artifact")
+            bucket = grouped.setdefault(key, [])
+            if len(bucket) >= EVENT_LIMIT:
                 continue
-            if not isinstance(target, str) or not target:
-                return self.result(None, "event_target_unusable", "corrupt_event_target")
-            named += 1
-            successor, problem = self.event_target(target, page)
-            if successor is not None:
-                return self.result(successor, "event")
-            self.diagnostics.append(f"event:{problem}")
-        if named:
-            # Handover events exist and name artifacts, but none is usable.
-            return self.result(None, "event_target_unusable")
-        return None
+            bucket.append(payload)
+            self.events += 1
+            self._count_node()
+        return {key: tuple(value) for key, value in grouped.items()}, corrupt
 
-    def event_target(
-        self, artifact_id: str, page: _PageIdentity
-    ) -> tuple[Successor | None, str | None]:
-        """Validate one handover target against the page it must own.
-
-        The target must live in the same quality scope as the delivery being
-        resolved.  The window path can only ever offer rows with this exact
-        quality_key, so accepting a handover into another quality scope would
-        let the event path answer a question the window path never could: the
-        two paths would not be the same authority order any more.
-        """
-        rows = self.execute(_EVENT_TARGET_SQL, (artifact_id,))
-        if not rows:
-            return None, "artifact_missing"
-        row = rows[0]
-        if (
-            str(row["illust_id"]) != page.illust_id
-            or int(row["page_index"]) != page.page_index
-            or str(row["output_key"]) != page.output_key
-        ):
-            return None, "page_mismatch"
-        if str(row["owner_quality_key"]) != page.quality_key:
-            # Only the delivery row carries quality_key; an artifact row never
-            # does, so this compares the target delivery, never the bytes.
-            return None, "quality_key_mismatch"
-        if not _artifact_is_usable(row):
-            return None, "artifact_invalid"
-        if page.quality is None:
-            return None, "quality_unreadable"
-        if _quality_tokens(row["artifact_quality_json"]) != page.quality:
-            return None, "quality_mismatch"
-        owner = str(row["owner_delivery_id"])
-        if owner == page.delivery_id:
-            return None, "self_reference"
-        if str(row["owner_state"]) != "completed":
-            return None, "target_not_completed"
-        return (
-            Successor(
-                delivery_id=owner,
-                job_id=str(row["owner_job_id"]),
-                batch_id=str(row["owner_batch_id"]),
-                state="completed",
-                generation=int(row["owner_generation"]),
-                artifact_id=artifact_id,
-            ),
-            None,
+    def event_targets(self, artifact_ids: Iterable[str]) -> dict[str, Any]:
+        """Fetch every named handover target in one statement."""
+        ids = [
+            value
+            for value in dict.fromkeys(artifact_ids)
+            if isinstance(value, str) and value
+        ]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.execute(
+            _EVENT_TARGET_SQL.format(placeholders=placeholders), tuple(ids)
         )
+        found: dict[str, Any] = {}
+        for row in rows:
+            artifact_id = str(row["artifact_id"])
+            found.setdefault(artifact_id, row)
+            self.targets += 1
+        return found
 
-    # -- 2..4. window ---------------------------------------------------
-    def window_successor(self, page: _PageIdentity) -> LineageResult:
-        """Read the newer rows once and decide by the frozen precedence."""
+    # -- one bounded window ---------------------------------------------
+    def window_rows(self, page: _PageIdentity) -> list[Any]:
         rows = self.execute(
             _WINDOW_SQL,
             (
@@ -333,47 +397,141 @@ class _Probe:
                 WINDOW_LIMIT,
             ),
         )
-        self.nodes += len(rows)
-        completed: Successor | None = None
-        completed_behind_supersede = 0
-        active: Successor | None = None
-        superseded = 0
-        for row in rows:
-            key = str(row["delivery_id"])
-            if key in self.visited:
-                # Rowid order reaches a row once; a duplicate delivery id here
-                # would mean a corrupt table.
-                self.diagnostics.append(f"duplicate:{key}")
-                continue
-            self.visited.add(key)
-            state = str(row["state"])
-            artifact_id = row["artifact_id"]
-            if state in TERMINAL_SUCCESS:
-                if artifact_id is not None and completed is None:
-                    completed = _successor(row)
-                    completed_behind_supersede = superseded
-                continue
-            if state in ACTIVE_FOLLOWUP:
-                if active is None:
-                    active = _successor(row)
-                continue
-            if state == "cancelled" and is_supersede_code(row["error_code"]):
-                superseded += 1
-        if completed is not None:
-            reason = (
-                "supersede_chain" if completed_behind_supersede else "rowid_completed"
-            )
-            return self.result(completed, reason)
-        if active is not None:
-            return self.result(active, "rowid_active")
-        if len(rows) >= WINDOW_LIMIT:
-            # The window is full and nothing terminal was found: older rows
-            # could still decide the page, so refusing is the only honest
-            # answer.  Never guess a successor past the budget.
-            return self.result(None, "budget_exhausted", "window_full")
-        if superseded:
-            self.diagnostics.append(f"superseded_only:{superseded}")
-        return self.result(None, "none")
+        for _ in rows:
+            self._count_node()
+        return rows
+
+
+def _decide_by_events(
+    probe: _Probe,
+    page: _PageIdentity,
+    payloads: Iterable[dict[str, Any]],
+    targets: dict[str, Any],
+    *,
+    reason: str = "event",
+    via: str | None = None,
+) -> LineageResult | None:
+    """Decide one node by its own handover events, newest first.
+
+    An event without artifact_id records that ownership moved to a live
+    successor (a hold or a queued repair); it names no artifact, so it cannot
+    decide this page on its own.  An event that does name an artifact decides
+    the node: the first usable target wins, and if every named target is
+    unusable the resolution refuses instead of silently falling back to
+    "newest row", because that would discard an explicit decision.
+    """
+    named = 0
+    for payload in payloads:
+        target = payload.get("artifact_id")
+        if target is None:
+            probe.diagnostics.append("event_without_artifact")
+            continue
+        if not isinstance(target, str) or not target:
+            return probe.result(None, "event_target_unusable", "corrupt_event_target")
+        named += 1
+        successor, problem = _validate_target(page, targets.get(target), target)
+        if successor is not None:
+            extra = () if via is None else (f"via:{via}",)
+            return probe.result(successor, reason, *extra)
+        probe.diagnostics.append(f"event:{problem}")
+    if named:
+        return probe.result(None, "event_target_unusable")
+    return None
+
+
+def _classify_window(
+    probe: _Probe, rows: list[Any]
+) -> tuple[Successor | None, int, Successor | None, list[str]]:
+    """Classify one window read by the frozen precedence.
+
+    Returns the newest completed row (and how many superseded rows preceded
+    it), the newest active follow-up, and the superseded delivery ids in rowid
+    order.  Only superseded rows can carry a decisive handover, so the caller
+    reads their events after this pass instead of paying for them on every
+    page.
+    """
+    completed: Successor | None = None
+    completed_behind_supersede = 0
+    active: Successor | None = None
+    superseded: list[str] = []
+    for row in rows:
+        key = str(row["delivery_id"])
+        if key in probe.visited:
+            # Rowid order reaches a row once; a duplicate delivery id here
+            # would mean a corrupt table.
+            probe.diagnostics.append(f"duplicate:{key}")
+            continue
+        probe.visited.add(key)
+        state = str(row["state"])
+        artifact_id = row["artifact_id"]
+        if state in TERMINAL_SUCCESS:
+            if artifact_id is not None and completed is None:
+                completed = _successor(row)
+                completed_behind_supersede = len(superseded)
+            continue
+        if state in ACTIVE_FOLLOWUP:
+            if active is None:
+                active = _successor(row)
+            continue
+        if state == "cancelled" and is_supersede_code(row["error_code"]):
+            superseded.append(key)
+    return completed, completed_behind_supersede, active, superseded
+
+
+def _validate_target(
+    page: _PageIdentity, row: Any, artifact_id: str
+) -> tuple[Successor | None, str | None]:
+    """Validate one handover target against the page it must own.
+
+    The target must live in the same quality scope as the delivery being
+    resolved.  The window path can only ever offer rows with this exact
+    quality_key, so accepting a handover into another quality scope would let
+    the event path answer a question the window path never could: the two
+    paths would not be the same authority order any more.
+    """
+    if row is None:
+        return None, "artifact_missing"
+    if (
+        str(row["illust_id"]) != page.illust_id
+        or int(row["page_index"]) != page.page_index
+        or str(row["output_key"]) != page.output_key
+    ):
+        return None, "page_mismatch"
+    if str(row["owner_quality_key"]) != page.quality_key:
+        # Only the delivery row carries quality_key; an artifact row never
+        # does, so this compares the target delivery, never the bytes.
+        return None, "quality_key_mismatch"
+    if not _artifact_is_usable(row):
+        return None, "artifact_invalid"
+    if page.quality is None:
+        return None, "quality_unreadable"
+    if _quality_tokens(row["artifact_quality_json"]) != page.quality:
+        return None, "quality_mismatch"
+    owner = str(row["owner_delivery_id"])
+    if owner == page.delivery_id:
+        return None, "self_reference"
+    if str(row["owner_state"]) != "completed":
+        return None, "target_not_completed"
+    return (
+        Successor(
+            delivery_id=owner,
+            job_id=str(row["owner_job_id"]),
+            batch_id=str(row["owner_batch_id"]),
+            state="completed",
+            generation=int(row["owner_generation"]),
+            artifact_id=artifact_id,
+        ),
+        None,
+    )
+
+
+def _named_targets(payloads: Iterable[dict[str, Any]]) -> list[str]:
+    named: list[str] = []
+    for payload in payloads:
+        target = payload.get("artifact_id")
+        if isinstance(target, str) and target:
+            named.append(target)
+    return named
 
 
 def _field(row: Any, name: str, default: Any = None) -> Any:
