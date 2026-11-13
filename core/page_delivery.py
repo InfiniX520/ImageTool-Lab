@@ -187,8 +187,10 @@ class PageDeliveryExecutor:
         self.clock, self.fault_hook = clock, fault_hook
         self.before_request=before_request
         self._cooldown_lock, self._cooldown_until = threading.Lock(), 0.0
-        # Fair rotation for the bounded cancelled-temp retry queue (RFA-03).
+        # Fair rotation for the bounded cancelled-temp retry queue (RFA-03):
+        # one cursor for never-attempted rows, one for rows already retried.
         self._cleanup_cursor = 0
+        self._cleanup_retry_cursor = 0
 
     def _db(self, method, *args, **kwargs):
         try:
@@ -583,18 +585,31 @@ class PageDeliveryExecutor:
         return ("cancelled", reason)
 
     def _refuse_cancel(self, row, error_code):
-        """Keep the row recoverable when the evidence denies cancellation."""
-        self._db(
-            "set_delivery_issue",
-            row["delivery_id"],
-            row["current_batch_id"],
-            state="recovery_needed",
-            error_code=error_code,
-        )
+        """Keep the row recoverable when the evidence denies cancellation.
+
+        A competing writer may have completed the row between the observation
+        and this write.  That refusal is a result, not a storage fault: report
+        the winner instead of letting the fault escape the publish path.
+        """
+        try:
+            self._db(
+                "set_delivery_issue",
+                row["delivery_id"],
+                row["current_batch_id"],
+                state="recovery_needed",
+                error_code=error_code,
+            )
+        except _StorageFault:
+            return self._classify_after_race(row, error_code)
         return ("recovery_needed", error_code)
 
     def _classify_after_race(self, row, fallback_code):
-        """Report the state a competing writer left, without rewriting it."""
+        """Report the state a competing writer left, without a second write.
+
+        The caller already failed to record an issue, so repeating the same
+        write would only repeat the refusal (or the outage).  The row keeps
+        whatever durable state the winner gave it.
+        """
         try:
             current = self._db("get_delivery", row["delivery_id"])
         except _StorageFault:
@@ -604,7 +619,7 @@ class PageDeliveryExecutor:
             return ("completed", "")
         if state == "cancelled":
             return ("cancelled", fallback_code)
-        return self._refuse_cancel(row, fallback_code)
+        return ("recovery_needed", fallback_code)
 
     def _mark_cleanup(self, delivery_id, evidence, outcome, error_code):
         """Record one cleanup attempt bound to the prepared identity.
@@ -903,11 +918,11 @@ class PageDeliveryExecutor:
         return "recovery_needed"
 
     def _sweep_cleanup(self, limit):
-        """Bounded retry of cancelled-by-intent temps, with a fair cursor.
+        """Bounded retry of cancelled-by-intent temps, with fair cursors.
 
-        The cursor advances past the examined window so one permanently failing
-        or unreadable row cannot starve newer candidates; reaching the tail
-        wraps once so a single startup pass still cleans the beginning.
+        Each tier keeps its own continuation, so the never-attempted rows and
+        the already-retried rows advance independently; reaching the tail of
+        both wraps once so a single startup pass still cleans the beginning.
         """
         rows = ()
         try:
@@ -918,16 +933,23 @@ class PageDeliveryExecutor:
                     "list_cleanup_candidates",
                     limit=limit,
                     after_rowid=self._cleanup_cursor,
+                    after_retry_rowid=self._cleanup_retry_cursor,
                     stats=stats,
                 )
                 self._cleanup_cursor = max(
                     self._cleanup_cursor, int(stats.get("next_rowid", 0))
                 )
-                if rows or not self._cleanup_cursor or wrapped:
+                self._cleanup_retry_cursor = int(
+                    stats.get("next_retry_rowid", self._cleanup_retry_cursor)
+                )
+                if rows or wrapped or not (
+                    self._cleanup_cursor or self._cleanup_retry_cursor
+                ):
                     break
-                # Reached the tail of the queue: wrap once so one startup pass
+                # Reached the tail of both tiers: wrap once so one startup pass
                 # still cleans the beginning.
                 self._cleanup_cursor = 0
+                self._cleanup_retry_cursor = 0
                 wrapped = True
             for fact in rows:
                 try:
