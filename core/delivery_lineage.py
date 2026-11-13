@@ -7,6 +7,7 @@ that link strictly by page identity and quality, never by "any cancelled row".
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,27 +75,74 @@ def _candidate(conn: Any, row: Any) -> Successor:
     )
 
 
+def _recorded_successor(conn: Any, delivery: Any) -> Successor | None:
+    """Follow an explicit handover event when the artifact row is older.
+
+    A reuse handover links the current batch to an artifact that may predate
+    the retired hold, so "newer rowid" alone cannot find it.  The
+    recovery_owner_transfer event records exactly which artifact took over.
+    """
+    delivery_id = str(delivery["delivery_id"])
+    rows = conn.execute(
+        "SELECT safe_payload FROM events WHERE kind = 'recovery_owner_transfer' "
+        "AND safe_payload LIKE ? ORDER BY event_seq DESC LIMIT 8",
+        (f'%"delivery_id":"{delivery_id}"%',),
+    ).fetchall()
+    for row in rows:
+        try:
+            info = json.loads(row["safe_payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(info, dict) or str(info.get("delivery_id")) != delivery_id:
+            continue
+        artifact_id = info.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            continue
+        artifact = conn.execute(
+            "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+        ).fetchone()
+        if artifact is None:
+            continue
+        if (
+            str(artifact["illust_id"]) != str(delivery["illust_id"])
+            or int(artifact["page_index"]) != int(delivery["page_index"])
+            or str(artifact["output_key"]) != str(delivery["output_key"])
+        ):
+            continue
+        candidate = conn.execute(
+            "SELECT * FROM deliveries WHERE delivery_id = ?",
+            (str(artifact["delivery_id"]),),
+        ).fetchone()
+        if candidate is not None and str(candidate["state"]) == "completed":
+            return _candidate(conn, candidate)
+    return None
+
+
 def resolve_successor(conn: Any, delivery: Any, *, hops: int = 0) -> Successor | None:
     """Find the newest delivery that owns the same page, or None.
 
-    Candidates are newer generations with the same illust/page/output_key and
-    quality key.  A completed candidate wins; otherwise the newest active
-    follow-up is returned so the caller can decide whether to hold or repair.
-    A superseded candidate is followed, bounded by MAX_SUPERSEDE_HOPS.
+    Candidates are newer rows with the same illust/page/output_key and quality
+    key.  A successor may belong to another job (a handover is exactly that),
+    so page identity and quality decide, and rowid decides "newer": the per-job
+    generation counter is not comparable across tasks.  A completed candidate
+    wins; otherwise the newest active follow-up is returned.  A superseded
+    candidate is followed, bounded by MAX_SUPERSEDE_HOPS.
     """
     if hops > MAX_SUPERSEDE_HOPS:
-        raise LineageError("successor chain is too deep")
+        # A chain this deep is treated as "no resolvable successor"; recovery
+        # then refuses without touching anything instead of crashing.
+        return None
     rows = conn.execute(
-        "SELECT * FROM deliveries WHERE job_id = ? AND illust_id = ? "
-        "AND page_index = ? AND output_key = ? AND quality_key = ? "
-        "AND generation > ? ORDER BY generation DESC LIMIT 32",
+        "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
+        "AND output_key = ? AND quality_key = ? AND rowid > ("
+        "SELECT rowid FROM deliveries WHERE delivery_id = ?"
+        ") ORDER BY rowid DESC LIMIT 32",
         (
-            str(delivery["job_id"]),
             str(delivery["illust_id"]),
             int(delivery["page_index"]),
             str(delivery["output_key"]),
             str(delivery["quality_key"]),
-            int(delivery["generation"]),
+            str(delivery["delivery_id"]),
         ),
     ).fetchall()
     completed: Successor | None = None
@@ -116,4 +164,8 @@ def resolve_successor(conn: Any, delivery: Any, *, hops: int = 0) -> Successor |
                 completed = candidate
         elif state in ACTIVE_FOLLOWUP and followup is None:
             followup = _candidate(conn, row)
-    return completed if completed is not None else followup
+    if completed is not None:
+        return completed
+    if followup is not None:
+        return followup
+    return _recorded_successor(conn, delivery)
