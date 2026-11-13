@@ -35,16 +35,23 @@ State machine ('previous_state' is the delivery the page is linked to):
 | needs_verification  | unknown / none       | hold    | needs_verification   |
 | pending             | hash_match           | reuse   | completed (reused)   |
 | pending             | missing              | none    | pending (idempotent) |
-| pending             | changed              | park    | needs_verification   |
-| pending             | other                | none    | pending              |
+| pending             | changed / unreadable / root_unavailable / changed_during_check / unknown | park | needs_verification (error_code = observed reason) |
+| pending             | no observation       | none    | pending (idempotent) |
 | anything else       | -                    | none    | refused              |
 
 'reuse' retires the hold as 'cancelled' (never deleted) and links the page to
 the already recorded artifact, so the page becomes reusable without a download.
 'repair' retires the hold the same way and inserts one new 'pending' delivery
 generation that follows the existing transfer, prepared and publish protocol.
-'park' converts a queued repair into a verification hold because a foreign file
-occupies the output path; it never overwrites bytes.
+'park' converts a queued repair into a verification hold because the page can
+no longer be trusted (foreign bytes, an unavailable root, an unreadable file or
+an inconclusive observation); it never overwrites bytes.
+
+All three write actions submit the same frozen observation and pass the same
+writer gate: policy version, freshness, current root revision, artifact/page
+binding and the previous delivery generation.  A page carried from another task
+may only ever target that task's hold; recovery retires it explicitly and
+records a 'recovery_owner_transfer' event instead of stealing a live slot.
 
 The mixin expects its host repository to provide the documented single-writer
 infrastructure (_transaction, _enqueue, _insert_event, _readonly_connection,
@@ -105,6 +112,27 @@ _ACTION_OUTCOME = {
     "reuse": "reused",
     "repair": "repair_queued",
     "park": "held",
+}
+
+# A queued repair is converted into a real hold for exactly these verdicts, and
+# the persisted error code is the observed reason (UA-03), never a fixed
+# 'artifact_changed'.  An existing hold simply stays a hold.
+_PARK_REASON = {
+    LocalState.CHANGED: "artifact_changed",
+    LocalState.UNREADABLE: "artifact_unreadable",
+    LocalState.ROOT_UNAVAILABLE: "artifact_root_unavailable",
+    LocalState.CHANGED_DURING_CHECK: "artifact_changed_during_check",
+    LocalState.UNKNOWN: "observation_unknown",
+}
+_PARK_STATES = frozenset(_PARK_REASON)
+
+# Persisted error_code for a parked row, keyed by the reported reason.
+_PARK_ERROR_CODE = {
+    "artifact_changed": "artifact_changed",
+    "artifact_unreadable": "artifact_unreadable",
+    "artifact_root_unavailable": "artifact_root_unavailable",
+    "artifact_changed_during_check": "artifact_changed_during_check",
+    "observation_unknown": "artifact_unknown",
 }
 
 
@@ -180,6 +208,16 @@ def decide_page_recovery(
         return RecoveryDecision(
             RecoveryOutcome.REFUSED, RecoveryAction.NONE, "unsupported_previous_state"
         )
+    if health_state is None:
+        if previous_state == "pending" and unavailable_reason == "no_recorded_artifact":
+            # A queued repair with no recorded bytes already is the repair; it
+            # stays dispatchable instead of being reported as a dead-end hold.
+            return RecoveryDecision(
+                RecoveryOutcome.REPAIR_QUEUED, RecoveryAction.NONE, "repair_already_pending"
+            )
+        return RecoveryDecision(
+            RecoveryOutcome.HELD, RecoveryAction.NONE, unavailable_reason
+        )
     if health_state is LocalState.HASH_MATCH:
         if reusable:
             return RecoveryDecision(
@@ -197,26 +235,14 @@ def decide_page_recovery(
         return RecoveryDecision(
             RecoveryOutcome.REPAIR_QUEUED, RecoveryAction.REPAIR, "artifact_missing"
         )
-    if health_state is LocalState.CHANGED:
-        if previous_state == "pending":
-            return RecoveryDecision(
-                RecoveryOutcome.HELD, RecoveryAction.PARK, "artifact_changed"
-            )
+    if health_state in _PARK_STATES:
+        # A queued repair that can no longer be trusted becomes a real hold; an
+        # existing hold stays a hold.  Never leave 'pending' dispatchable after
+        # an unavailable or negative verdict.
         return RecoveryDecision(
-            RecoveryOutcome.HELD, RecoveryAction.NONE, "artifact_changed"
-        )
-    if health_state is LocalState.UNREADABLE:
-        return RecoveryDecision(
-            RecoveryOutcome.HELD, RecoveryAction.NONE, "artifact_unreadable"
-        )
-    if health_state is LocalState.ROOT_UNAVAILABLE:
-        # Never translate an unavailable root into "all files are gone".
-        return RecoveryDecision(
-            RecoveryOutcome.HELD, RecoveryAction.NONE, "artifact_root_unavailable"
-        )
-    if health_state is LocalState.CHANGED_DURING_CHECK:
-        return RecoveryDecision(
-            RecoveryOutcome.HELD, RecoveryAction.NONE, "artifact_changed_during_check"
+            RecoveryOutcome.HELD,
+            RecoveryAction.PARK if previous_state == "pending" else RecoveryAction.NONE,
+            _PARK_REASON[health_state],
         )
     return RecoveryDecision(RecoveryOutcome.HELD, RecoveryAction.NONE, unavailable_reason)
 
@@ -235,6 +261,7 @@ class _RecoveryPage:
     delivery_state: str
     error_code: str | None
     quality_key: str
+    generation: int
     artifacts: tuple[dict[str, Any], ...]
     cross_task_receipt: bool
 
@@ -251,11 +278,22 @@ def _unavailable_reason(page: _RecoveryPage) -> str:
 def _recovery_result(
     page: _RecoveryPage,
     decision: RecoveryDecision,
-    primary: ArtifactHealth | None,
-    chosen: tuple[dict[str, Any], ArtifactHealth] | None,
+    observation: ArtifactHealth | None,
+    *,
+    matched: bool,
 ) -> dict[str, Any]:
-    """The frozen result draft; the writer finalizes the durable state."""
-    artifact = None if chosen is None else chosen[0]
+    """The frozen result draft; the writer finalizes the durable state.
+
+    Every field describes the single observation the decision used.  The
+    artifact identity is only filled when that observation actually matched a
+    recorded artifact, so a 'changed' verdict can never be reported together
+    with another version's artifact id (UA-04).
+    """
+    artifact_id = (
+        observation.expectation.artifact_id
+        if matched and observation is not None
+        else None
+    )
     return {
         "outcome": decision.outcome.value,
         "reason": decision.reason,
@@ -264,17 +302,27 @@ def _recovery_result(
         "illust_id": page.illust_id,
         "page_index": page.page_index,
         "output_key": page.output_key,
+        "page_key": {
+            "illust_id": page.illust_id,
+            "page_index": page.page_index,
+            "output_key": page.output_key,
+            "quality_key": page.quality_key,
+        },
+        "generation": page.generation,
         "previous_delivery_id": page.delivery_id,
         "previous_state": page.delivery_state,
         "previous_error_code": page.error_code,
         "delivery_id": page.delivery_id,
         "state": page.delivery_state,
-        "artifact_id": None if artifact is None else str(artifact["artifact_id"]),
+        "artifact_id": artifact_id,
         "repair_delivery_id": None,
-        "health": None if primary is None else primary.to_payload(),
-        "observed_size": None if primary is None else primary.observed_size,
-        "observed_sha256": None if primary is None else primary.observed_sha256,
-        "checked_at": None if primary is None else primary.checked_at,
+        "health": None if observation is None else observation.to_payload(),
+        "observed_state": None if observation is None else observation.state.value,
+        "observed_size": None if observation is None else observation.observed_size,
+        "observed_sha256": (
+            None if observation is None else observation.observed_sha256
+        ),
+        "checked_at": None if observation is None else observation.checked_at,
     }
 
 
@@ -325,36 +373,36 @@ class DeliveryRecoveryMixin:
 
         page = self._read_recovery_page(batch_id, illust_id, page_index)
         resolver = self._path_resolver_snapshot()
+        observation: ArtifactHealth | None = None
+        matched = False
         if page.delivery_state == "completed":
             decision = RecoveryDecision(
                 RecoveryOutcome.COMPLETED, RecoveryAction.NONE, "already_completed"
             )
-            primary = None
-            chosen = None
         elif page.phase != "running":
             decision = RecoveryDecision(
                 RecoveryOutcome.REFUSED, RecoveryAction.NONE, "batch_not_running"
             )
-            primary = None
-            chosen = None
         elif resolver is None:
             decision = RecoveryDecision(
                 RecoveryOutcome.HELD, RecoveryAction.NONE, "observation_unavailable"
             )
-            primary = None
-            chosen = None
         else:
             primary, chosen = self._observe_recovery_page(
                 page, resolver, f"recover-{batch_id}"
             )
+            matched = chosen is not None
+            # The selected record drives the decision; a negative verdict uses
+            # the one observation that produced it, never a different primary.
+            observation = chosen[1] if chosen is not None else primary
             decision = decide_page_recovery(
                 page.delivery_state,
-                None if primary is None else primary.state,
-                reusable=chosen is not None,
+                None if observation is None else observation.state,
+                reusable=matched,
                 unavailable_reason=_unavailable_reason(page),
             )
 
-        draft = _recovery_result(page, decision, primary, chosen)
+        draft = _recovery_result(page, decision, observation, matched=matched)
         return self._enqueue(
             "recover_verification_page",
             {
@@ -364,9 +412,25 @@ class DeliveryRecoveryMixin:
                 "command_id": command_id,
                 "previous_delivery_id": page.delivery_id,
                 "previous_state": page.delivery_state,
+                "generation": page.generation,
+                "page_key": {
+                    "illust_id": page.illust_id,
+                    "page_index": page.page_index,
+                    "output_key": page.output_key,
+                    "quality_key": page.quality_key,
+                },
                 "action": decision.action.value,
-                "artifact_id": None if chosen is None else str(chosen[0]["artifact_id"]),
-                "health": [] if chosen is None else [chosen[1].to_payload()],
+                "artifact_id": (
+                    observation.expectation.artifact_id
+                    if matched and observation is not None
+                    else None
+                ),
+                "selected_state": (
+                    None if observation is None else observation.state.value
+                ),
+                # The frozen observation is submitted for reuse, repair and
+                # park alike; the writer gates all three identically (UA-06).
+                "health": [] if observation is None else [observation.to_payload()],
                 "draft": draft,
             },
         )
@@ -500,6 +564,7 @@ class DeliveryRecoveryMixin:
             delivery_state=state,
             error_code=None if error_code is None else str(error_code),
             quality_key=quality_key,
+            generation=0 if delivery is None else int(delivery["generation"]),
             artifacts=artifacts,
             cross_task_receipt=cross_task_receipt,
         )
@@ -670,7 +735,10 @@ class DeliveryRecoveryMixin:
                 if delivery_id is not None:
                     result["delivery_id"] = delivery_id
                 result["repair_delivery_id"] = None
-                return self._finish_recovery(conn, batch, result, command_id, action="none")
+                return self._finish_recovery(
+                    conn, batch, result, command_id,
+                    requested_action="none", applied_action="none",
+                )
             if delivery_id is None:
                 return self._refuse_recovery(
                     conn, batch, result, "page_not_in_batch", command_id
@@ -678,28 +746,49 @@ class DeliveryRecoveryMixin:
             delivery = self._get_delivery_row(conn, delivery_id)
             if delivery is None:
                 raise lib.CorruptDataError("Selected page references a missing delivery")
-            if str(delivery["job_id"]) != str(batch["job_id"]):
-                return self._refuse_recovery(
-                    conn, batch, result, "page_owner_mismatch", command_id
-                )
+            foreign = str(delivery["job_id"]) != str(batch["job_id"])
             current_state = str(delivery["state"])
+            if foreign and current_state != "needs_verification":
+                # A carried page may only ever act on another task's hold.  A
+                # live transfer/validation/prepared slot is never stolen.
+                return self._refuse_recovery(
+                    conn, batch, result, "output_blocked_by_other_task", command_id,
+                    requested_action=action,
+                )
             result["delivery_id"] = delivery_id
             result["state"] = current_state
             if delivery_id != previous_delivery_id or current_state != previous_state:
                 # The page moved between the preflight and this transaction.
                 return self._refuse_recovery(
-                    conn, batch, result, "state_changed", command_id
+                    conn, batch, result, "state_changed", command_id,
+                    requested_action=action,
                 )
             if action == RecoveryAction.NONE.value:
                 if result.get("outcome") == RecoveryOutcome.REPAIR_QUEUED.value:
                     result["repair_delivery_id"] = delivery_id
-                return self._finish_recovery(conn, batch, result, command_id, action=action)
+                return self._finish_recovery(
+                    conn, batch, result, command_id,
+                    requested_action=action, applied_action="none",
+                )
+            artifact, invalid = self._validate_recovery_observation(
+                conn, payload, link, delivery
+            )
+            if invalid is not None:
+                result["outcome"] = RecoveryOutcome.REFUSED.value
+                result["reason"] = invalid
+                result["repair_delivery_id"] = None
+                return self._finish_recovery(
+                    conn, batch, result, command_id,
+                    requested_action=action, applied_action="none",
+                )
             if action == RecoveryAction.REUSE.value:
                 reason = self._apply_recovery_reuse(
-                    conn, batch, link, delivery, payload, result
+                    conn, batch, link, delivery, artifact, result, foreign
                 )
             elif action == RecoveryAction.REPAIR.value:
-                reason = self._apply_recovery_repair(conn, batch, link, delivery, result)
+                reason = self._apply_recovery_repair(
+                    conn, batch, link, delivery, result, foreign
+                )
             else:
                 reason = self._apply_recovery_park(conn, batch, delivery, result)
             if reason is not None:
@@ -708,24 +797,125 @@ class DeliveryRecoveryMixin:
                 result["state"] = current_state
                 result["delivery_id"] = delivery_id
                 result["repair_delivery_id"] = None
-            return self._finish_recovery(conn, batch, result, command_id, action=action)
+                return self._finish_recovery(
+                    conn, batch, result, command_id,
+                    requested_action=action, applied_action="none",
+                )
+            return self._finish_recovery(
+                conn, batch, result, command_id,
+                requested_action=action, applied_action=action,
+            )
+
+    def _validate_recovery_observation(
+        self, conn, payload: dict[str, Any], link, delivery
+    ) -> tuple[Any, str | None]:
+        """Gate reuse, repair and park on the same frozen observation.
+
+        Returns (artifact_row_or_None, failure_reason).  A failure writes
+        nothing: the old hold is not retired and no 'repaired' event is
+        recorded.  Reuse keeps its established 'stale_preflight' code; repair
+        and park report 'stale_observation' so the caller can tell the two
+        kinds of refusal apart.
+        """
+        from core.delivery_repository import _artifact_is_valid
+
+        action = str(payload.get("action"))
+        reuse = action == RecoveryAction.REUSE.value
+        stale = "stale_preflight" if reuse else "stale_observation"
+        key = payload.get("page_key")
+        generation = payload.get("generation")
+        if key is None or generation is None:
+            # A command without the frozen page binding cannot authorize any
+            # write; it is stale evidence, not a mismatch of known fields.
+            return None, stale
+        expected = {
+            "illust_id": str(link["illust_id"]),
+            "page_index": int(link["page_index"]),
+            "output_key": str(link["output_key"]),
+            "quality_key": str(delivery["quality_key"]),
+        }
+        if not isinstance(key, dict) or any(
+            key.get(name) != value for name, value in expected.items()
+        ):
+            return None, "observation_page_mismatch"
+        if generation != int(delivery["generation"]):
+            return None, "observation_generation_changed"
+        raw = payload.get("health")
+        if not isinstance(raw, list) or len(raw) != 1:
+            return None, "observation_missing" if not reuse else stale
+        records = self._health_map(raw)
+        if not records:
+            # Policy version, freshness and the current root binding are all
+            # enforced by _health_map; an empty result is never evidence.
+            return None, stale
+        record = next(iter(records.values()))
+        expectation = record.expectation
+        if (
+            expectation.illust_id != expected["illust_id"]
+            or expectation.page_index != expected["page_index"]
+            or expectation.output_key != expected["output_key"]
+            or expectation.quality_key != expected["quality_key"]
+        ):
+            return None, "observation_page_mismatch"
+        if payload.get("selected_state") != record.state.value:
+            return None, "observation_mismatch"
+        selected = payload.get("artifact_id")
+        artifact = None
+        if selected is not None:
+            if not isinstance(selected, str) or expectation.artifact_id != selected:
+                return None, "observation_mismatch"
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_id = ?", (selected,)
+            ).fetchone()
+            if artifact is None or not _artifact_is_valid(dict(artifact)):
+                return None, stale
+            if not expectation.matches_row(artifact):
+                return None, stale
+        if reuse:
+            if artifact is None or record.state is not LocalState.HASH_MATCH:
+                return None, stale
+            if not self._health_allows_reuse(record, artifact):
+                return None, stale
+            if (
+                str(artifact["illust_id"]) != expected["illust_id"]
+                or int(artifact["page_index"]) != expected["page_index"]
+                or str(artifact["output_key"]) != expected["output_key"]
+            ):
+                return None, stale
+        elif action == RecoveryAction.REPAIR.value:
+            if record.state is not LocalState.MISSING:
+                return None, "observation_mismatch"
+        elif action == RecoveryAction.PARK.value:
+            if record.state not in _PARK_STATES:
+                return None, "observation_mismatch"
+        else:
+            return None, "unsupported_evidence"
+        return artifact, None
+
+    def _record_owner_transfer(self, conn, batch, delivery, artifact_id, action: str) -> None:
+        """Append the cross-task handover fact; never rewrite the other task."""
+        self._insert_event(
+            conn,
+            job_id=str(batch["job_id"]),
+            batch_id=str(batch["batch_id"]),
+            kind="recovery_owner_transfer",
+            payload={
+                "delivery_id": str(delivery["delivery_id"]),
+                "from_job_id": str(delivery["job_id"]),
+                "to_job_id": str(batch["job_id"]),
+                "from_state": str(delivery["state"]),
+                "artifact_id": artifact_id,
+                "action": action,
+            },
+        )
 
     def _apply_recovery_reuse(
-        self, conn, batch, link, delivery, payload: dict[str, Any], result: dict[str, Any]
+        self, conn, batch, link, delivery, artifact, result: dict[str, Any],
+        foreign: bool,
     ) -> str | None:
         """Link the recorded artifact and retire the hold; never touch history."""
         lib = _lib()
-        artifact_id = payload.get("artifact_id")
-        if not isinstance(artifact_id, str) or not artifact_id:
-            return "stale_preflight"
-        health = self._health_map(payload.get("health")).get(artifact_id)
-        artifact = conn.execute(
-            "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
-        ).fetchone()
-        if artifact is None or health is None:
-            return "stale_preflight"
-        if not self._health_allows_reuse(health, artifact):
-            return "stale_preflight"
+        artifact_id = str(artifact["artifact_id"])
         if (
             str(artifact["illust_id"]) != str(link["illust_id"])
             or int(artifact["page_index"]) != int(link["page_index"])
@@ -734,13 +924,19 @@ class DeliveryRecoveryMixin:
             return "stale_preflight"
         now = lib._utcnow()
         retired = conn.execute(
-            "UPDATE deliveries SET state = 'cancelled', "
-            "error_code = 'recovered_hash_match', retry_at = NULL, updated_at = ? "
-            "WHERE delivery_id = ? AND state = ?",
-            (now, str(delivery["delivery_id"]), str(delivery["state"])),
+            "UPDATE deliveries SET state = 'cancelled', error_code = ?, "
+            "retry_at = NULL, updated_at = ? WHERE delivery_id = ? AND state = ?",
+            (
+                "superseded_by_recovery_reuse" if foreign else "recovered_hash_match",
+                now,
+                str(delivery["delivery_id"]),
+                str(delivery["state"]),
+            ),
         ).rowcount
         if retired != 1:
             return "state_changed"
+        if foreign:
+            self._record_owner_transfer(conn, batch, delivery, artifact_id, "reuse")
         same_job = str(artifact["job_id"]) == str(batch["job_id"])
         self._link_batch_item_page(
             conn,
@@ -765,7 +961,8 @@ class DeliveryRecoveryMixin:
         return None
 
     def _apply_recovery_repair(
-        self, conn, batch, link, delivery, result: dict[str, Any]
+        self, conn, batch, link, delivery, result: dict[str, Any],
+        foreign: bool = False,
     ) -> str | None:
         """Retire the hold and queue one new pending delivery generation."""
         lib = _lib()
@@ -814,6 +1011,8 @@ class DeliveryRecoveryMixin:
         ).rowcount
         if retired != 1:
             return "state_changed"
+        if foreign:
+            self._record_owner_transfer(conn, batch, delivery, None, "repair")
         generation = (
             int(
                 conn.execute(
@@ -881,14 +1080,17 @@ class DeliveryRecoveryMixin:
         return None
 
     def _apply_recovery_park(self, conn, batch, delivery, result: dict[str, Any]) -> str | None:
-        """Hold a queued repair when a foreign file owns the output path."""
+        """Turn a queued repair into a real hold; the verdict is the error code."""
         lib = _lib()
+        error_code = _PARK_ERROR_CODE.get(str(result.get("reason")))
+        if error_code is None:
+            return "unsupported_park_reason"
         now = lib._utcnow()
         updated = conn.execute(
             "UPDATE deliveries SET state = 'needs_verification', "
-            "error_code = 'artifact_changed', retry_at = NULL, updated_at = ? "
+            "error_code = ?, retry_at = NULL, updated_at = ? "
             "WHERE delivery_id = ? AND state = 'pending'",
-            (now, str(delivery["delivery_id"])),
+            (error_code, now, str(delivery["delivery_id"])),
         ).rowcount
         if updated != 1:
             return "state_changed"
@@ -899,23 +1101,37 @@ class DeliveryRecoveryMixin:
         return None
 
     def _refuse_recovery(
-        self, conn, batch, result: dict[str, Any], reason: str, command_id
+        self, conn, batch, result: dict[str, Any], reason: str, command_id,
+        *, requested_action: str = "none",
     ) -> dict[str, Any]:
         result["outcome"] = RecoveryOutcome.REFUSED.value
         result["reason"] = reason
         result["repair_delivery_id"] = None
-        return self._finish_recovery(conn, batch, result, command_id, action="none")
+        return self._finish_recovery(
+            conn, batch, result, command_id,
+            requested_action=requested_action, applied_action="none",
+        )
 
     def _finish_recovery(
-        self, conn, batch, result: dict[str, Any], command_id, *, action: str
+        self, conn, batch, result: dict[str, Any], command_id, *,
+        requested_action: str, applied_action: str,
     ) -> dict[str, Any]:
         """Append the audit event (exactly once per accepted command id)."""
+        allowed = {item.value for item in RecoveryAction}
+        if requested_action not in allowed or applied_action not in allowed:
+            raise _lib().LibraryError("Invalid recovery action evidence")
         self._insert_event(
             conn,
             job_id=str(batch["job_id"]),
             batch_id=str(batch["batch_id"]),
             kind="verification_recovery",
-            payload={**result, "action": action, "result": result},
+            payload={
+                **result,
+                "action": applied_action,
+                "requested_action": requested_action,
+                "applied_action": applied_action,
+                "result": result,
+            },
             accepted_command_id=command_id,
         )
         return result
