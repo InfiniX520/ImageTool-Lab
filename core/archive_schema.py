@@ -1480,6 +1480,28 @@ def record_path_acceptance(
     return _acceptance_object(proposed, content)
 
 
+def _require_expected_acceptance(
+    current_acceptance: str | None, expected_acceptance_id: str | None | _UnsetType,
+) -> None:
+    """Require the caller's token to name the acceptance still in place.
+
+    ``UNSET`` means the caller supplied none, which is only acceptable when the
+    binding has no accepted evidence at all: rewriting an accepted binding without
+    stating which acceptance it expected is exactly the stale-caller hole AR4-01
+    describes.  ``None`` states "there is no acceptance", and a string states which
+    one.
+    """
+    if current_acceptance is None:
+        if isinstance(expected_acceptance_id, str):
+            raise ContractError(
+                "Path binding has no acceptance the expected token could name")
+    elif expected_acceptance_id is UNSET:
+        raise ContractError(
+            "Updating an accepted path binding requires its expected acceptance ID")
+    elif expected_acceptance_id != current_acceptance:
+        raise ContractError("Path acceptance changed without the expected acceptance ID")
+
+
 def bind_archive_path(
     conn: sqlite3.Connection, content: ContentVersion, path: PathRef, *,
     bound_at: str, expected_content_key: str | None = None,
@@ -1533,22 +1555,19 @@ def bind_archive_path(
     ).fetchone()
     if current_key is None:
         raise ContractError("Current path binding has no exact asset row")
-    if current[2] is None:
-        if isinstance(expected_acceptance_id, str):
-            raise ContractError(
-                "Path binding has no acceptance the expected token could name")
-    elif expected_acceptance_id is UNSET:
-        raise ContractError(
-            "Updating an accepted path binding requires its expected acceptance ID")
-    elif expected_acceptance_id != current[2]:
-        raise ContractError("Path acceptance changed without the expected acceptance ID")
     if current_key[0] == new_key:
-        if acceptance_id is not None and acceptance_id != current[2]:
-            conn.execute(
-                "UPDATE archive_path_bindings SET bound_at=?, acceptance_id=? WHERE path_key=?",
-                (bound_at, acceptance_id, path.identity_key),
-            )
+        # Same content: re-pointing at the very acceptance the binding already has
+        # (or naming no acceptance at all) changes nothing, so it is a no-op and
+        # needs no token.  Only actually moving the accepted evidence does.
+        if acceptance_id is None or acceptance_id == current[2]:
+            return
+        _require_expected_acceptance(current[2], expected_acceptance_id)
+        conn.execute(
+            "UPDATE archive_path_bindings SET bound_at=?, acceptance_id=? WHERE path_key=?",
+            (bound_at, acceptance_id, path.identity_key),
+        )
         return
+    _require_expected_acceptance(current[2], expected_acceptance_id)
     if expected_content_key is None or expected_content_key != current_key[0]:
         raise ContractError("Path binding changed without the expected old content")
     if current[2] is not None and acceptance_id is None:

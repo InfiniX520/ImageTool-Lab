@@ -839,14 +839,19 @@ def test_index_only_binding_has_an_explicit_token_and_cannot_be_cleared(library,
     assert accepted.acceptance_id == acceptance.acceptance_id
     assert accepted.root_revision == 1
 
-    # UNSET means "the caller supplied no token"; an accepted binding cannot be
-    # updated without one.
+    # A second acceptance for the same content is a real pointer move, so it needs
+    # the token: a bare call is refused instead of silently replacing evidence.
+    _, _, reuse_observed = scan_one(conn, root, "gallery/a.bin",
+                                    run_id="run-ib1b", check_id="check-ib1b")
+    _, second_acceptance = accept(conn, reuse_observed)
+    assert second_acceptance.acceptance_id != acceptance.acceptance_id
     after_accept = state(conn)
     with pytest.raises(ContractError, match="expected acceptance"):
         with transaction(conn):
             bind_archive_path(
                 conn, observed.content, entry.path, bound_at=LATER,
-                acceptance_id=None, expected_content_key=_content_key(observed.content),
+                acceptance_id=acceptance.acceptance_id,
+                expected_content_key=_content_key(observed.content),
             )
     assert_untouched(conn, after_accept)
 
@@ -855,7 +860,8 @@ def test_index_only_binding_has_an_explicit_token_and_cannot_be_cleared(library,
         with transaction(conn):
             bind_archive_path(
                 conn, observed.content, entry.path, bound_at=LATER,
-                acceptance_id=None, expected_content_key=_content_key(observed.content),
+                acceptance_id=acceptance.acceptance_id,
+                expected_content_key=_content_key(observed.content),
                 expected_acceptance_id=None,
             )
     assert_untouched(conn, after_accept)
@@ -876,7 +882,7 @@ def test_index_only_binding_has_an_explicit_token_and_cannot_be_cleared(library,
                 conn, changed_resolution.content, entry2.path, bound_at=LATER,
                 acceptance_id=None,
                 expected_content_key=_content_key(observed.content),
-                expected_acceptance_id=acceptance.acceptance_id,
+                expected_acceptance_id=second_acceptance.acceptance_id,
             )
     assert_untouched(conn, after_changed_asset)
 
@@ -931,6 +937,32 @@ def test_plan_save_cannot_silently_drop_accepted_evidence(library, tmp_path):
         conn, inventory, capacity, receipt=later_receipt, root_revision=1)
     assert binding_row(conn, "gallery/a.bin")[3] == second_acceptance.acceptance_id
     assert load_archive_plan(conn, "batch-plan-token").inventory == inventory
+    validate_archive_facts(conn)
+
+
+def test_rebinding_the_current_acceptance_is_a_no_op_without_a_token(library, tmp_path):
+    """Re-naming the acceptance already in place moves nothing, so it needs no token."""
+    conn, root = library[1], tmp_path / "bind-noop-root"
+    target, first, acceptance = baseline(conn, root, "gallery/a.bin", b"AAAA", tag="bn1")
+    before = state(conn)
+    row_before = binding_row(conn, "gallery/a.bin")
+
+    with transaction(conn):
+        bind_archive_path(
+            conn, first.content, path_of("gallery/a.bin"), bound_at=LATER,
+            acceptance_id=acceptance.acceptance_id,
+            expected_content_key=_content_key(first.content),
+        )
+    assert state(conn) == before
+    assert binding_row(conn, "gallery/a.bin") == row_before
+
+    # Naming no acceptance at all must keep the accepted evidence, not clear it.
+    with transaction(conn):
+        bind_archive_path(conn, first.content, path_of("gallery/a.bin"), bound_at=LATER)
+    assert state(conn) == before
+    assert binding_row(conn, "gallery/a.bin") == row_before
+    assert load_content_binding(conn, path_of("gallery/a.bin")).acceptance_id == (
+        acceptance.acceptance_id)
     validate_archive_facts(conn)
 
 
