@@ -61,9 +61,12 @@
 2. `quality_key` 等于本次请求的 quality key；
 3. `root_revision` 等于当前 `PathResolver.root_revision(ref)`；
 4. `health.policy` 与当前 `_ARTIFACT_HEALTH_POLICY` 一致，且 `_health_is_current(record)` 为真（`max_age_seconds=900`）；
-5. 记录不是 `unobserved_health`（`UNKNOWN/UNREADABLE/ROOT_UNAVAILABLE` 一律重新观察）。
+5. 记录不是 `unobserved_health`（`UNKNOWN/UNREADABLE/ROOT_UNAVAILABLE` 一律重新观察）；
+6. **磁盘对象身份未变**：对记录对应的 `PathRef` 做一次 `os.stat`（不打开、不哈希），比较 `device`+`file_index` 与 `ArtifactHealth.identity`、`st_size` 与 `observed_size`；`identity` 缺失、stat 失败、或任一不符 → 丢弃记录并重新观察。
 
 不满足任一条 → 丢弃该记录并重新观察。**禁止**把"未观察"写成健康，也禁止把过期观察当成当前证据。
+
+> v3.1 修订（2026-11-14，T lane 验收发现）：第 6 条是新增的。没有它，"切片之间文件被替换、但记录仍在 900 秒窗口内"无法被发现，等于把旧结论当成当前证据。stat 复核不打开文件、不计入 `max_files`，但对同一 inode 的原地等长改写仍无法识别——那属于 `_verify_owned` 与发布门/确认门的职责，不在复用判据里重复哈希。
 
 ### 1.4 切面算法
 
@@ -222,7 +225,7 @@ def resolve_successor_ex(conn, delivery) -> LineageResult                       
 
 | 项 | 判据 |
 | --- | --- |
-| RFA-01 | `test_default_page_budget_can_progress_a_33_image_work_after_resume` 绿；32/33/64 页、多作品共页、多版本、暂停在边界、重复受理、切片间替换、过期进度各有反例 |
+| RFA-01 | `test_default_page_budget_can_progress_a_33_image_work_after_resume` 绿；32/33/64 页、多作品共页、多版本、暂停在边界、重复受理、切片间替换（行身份变化 + 磁盘对象身份变化两种）、过期进度各有反例 |
 | RFA-02 | 三条根掉线探针绿；重连后已发布交付回到 `completed`；`cleanup` 掉线返回 False |
 | RFA-03 | 真实 executor 写的事实让候选出队；旧 `outcome=cleaned` 也出队；201 条混合窗口推进；坏证据不饿死 |
 | RFA-04 | 精确 handover 优先；坏目标拒绝并留诊断 |
