@@ -2334,6 +2334,15 @@ class LibraryRepository(
                     # hashing the whole page; this is a control result, not a
                     # file-health verdict.
                     raise PreflightCancelled("cancelled")
+                if budget is not None:
+                    # Check before starting the next file: a page budget of N
+                    # must never open N+1 files and then complain.
+                    if observed_files >= budget.max_files:
+                        raise PreflightCancelled("page_file_budget")
+                    if observed_bytes > budget.max_bytes:
+                        raise PreflightCancelled("page_byte_budget")
+                    if time.monotonic() - started > float(budget.max_seconds):
+                        raise PreflightCancelled("page_time_budget")
                 artifact_id = str(artifact["artifact_id"])
                 if artifact_id in records:
                     continue
