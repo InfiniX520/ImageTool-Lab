@@ -8,7 +8,8 @@
 - 删除、等长非图替换、同尺寸不同摘要 PNG 不再计为 `completed/existing`；缺失进入 pending 修复，变化进入 `needs_verification`；批次不能在这些页面未解决时结算为 completed。
 - 未改动文件仍可复用；显式 `redownload` 仍可补齐并保留两代 artifact；旧 artifact、delivery、批次计数逐字段不变。
 - W4 用追加式 `events(kind='removal_intent')` 接入 `EXCLUDED`/撤销；`OFFLOADED` 仍明确拒绝，未对外声称支持。
-- **W5（UI/CLI/全库巡检）与 W6（2,000 文件、第二批、崩溃恢复）尚未完成；本批不是生产发布声明。**
+- W6 的 2,000 文件整链、第二批缺失修复、进程退出后重开子集已通过合成证据（见第 6 节）。
+- **W5（UI/CLI/全库巡检）尚未完成；W6 的根不可用/链接/快速策略 UI 边界与迁移演练仍未完成。本批不是生产发布声明。**
 
 ## 2. 实现
 
@@ -54,14 +55,27 @@
 
 - 未接触真实图库/生产库/账号/网络；未上传、删除、释放或回读云端。
 - 未做 UI/CLI 展示“核验于某时/状态/原因/重新核验/补齐/标记有意移除”；W5 待做。
-- 未做 2,000 文件整链、第二批变化、进程退出/崩溃恢复；W6 待做。
+- W6 的 2,000 文件整链、第二批缺失修复、进程退出后重开子集已做（第 6 节）；根不可用/链接/快速策略的 UI 边界与迁移演练仍待做。
 - 快速策略只保留契约，未默认启用；完整 SHA-256 是当前唯一复用策略。
 - `root_unavailable` 目前保守转 `needs_verification`，尚无单独观察投影/UI 原因；W5 待补。
 - `OFFLOADED` 意图已拒绝写入，避免“记录了但没接线”的虚假能力；待 W5 设计转存核验后再开放。
 - 用户意图事件当前挂在 running batch 上；批次/任务删除会级联事件，生产长期意图存储仍需在 W5/W6 评审。
 - 未做真实迁移、备份演练或旧库升级；本批不新增数据库 schema 对象。
 
-## 5. 复核入口
+## 5. W6 规模与进程退出证据
+
+合成临时库：`E:\Zero9\JuiLiu\.runtime\u1a_scale_ilv7d16b`，仅 70 B 合成 PNG；不接触真实数据。
+
+| 场景 | 结果 |
+| --- | --- |
+| 首批 2,000 页 | 2,000 个 artifact，`pages.completed=2000`；批次 03:42:17–03:47:25（约 308 s，含 2,000 次发布/fsync） |
+| 第二批 1 页删除 | `existing=1999, pending=1`，无新增 artifact；修复 0.176 s；结算 `completed`，`new_completed=1, existing=1999`，artifact 2,001 |
+| 第三批 2,000 页全在 | 预检/接受 17.909 s，`existing=2000, pending=0, needs_verification=0`，无可派发，批次 `completed` |
+| 进程退出 | 子进程接受 2,000 页后 `os._exit(99)`；重开 `existing=2000`，artifact 数不变（2,001），旧 artifact/delivery 逐字段不变，批次可正常结算 |
+
+证据：[scale_verify_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/scale_verify_result.json)、[crash_probe_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/crash_probe_result.json)。这是 W6 的规模/退出子集，不等于完整 W5/W6 验收；未做真实迁移、备份演练、根不可用/链接/快速策略的 UI 接线。
+
+## 6. 复核入口
 
 - [W0 决定](../audits/2026-11-13-u1a-wiring/W0_DECISIONS.md)
 - [评审总览](../audits/2026-11-13-u1a-wiring/README.md)
