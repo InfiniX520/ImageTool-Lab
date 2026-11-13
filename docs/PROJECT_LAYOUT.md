@@ -1,6 +1,6 @@
 # 项目目录说明
 
-**当前补充（2026-11-12）**：**最新审计：705a990 全量复跑 1,388 通过/3 跳过；首次有 1 项日志时间预算断言失败，原报告保留。当前 8 项开放（4 P1、4 P2），A1 未验收。**最新状态以[本轮审计](audits/2026-11-12-a1-final/README.md)为准；以下旧轮次记录保留历史。审计材料统一位于工作区 `.runtime/jpgpng_a1_finalaudit_20261112_01/`，没有增加项目根临时文件或移动业务资料。
+**当前补充（2026-11-13）**：2ccabca：现有全量 1,412 通过/3 跳过；未合入的独立反例 22 通过/1 失败；8 项开放（2 P1、6 P2），A1 未验收。最新问题与接续见[接受事务复审](audits/2026-11-13-a1-acceptance/README.md)；原轮次保持历史，不覆盖旧证据。
 
 下载器双击 `启动.bat`，AI 整理工具使用 `organize.cmd`；操作分别见 [使用说明](../使用说明.md) 和 [CLI 说明](../ORGANIZER_CLI.md)。计划和历史统一从 [文档导航](README.md) 查找。
 
@@ -69,4 +69,4 @@
 
 ## 当前 A1 审计与并发资料
 
-[最新三份报告](audits/2026-11-12-a1-final/README.md)是当前问题与下一轮指导。证据统一在工作区 `.runtime/jpgpng_a1_finalaudit_20261112_01/README.md`；上一执行批次 worktree/报告索引见 `.runtime/jpgpng_a1_recheck_fix_20261112_01/README.md`（均为工作区相对位置）。各副本保留明确 HEAD，不合并覆盖，也不按名字删除。
+[当前三份报告](audits/2026-11-13-a1-acceptance/README.md)集中问题与下一步。证据统一在工作区 `.runtime/jpgpng_a1_acceptance_audit_20261112_01/README.md`，其中 `worktrees_inventory.json` 登记现有 worktree 的 HEAD 和未提交状态。上一执行批次为 `.runtime/jpgpng_a1_ar3_20261112_01/`；更早批次保留原位。本轮只建立索引、同步当前导航，没有搬动副本或按名称删除资料。

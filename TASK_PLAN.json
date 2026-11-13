@@ -297,7 +297,7 @@
   ],
   "current_plan": {
     "id": "JPGPNG-REFACTOR-20261023",
-    "updated_at": "2026-11-12T13:57:39+08:00",
+    "updated_at": "2026-11-13",
     "mainline": "P0-P8 completed",
     "cleanup": "completed",
     "progress": "docs/refactor/REFACTOR_PROGRESS.md",
@@ -345,26 +345,26 @@
     },
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
-      "updated_date": "2026-11-12",
-      "phase": "A1 latest implementation independently audited at 705a990",
-      "status": "independent_audit_eight_open_four_p1_four_p2_not_production_ready",
+      "updated_date": "2026-11-13",
+      "phase": "A1 schema 4 acceptance transaction independently audited at 2ccabca",
+      "status": "independent_audit_eight_open_two_p1_six_p2_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet.",
+      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-A1-FINALAUDIT-20261112-01",
-      "foundation": "docs/audits/2026-11-12-a1-final/DEVELOPMENT_GUIDE.md",
-      "evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
+      "latest_batch": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "foundation": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
+      "evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
       "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
-      "unfinished_draft": "AR3-01..06,09,10 open; AR3-07/08 repaired and independently closed",
+      "unfinished_draft": "AR4-01..08 open; AR3-03/10 original cases closed; AR3-07/08 remain closed",
       "latest_repair_evidence": ".runtime/jpgpng_a1_repair_20261112_01/validation.json",
-      "latest_overview": "docs/audits/2026-11-12-a1-final/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json"
+      "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json"
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
       "date": "2026-11-11",
-      "status": "independent_audit_eight_open_four_p1_four_p2_not_production_ready",
+      "status": "independent_audit_eight_open_two_p1_six_p2_not_production_ready",
       "overview": "docs/archiving/README.md",
       "design": "docs/archiving/DESIGN.md",
       "acceptance": "docs/archiving/ACCEPTANCE.md",
@@ -393,14 +393,14 @@
       "first_transport": "Manual official Quark client; user attests origin, program verifies full bytes; not automated provider proof",
       "stages": {
         "A0": "design_ready",
-        "A1": "partial_implementation_independently_reaudited_findings_open",
+        "A1": "partial_implementation_independently_audited_at_2ccabca_findings_open",
         "A2": "not_started",
         "A3": "not_started",
         "A4": "not_started",
         "A5": "not_started",
         "A6": "not_started"
       },
-      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet.",
+      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet.",
       "user_action_now": "No retrieval, password or account access needed",
       "later_user_action": "A4 upload and retrieve generated harmless test packages, approximately several hundred MiB to 2 GiB",
       "gates": [
@@ -410,17 +410,17 @@
         "Precise file identity and explicit batch release only after evidence gates",
         "Register archive_store as protected business data before creating it"
       ],
-      "scope_note": "Receipt v2/plan v3, pure observed-plan converter and isolated writer available; four identity/transaction/handoff P1 issues open. No production migration or archive/readback/release.",
-      "current_foundation": "docs/audits/2026-11-12-a1-final/DEVELOPMENT_GUIDE.md",
-      "current_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
-      "latest_batch": "JPGPNG-A1-FINALAUDIT-20261112-01",
-      "latest_overview": "docs/audits/2026-11-12-a1-final/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json"
+      "scope_note": "Schema 4 / plan 3 / receipt 2; accepted-event writer and source checks improved. Two P1 binding/plan-state issues and six P2 remain; no production or real archive/readback/release.",
+      "current_foundation": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
+      "current_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
+      "latest_batch": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json"
     },
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
       "date": "2026-11-11",
-      "status": "independent_audit_eight_open_four_p1_four_p2_not_production_ready",
+      "status": "independent_audit_eight_open_two_p1_six_p2_not_production_ready",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
       "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
@@ -440,7 +440,7 @@
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
-        "U1-A_A1": "Independent full suite passed, but AR2-01..08 remain: read/reference closure, physical/version lifecycle, bounded parsing, actual directory IO and path identity; original J-01/production integration still pending.",
+        "U1-A_A1": "AR4-01..08 pending: binding token, plan application, replay, multi-path identity, aliases, write/audit invariants, SQL growth and integration; original production J-01 remains pending.",
         "U1-B": "Shared dependency maintenance pending; separate governed environment change",
         "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
         "U2-A": "Coverage and pending-reason summaries pending",
@@ -453,11 +453,11 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-A1-FINALAUDIT-20261112-01",
-      "latest_overview": "docs/audits/2026-11-12-a1-final/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
-      "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_implementation_audit",
-      "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet."
+      "latest_batch": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
+      "latest_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
+      "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_acceptance_audit",
+      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet."
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
@@ -589,6 +589,51 @@
       "product_source_changed_by_auditor": false,
       "product_ready": false,
       "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet."
+    },
+    "a1_acceptance_audit": {
+      "id": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "started_date": "2026-11-12",
+      "completed_date": "2026-11-13",
+      "status": "completed_scoped_to_2ccabca_findings_open",
+      "audited_commit": "2ccabcad4904349e045c4453eadb55de18c2b581",
+      "overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
+      "findings": "docs/audits/2026-11-13-a1-acceptance/FINDINGS.md",
+      "guide": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
+      "evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
+      "full": {
+        "total": 1415,
+        "passed": 1412,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 3,
+        "seconds": 181.309,
+        "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/full01.xml"
+      },
+      "independent_unmerged": {
+        "total": 23,
+        "passed": 22,
+        "failed": 1,
+        "errors": 0,
+        "skipped": 0,
+        "seconds": 4.719,
+        "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/independent01.xml"
+      },
+      "findings_open": {
+        "P1": 2,
+        "P2": 6,
+        "total": 8
+      },
+      "original_cases_closed_this_audit": [
+        "AR3-03",
+        "AR3-10"
+      ],
+      "previously_closed_retained": [
+        "AR3-07",
+        "AR3-08"
+      ],
+      "product_source_changed_by_auditor": false,
+      "product_ready": false,
+      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet."
     }
   }
 }

@@ -1,0 +1,341 @@
+{
+  "audited_commit": "2ccabcad4904349e045c4453eadb55de18c2b581",
+  "full": {
+    "total": 1415,
+    "passed": 1412,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 3,
+    "seconds": 181.309,
+    "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/full01.xml"
+  },
+  "independent": {
+    "total": 23,
+    "passed": 22,
+    "failed": 1,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 4.719,
+    "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/independent01.xml"
+  },
+  "probes": {
+    "stale_accepted_event": {
+      "before": {
+        "asset": "scope_ae6a98520bbe9b03425d4138aa0c0c85136942a333621c9b92080d03014c70e6",
+        "revision": 1,
+        "sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+        "acceptance": "3db96ec528c88ebda07f3bfa8d98cae95ce2c08df3023b821427e30833bcc7bc",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=281474978712240)",
+        "root_revision": 1
+      },
+      "after": {
+        "asset": "scope_ae6a98520bbe9b03425d4138aa0c0c85136942a333621c9b92080d03014c70e6",
+        "revision": 2,
+        "sha256": "4a8d8134f29b0b7b60c126f5532bc9f5d9bb73037373cf6fb872d81f1dcefdfd",
+        "acceptance": "46fa6765f5fd2fba362ffaa92404ed2579e6304307f76e885c6b93999034607b",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=844424932133548)",
+        "root_revision": 1
+      },
+      "actual_sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+      "old_physical": "FileIdentity(device=13856583955911385912, file_index=844424932133548)",
+      "new_physical": "FileIdentity(device=13856583955911385912, file_index=281474978712240)",
+      "applied": "46fa6765f5fd2fba362ffaa92404ed2579e6304307f76e885c6b93999034607b",
+      "audit": "accepted"
+    },
+    "reuse_replay": {
+      "kind": "reuse",
+      "outcome": "ArchiveSchemaError: Acceptance identity already has different facts",
+      "counts_unchanged": true,
+      "audit": "accepted"
+    },
+    "changed_replay_facts": {
+      "old_run": "run-base",
+      "new_run": "different-run",
+      "same_candidate": true,
+      "returned_old_acceptance": true,
+      "counts_unchanged": true,
+      "audit": "accepted"
+    },
+    "hardlink_lag": {
+      "proposal_revision": 2,
+      "outcome": "ContractError: Content identity already has different facts",
+      "a": {
+        "asset": "scope_ccbcc7154c300636d604212f73bd79b44af6380d5b1b3f65024efc8e74a8a18b",
+        "revision": 2,
+        "sha256": "4a8d8134f29b0b7b60c126f5532bc9f5d9bb73037373cf6fb872d81f1dcefdfd",
+        "acceptance": "eda6bbb49c864447886d86745a064cbde974a33e56c1bc41e4d2144f316540a4",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=844424932133569)",
+        "root_revision": 1
+      },
+      "b": {
+        "asset": "scope_ccbcc7154c300636d604212f73bd79b44af6380d5b1b3f65024efc8e74a8a18b",
+        "revision": 1,
+        "sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+        "acceptance": "a041a7c8270bda1ba8ca59c13132342b88db89d2a3afa3c6d5464d7cd68397a6",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=844424932133569)",
+        "root_revision": 1
+      },
+      "b_before": {
+        "asset": "scope_ccbcc7154c300636d604212f73bd79b44af6380d5b1b3f65024efc8e74a8a18b",
+        "revision": 1,
+        "sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+        "acceptance": "a041a7c8270bda1ba8ca59c13132342b88db89d2a3afa3c6d5464d7cd68397a6",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=844424932133569)",
+        "root_revision": 1
+      },
+      "actual_sha256": "90b4853e06e722c63b4270463cf558684d7a1e77605d3ad36489d6146e42ab87",
+      "audit": "accepted"
+    },
+    "rename_after_edit": {
+      "kind": "baseline",
+      "proposed_revision": 1,
+      "outcome": "ContractError: Content identity already has different facts",
+      "audit": "accepted"
+    },
+    "alias_plan": {
+      "kind": "reuse",
+      "outcome": "ArchiveContentConflictError: Content conflict for gallery/a.bin at 9db9b0b16dc01e8f83856c48850e1233326476659d360e233f2e6e98f142d636 (asset scope_c7b64e5d214a5469aa0b56b258f2b0c3df6d69ab5f7a45e249da8ad50c8fe548 revision 1): Existing asset has different immutable facts",
+      "asset_count": 2,
+      "audit": "accepted"
+    },
+    "delayed_reuse_resurrects_identity": {
+      "before": {
+        "asset": "scope_85f1f67cfd4c27e5bf76de909a6d7f629ed95e2cdd077408c43879e6e781f160",
+        "revision": 1,
+        "sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+        "acceptance": "86399b2291f9cafd54ac8f6ea7d80e4ae0b437f8af28c4accd60e1b1f12bd518",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=281474978712282)",
+        "root_revision": 1
+      },
+      "after": {
+        "asset": "scope_85f1f67cfd4c27e5bf76de909a6d7f629ed95e2cdd077408c43879e6e781f160",
+        "revision": 1,
+        "sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+        "acceptance": "825a7cb022895129cdb92f0fab419844a0715b843efdaa01b40d085a5d4cba53",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=844424932133590)",
+        "root_revision": 1
+      },
+      "physical_changed_back": true,
+      "audit": "accepted"
+    },
+    "stale_plan_bypass": {
+      "before": {
+        "asset": "scope_27983da2ad2be83586b1aff4df0420abbde9f8a2722a8388027da0a7ecf914e9",
+        "revision": 1,
+        "sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+        "acceptance": "4b448b338944d0b2efc786b3a01e6232429465abba9773f0ed6cbd33bc8593a7",
+        "physical": "FileIdentity(device=13856583955911385912, file_index=281474978712289)",
+        "root_revision": 1
+      },
+      "after": {
+        "asset": "scope_27983da2ad2be83586b1aff4df0420abbde9f8a2722a8388027da0a7ecf914e9",
+        "revision": 2,
+        "sha256": "4a8d8134f29b0b7b60c126f5532bc9f5d9bb73037373cf6fb872d81f1dcefdfd",
+        "acceptance": null,
+        "physical": "None",
+        "root_revision": null
+      },
+      "actual_sha256": "63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201",
+      "plans": 1,
+      "audit": "accepted"
+    }
+  },
+  "write_audit_boundary": {
+    "foreign_acceptance_binding": {
+      "write_returned_success": true,
+      "b_loaded_physical": "FileIdentity(device=13856583955911385912, file_index=844424932135943)",
+      "a_physical": "FileIdentity(device=13856583955911385912, file_index=844424932135943)",
+      "b_expected_physical": "FileIdentity(device=13856583955911385912, file_index=281474978714635)",
+      "maintenance_audit": "ArchiveSchemaError: Path binding does not match its acceptance",
+      "integrity": "ok",
+      "foreign_keys": []
+    },
+    "same_revision_expected": {
+      "write_returned_success": true,
+      "accepted_id": "bea3aaf41791c8c159fd87526a6a8ff7292eda2aeca0b26d850963594e598734",
+      "maintenance_audit": "ArchiveSchemaError: Path acceptance expects a generation that cannot precede it",
+      "integrity": "ok",
+      "foreign_keys": []
+    }
+  },
+  "scale": {
+    "head": "2ccabcad4904349e045c4453eadb55de18c2b581",
+    "metrics": {
+      "scale-first": {
+        "files": 2000,
+        "attention_before_confirmation": 0,
+        "seconds": {
+          "enumerate": 0.5696911,
+          "observe": 16.413369399995986,
+          "resolve": 0.26699529999712013,
+          "accept": 8.07978479999997,
+          "prepare_save": 8.474585199999979
+        },
+        "traced_peak_bytes": 28839665,
+        "pages": 20
+      },
+      "scale-changed": {
+        "files": 20,
+        "attention_before_confirmation": 5,
+        "seconds": {
+          "enumerate": 0.01263040000003457,
+          "observe": 0.03731239999979152,
+          "resolve": 0.012788699999873643,
+          "accept": 0.06878299999993942,
+          "prepare_save": 0.09013909999998759
+        },
+        "traced_peak_bytes": 464796,
+        "pages": 1
+      }
+    },
+    "counts": {
+      "archive_contents": 4015,
+      "archive_assets": 4015,
+      "archive_path_bindings": 2000,
+      "archive_local_checks": 2020,
+      "archive_path_acceptances": 2020,
+      "archive_batches": 2
+    },
+    "integrity": "ok",
+    "fk": [],
+    "all_paths_and_hashes_and_physical_bindings_match": true,
+    "old_plan_unchanged": true,
+    "initial_distinct_hashes": 1900,
+    "limitations": [
+      "Synthetic small files; no 500GB throughput claim",
+      "Manually orchestrated current APIs; acceptance and plan remain separate transactions",
+      "No cloud, packaging, real data or production migration"
+    ]
+  },
+  "crash": {
+    "before_commit": {
+      "exit": 97,
+      "counts_after_crash": {
+        "archive_contents": 0,
+        "archive_assets": 0,
+        "archive_path_bindings": 0,
+        "archive_local_checks": 0,
+        "archive_path_acceptances": 0
+      },
+      "integrity": "ok",
+      "fk": [],
+      "reopen_new_command_accepted": 20
+    },
+    "after_commit": {
+      "exit": 98,
+      "counts_after_crash": {
+        "archive_contents": 40,
+        "archive_assets": 40,
+        "archive_path_bindings": 20,
+        "archive_local_checks": 20,
+        "archive_path_acceptances": 20
+      },
+      "integrity": "ok",
+      "fk": [],
+      "reopen_new_command_accepted": 20
+    }
+  },
+  "sql_growth": [
+    {
+      "rows": 100,
+      "n_digest_queries_vm_steps": 32704,
+      "n_owner_queries_vm_steps": 31200,
+      "fixed_10_digest_vm_steps": 3270,
+      "fixed_10_owner_vm_steps": 3120,
+      "plans": {
+        "digest": [
+          [
+            4,
+            0,
+            216,
+            "SCAN archive_contents"
+          ],
+          [
+            22,
+            0,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "owner": [
+          [
+            3,
+            0,
+            212,
+            "SCAN archive_assets USING COVERING INDEX sqlite_autoindex_archive_assets_1"
+          ]
+        ]
+      }
+    },
+    {
+      "rows": 200,
+      "n_digest_queries_vm_steps": 125404,
+      "n_owner_queries_vm_steps": 122400,
+      "fixed_10_digest_vm_steps": 6270,
+      "fixed_10_owner_vm_steps": 6120,
+      "plans": {
+        "digest": [
+          [
+            4,
+            0,
+            216,
+            "SCAN archive_contents"
+          ],
+          [
+            22,
+            0,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "owner": [
+          [
+            3,
+            0,
+            212,
+            "SCAN archive_assets USING COVERING INDEX sqlite_autoindex_archive_assets_1"
+          ]
+        ]
+      }
+    },
+    {
+      "rows": 400,
+      "n_digest_queries_vm_steps": 490804,
+      "n_owner_queries_vm_steps": 484800,
+      "fixed_10_digest_vm_steps": 12270,
+      "fixed_10_owner_vm_steps": 12120,
+      "plans": {
+        "digest": [
+          [
+            4,
+            0,
+            216,
+            "SCAN archive_contents"
+          ],
+          [
+            22,
+            0,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "owner": [
+          [
+            3,
+            0,
+            212,
+            "SCAN archive_assets USING COVERING INDEX sqlite_autoindex_archive_assets_1"
+          ]
+        ]
+      }
+    }
+  ],
+  "source_scripts": {
+    "probes.py": "d46a556f0c3a83037abb179d290437d3509836199d50588d9950959f7c55ae08",
+    "write_audit_boundary.py": "291f605ab81186194f7ee226a6aab83cca6b750f0a63291fcc7f0a9f874038b1",
+    "scale_writer.py": "58dffaa455b60a99623c18d7372e595e8e21a316d86b0e6a4613bf0e4b9714b9",
+    "crash_acceptance.py": "dba708c7cc750e75e9ced6a7664dfee46e61202ace8bb7182a5870d4f8eb101d",
+    "sql_growth.py": "3ceef4aba40bcc87e2eab5395a991494112b1e8676ed7cb377d85be6fde3c077"
+  },
+  "note": "Compact synthetic results only; raw databases/XML/scripts remain in the local runtime batch; no business data."
+}

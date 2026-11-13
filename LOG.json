@@ -1,7 +1,7 @@
 {
   "project": "PiDL/ImageTool-Lab",
   "description": "Python+Tkinter Pixiv 原图下载器",
-  "last_updated": "2026-11-12",
+  "last_updated": "2026-11-13",
   "sessions": [
     {
       "session_date": "2026-07-30",
@@ -1275,6 +1275,37 @@
       "evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
       "report": "docs/audits/2026-11-12-a1-final/README.md",
       "next_step": "N0 freeze/version-bound regressions; N1 logical assets and aliases; N2 expected-old atomic apply and accepted evidence; N3 observed-plan handoff; N4 SQL growth; N5 merged busy contract and retained protocol regressions; N6 final integration. See guide for safe three-lane delegation. No production/archive/release yet.",
+      "business_data_changed": false
+    },
+    {
+      "session_date": "2026-11-13",
+      "id": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "summary": "复审 schema 4 接受事务与身份演进；8 项开放（2 P1、6 P2），真实整链和提交前后进程退出有通过证据；同步当前导航与 R0–R6 指导。",
+      "audited_commit": "2ccabcad4904349e045c4453eadb55de18c2b581",
+      "tests": {
+        "full": {
+          "total": 1415,
+          "passed": 1412,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 3,
+          "seconds": 181.309,
+          "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/full01.xml"
+        },
+        "independent_unmerged": {
+          "total": 23,
+          "passed": 22,
+          "failed": 1,
+          "errors": 0,
+          "skipped": 0,
+          "seconds": 4.719,
+          "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/independent01.xml"
+        }
+      },
+      "report": "docs/audits/2026-11-13-a1-acceptance/README.md",
+      "evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
+      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet.",
+      "product_source_changed": false,
       "business_data_changed": false
     }
   ]
