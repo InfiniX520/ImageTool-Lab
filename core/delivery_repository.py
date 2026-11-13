@@ -107,6 +107,23 @@ _RETRY_PACING_SQL = """
     )
 """
 
+# One window shape for both tiers: a cancelled row with prepared evidence and
+# no terminal cleanup fact.  Only the pacing predicate differs.
+_CLEANUP_WINDOW_SQL = (
+    "SELECT d.*, d.rowid AS _rowid FROM deliveries AS d "
+    "WHERE d.state = 'cancelled' AND d.prepared_json IS NOT NULL "
+    "AND d.rowid > ? AND NOT EXISTS ("
+    + _TERMINAL_CLEANUP_SQL
+    + ") AND "
+)
+# Tier 0 = nobody tried yet, tier 1 = a previous attempt failed.
+_CLEANUP_TIER0_SQL = (
+    _CLEANUP_WINDOW_SQL + "NOT " + _RETRY_PACING_SQL + " ORDER BY d.rowid LIMIT ?"
+)
+_CLEANUP_TIER1_SQL = (
+    _CLEANUP_WINDOW_SQL + _RETRY_PACING_SQL + " ORDER BY d.rowid LIMIT ?"
+)
+
 _CHECKPOINT_KEYS = {
     "schema_version",
     "delivery_id",
@@ -561,19 +578,26 @@ class DeliveryRepositoryMixin:
         *,
         limit: int = 200,
         after_rowid: int = 0,
+        after_retry_rowid: int = 0,
         stats: dict[str, int] | None = None,
     ) -> tuple[dict, ...]:
         """Cancelled deliveries whose staged temp may still need deleting.
 
-        The window is chosen in SQL and advances past the examined rows, so a
-        terminal fact leaves the queue, a row with unusable evidence cannot
-        starve a newer one, and a permanently failing row is seen again only
-        after the caller's cursor wraps (RFA-03).  Only rows that still carry
-        parseable prepared evidence qualify: that evidence is the only proof
-        that a '.part' belongs to this delivery.
+        The queue has two tiers.  Tier 0 rows were never attempted; tier 1 rows
+        already carry a failed fact.  Tier 0 is served first so one locked file
+        cannot dominate the queue, but a reservation keeps tier 1 reachable
+        while fresh work keeps arriving: with a window of at least eight rows,
+        one eighth is offered to tier 1 whenever tier 0 can fill the window.
+        The tier 1 scan wraps inside this call once, so a failed row is retried
+        on every pass instead of only after the fresh backlog drains.
+
+        Both scans advance past the rows they examined, so unusable prepared
+        evidence can never shrink the window, and each tier has its own
+        continuation cursor.  A terminal fact leaves the queue before either
+        tier is consulted (RFA-03, contract Sec.2.4).
 
         The optional stats sink reports examined / skipped / returned /
-        next_rowid for diagnostics; it never changes the selection.
+        next_rowid / next_retry_rowid / reserve for diagnostics.
         """
         lib = _lib()
         self._ensure_open()
@@ -581,42 +605,79 @@ class DeliveryRepositoryMixin:
             raise lib.LibraryError("limit must be an integer")
         if not _is_int(after_rowid) or after_rowid < 0:
             raise lib.LibraryError("after_rowid must be a non-negative integer")
+        if not _is_int(after_retry_rowid) or after_retry_rowid < 0:
+            raise lib.LibraryError("after_retry_rowid must be a non-negative integer")
         limit = max(0, min(limit, 200))
         if limit == 0:
             return ()
-        examined = 0
-        skipped = 0
-        facts: list[dict] = []
-        cursor = int(after_rowid)
+        retry_reserve = 0 if limit < 8 else max(1, limit // 8)
         examine_cap = min(max(limit * 5, limit), 2000)
+        fresh: list[dict] = []
+        retry: list[dict] = []
+        examined = skipped = 0
+        cursor = int(after_rowid)
+        retry_cursor = int(after_retry_rowid)
         with closing(self._readonly_connection()) as conn:
-            while len(facts) < limit and examined < examine_cap:
-                take = min(limit - len(facts), examine_cap - examined)
-                rows = conn.execute(
-                    "SELECT d.*, d.rowid AS _rowid FROM deliveries AS d "
-                    "WHERE d.state = 'cancelled' AND d.prepared_json IS NOT NULL "
-                    "AND d.rowid > ? AND NOT EXISTS ("
-                    + _TERMINAL_CLEANUP_SQL
-                    + ") ORDER BY ("
-                    + _RETRY_PACING_SQL
-                    + "), d.rowid LIMIT ?",
-                    (cursor, take),
-                ).fetchall()
-                if not rows:
-                    break
-                examined += len(rows)
-                # The pacing tier can return an older row after a newer one, so
-                # the continuation is the highest rowid examined, never the last
-                # row of the page.
-                cursor = max(cursor, *(int(row["_rowid"]) for row in rows))
-                for row in rows:
-                    fact = self._cleanup_candidate_fact(row)
-                    if fact is None:
-                        skipped += 1
-                        continue
-                    facts.append(fact)
-                    if len(facts) >= limit:
-                        break
+            fresh, tier0_examined, tier0_skipped, cursor = self._scan_cleanup_tier(
+                conn,
+                _CLEANUP_TIER0_SQL,
+                int(after_rowid),
+                limit,
+                examine_cap,
+            )
+            examined += tier0_examined
+            skipped += tier0_skipped
+            if retry_reserve and len(fresh) >= limit:
+                retry, tier1_examined, tier1_skipped, retry_cursor = self._scan_cleanup_tier(
+                    conn,
+                    _CLEANUP_TIER1_SQL,
+                    int(after_retry_rowid),
+                    retry_reserve,
+                    examine_cap,
+                )
+                if not retry and after_retry_rowid > 0:
+                    # One wrap inside the call: a failed row behind the cursor
+                    # is retried on this pass, not only after a full cycle.
+                    retry, more_examined, more_skipped, retry_cursor = self._scan_cleanup_tier(
+                        conn,
+                        _CLEANUP_TIER1_SQL,
+                        0,
+                        retry_reserve,
+                        examine_cap - tier1_examined,
+                    )
+                    tier1_examined += more_examined
+                    tier1_skipped += more_skipped
+                examined += tier1_examined
+                skipped += tier1_skipped
+                if retry:
+                    fresh = fresh[: limit - len(retry)]
+            elif len(fresh) < limit:
+                retry, tier1_examined, tier1_skipped, retry_cursor = self._scan_cleanup_tier(
+                    conn,
+                    _CLEANUP_TIER1_SQL,
+                    int(after_retry_rowid),
+                    limit - len(fresh),
+                    examine_cap,
+                )
+                if not retry and after_retry_rowid > 0:
+                    retry, more_examined, more_skipped, retry_cursor = self._scan_cleanup_tier(
+                        conn,
+                        _CLEANUP_TIER1_SQL,
+                        0,
+                        limit - len(fresh),
+                        examine_cap - tier1_examined,
+                    )
+                    tier1_examined += more_examined
+                    tier1_skipped += more_skipped
+                examined += tier1_examined
+                skipped += tier1_skipped
+        facts = fresh + retry
+        if fresh:
+            # The continuation follows the last offered row, so rows dropped by
+            # the reservation are examined again instead of disappearing.
+            cursor = int(fresh[-1]["rowid"])
+        if retry:
+            retry_cursor = int(retry[-1]["rowid"])
         if stats is not None:
             stats.update(
                 {
@@ -624,9 +685,39 @@ class DeliveryRepositoryMixin:
                     "skipped": skipped,
                     "returned": len(facts),
                     "next_rowid": cursor,
+                    "next_retry_rowid": retry_cursor,
+                    "reserve": retry_reserve,
                 }
             )
         return tuple(facts)
+
+    def _scan_cleanup_tier(
+        self,
+        conn: sqlite3.Connection,
+        sql: str,
+        cursor: int,
+        want: int,
+        examine_cap: int,
+    ) -> tuple[list[dict], int, int, int]:
+        """Read one tier of the cleanup window, skipping unusable evidence."""
+        facts: list[dict] = []
+        examined = skipped = 0
+        while len(facts) < want and examined < examine_cap:
+            take = min(want - len(facts), examine_cap - examined)
+            rows = conn.execute(sql, (cursor, take)).fetchall()
+            if not rows:
+                break
+            examined += len(rows)
+            cursor = int(rows[-1]["_rowid"])
+            for row in rows:
+                fact = self._cleanup_candidate_fact(row)
+                if fact is None:
+                    skipped += 1
+                    continue
+                facts.append(fact)
+            if len(facts) >= want or len(rows) < take:
+                break
+        return facts, examined, skipped, cursor
 
     def _cleanup_candidate_fact(self, row) -> dict | None:
         """Turn one cancelled row into a cleanup fact, or skip it honestly."""
@@ -1842,10 +1933,14 @@ class DeliveryRepositoryMixin:
     def _resolve_carried_successor(self, conn, delivery):
         """Resolve a superseded link for carry.
 
-        The superseding batch recorded the replacement on its own page link;
-        following that link is exact and works across jobs (a reuse successor
-        is usually an older completed delivery from another task).  The frozen
-        lineage helper remains the fallback for same-job repair generations.
+        The superseding batch records the replacement on its own page link;
+        following that link is exact and works across jobs.  Everything else
+        goes through the one lineage entry point, so carry and recovery never
+        disagree about which delivery owns the page: a recorded handover event,
+        then a newer completed row, then the bounded superseded chain (contract
+        Sec.3.1).  An older completed row that no event names is history, not a
+        successor — exactly what the previous local "newest completed" scan
+        used to get wrong.
         """
         link = conn.execute(
             "SELECT delivery_id, artifact_id FROM batch_item_pages "
@@ -1892,32 +1987,6 @@ class DeliveryRepositoryMixin:
                         generation=int(row["generation"]),
                         artifact_id=None,
                     )
-        candidates = conn.execute(
-            "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
-            "AND output_key = ? AND quality_key = ? AND state = 'completed' "
-            "ORDER BY rowid DESC LIMIT 4",
-            (
-                str(delivery["illust_id"]),
-                int(delivery["page_index"]),
-                str(delivery["output_key"]),
-                str(delivery["quality_key"]),
-            ),
-        ).fetchall()
-        for row in candidates:
-            artifact = conn.execute(
-                "SELECT artifact_id FROM artifacts WHERE delivery_id = ?",
-                (str(row["delivery_id"]),),
-            ).fetchone()
-            if artifact is None:
-                continue
-            return Successor(
-                delivery_id=str(row["delivery_id"]),
-                job_id=str(row["job_id"]),
-                batch_id=str(row["current_batch_id"]),
-                state="completed",
-                generation=int(row["generation"]),
-                artifact_id=str(artifact["artifact_id"]),
-            )
         return resolve_successor(conn, delivery)
 
     def _create_carried_unverified_delivery(

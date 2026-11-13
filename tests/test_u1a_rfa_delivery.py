@@ -24,7 +24,9 @@ from pathlib import Path
 import pytest
 
 import test_u1a_recovery as h
+import test_u1a_reuse_gate as g
 from core.app_paths import AppPaths
+from core.delivery_lineage import resolve_successor
 from core.delivery_cleanup import (
     cleanup_event_payload,
     cleanup_fact,
@@ -242,31 +244,38 @@ def test_a_mixed_cleanup_window_advances_at_every_limit(tmp_path):
         assert measured[200][1]["examined"] == 121
         print("CLEANUP_WINDOW", measured)
 
-        # Forward pages are stable and duplicate-free: fresh rows first, and a
-        # retried row is only offered once the fresh work ahead of it is gone.
-        def paged():
-            found, cursor = [], 0
-            while True:
-                stats = {}
-                page = repo.list_cleanup_candidates(
-                    limit=7, after_rowid=cursor, stats=stats
-                )
-                if not page:
-                    return found
-                found.extend(fact["delivery_id"] for fact in page)
-                assert stats["next_rowid"] > cursor
-                cursor = int(stats["next_rowid"])
-
-        fresh = paged()
-        assert len(fresh) == 79
-        assert len(set(fresh)) == 79
+        # Forward pages are stable and duplicate-free: the never-attempted rows
+        # come first, and the retried rows only afterwards.
+        untouched = set(clones[121:])
+        failed_ids = list(clones[81:121])
         whole = [fact["delivery_id"] for fact in repo.list_cleanup_candidates(limit=200)]
-        assert whole[-40:] == sorted(whole[-40:]), "retries are paced after fresh work"
-        assert set(fresh) == set(whole) - set(whole[-40:])
-        for delivery in fresh:
+        assert whole[:79] == clones[121:]
+        assert whole[79:] == failed_ids
+        seen, cursor, retry_cursor = [], 0, 0
+        for _ in range(40):
+            stats = {}
+            page = repo.list_cleanup_candidates(
+                limit=7,
+                after_rowid=cursor,
+                after_retry_rowid=retry_cursor,
+                stats=stats,
+            )
+            if not page:
+                break
+            ids = [fact["delivery_id"] for fact in page]
+            fresh_part = [item for item in ids if item in untouched]
+            seen.extend(fresh_part)
+            cursor = int(stats["next_rowid"])
+            retry_cursor = int(stats["next_retry_rowid"])
+            if len(fresh_part) != len(ids):
+                break
+        assert seen == clones[121:]
+        assert len(seen) == len(set(seen))
+        for delivery in clones[121:]:
             assert repo.mark_cleanup_completed(delivery, outcome="cleaned") is True
-        assert paged() == whole[-40:]
-        assert len(paged()) == 40
+        assert [
+            fact["delivery_id"] for fact in repo.list_cleanup_candidates(limit=200)
+        ] == failed_ids
 
         # None of the excluded or unparsable rows leaks into the queue.
         excluded = {first} | set(clones[:1]) | set(clones[1:81])
@@ -705,3 +714,224 @@ def test_compensation_write_failure_keeps_every_row_recoverable(
         )
         for delivery in ids:
             assert repo.get_artifact(delivery) is not None
+
+# ---------------------------------------------------------------------------
+# Audit follow-up P2-1: the retry tier stays reachable under continuous load
+# ---------------------------------------------------------------------------
+
+
+def failed_fact(conn, delivery_id, code="cleanup_failed"):
+    insert_cleanup_event(
+        conn,
+        delivery_id,
+        cleanup_event_payload(
+            fact_for(conn, delivery_id), outcome="failed", error_code=code
+        ),
+    )
+
+
+def test_a_retried_row_is_reached_under_continuous_load(tmp_path):
+    """300 fresh rows plus one failed row: the reserve carries it every round."""
+    root = tmp_path / "library"
+    root.mkdir()
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        base, _service = cancelled(repo, root)
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.row_factory = sqlite3.Row
+            clones = [
+                clone_cancelled(conn, base, f"{index + 1:032x}", index + 2)
+                for index in range(300)
+            ]
+            stuck = clones[0]
+            failed_fact(conn, stuck)
+            conn.commit()
+
+        stats = {}
+        window = [
+            fact["delivery_id"]
+            for fact in repo.list_cleanup_candidates(limit=200, stats=stats)
+        ]
+        assert stats["reserve"] == 25
+        assert len(window) == 200
+        assert stuck in window, "the retry reserve must carry the failed row"
+
+        # Six rounds of continuous load: every offered row is cleaned and 200
+        # new cancellations arrive.  The failed row must appear every round.
+        generation = 400
+        rounds = []
+        for round_index in range(6):
+            offered = [
+                fact["delivery_id"]
+                for fact in repo.list_cleanup_candidates(limit=200, stats=stats)
+            ]
+            rounds.append(stuck in offered)
+            with sqlite3.connect(repo.database_path) as conn:
+                conn.row_factory = sqlite3.Row
+                for delivery in offered:
+                    if delivery == stuck:
+                        continue
+                    insert_cleanup_event(
+                        conn,
+                        delivery,
+                        cleanup_event_payload(fact_for(conn, delivery), outcome="cleaned"),
+                    )
+                for index in range(200):
+                    clone_cancelled(
+                        conn, base, f"r{round_index}{index:027x}", generation
+                    )
+                    generation += 1
+                conn.commit()
+        print("RESERVE_ROUNDS", rounds, "reserve", stats["reserve"])
+        assert all(rounds), "a failed row must be retried on every pass"
+
+
+def test_small_limits_do_not_reserve_a_retry_slot(tmp_path):
+    """Below eight rows the window is unchanged: fresh rows first."""
+    root = tmp_path / "library"
+    root.mkdir()
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        base, _service = cancelled(repo, root)
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.row_factory = sqlite3.Row
+            failed = clone_cancelled(conn, base, "f" * 32, 40)
+            fresh = [
+                clone_cancelled(conn, base, f"{index + 1:032x}", 41 + index)
+                for index in range(3)
+            ]
+            failed_fact(conn, failed)
+            conn.commit()
+
+        stats = {}
+        one = repo.list_cleanup_candidates(limit=1, stats=stats)
+        assert [fact["delivery_id"] for fact in one] == [base]
+        assert stats["reserve"] == 0
+        two = repo.list_cleanup_candidates(limit=2)
+        assert [fact["delivery_id"] for fact in two] == [base, fresh[0]]
+        seven = repo.list_cleanup_candidates(limit=7)
+        assert [fact["delivery_id"] for fact in seven] == [base, *fresh, failed]
+        whole = repo.list_cleanup_candidates(limit=200, stats=stats)
+        assert [fact["delivery_id"] for fact in whole][-1] == failed
+        assert stats["reserve"] == 25
+
+
+def test_the_two_cleanup_cursors_advance_independently(tmp_path):
+    """Fresh rows and retried rows page with two independent continuations."""
+    root = tmp_path / "library"
+    root.mkdir()
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        base, _service = cancelled(repo, root)
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.row_factory = sqlite3.Row
+            failed = [
+                clone_cancelled(conn, base, f"{index + 16:032x}", 60 + index)
+                for index in range(3)
+            ]
+            fresh = [
+                clone_cancelled(conn, base, f"{index + 1:032x}", 80 + index)
+                for index in range(5)
+            ]
+            for delivery in failed:
+                failed_fact(conn, delivery)
+            conn.commit()
+
+        first_stats = {}
+        first = repo.list_cleanup_candidates(limit=7, stats=first_stats)
+        assert [fact["delivery_id"] for fact in first] == [base, *fresh, failed[0]]
+        second_stats = {}
+        second = repo.list_cleanup_candidates(
+            limit=7,
+            after_rowid=first_stats["next_rowid"],
+            after_retry_rowid=first_stats["next_retry_rowid"],
+            stats=second_stats,
+        )
+        assert [fact["delivery_id"] for fact in second] == [failed[1], failed[2]]
+        assert first_stats["next_rowid"] != first_stats["next_retry_rowid"]
+        # The retry tier was at its tail, so the same call wraps once and
+        # offers the failed rows again instead of returning nothing.
+        third = repo.list_cleanup_candidates(
+            limit=7,
+            after_rowid=second_stats["next_rowid"],
+            after_retry_rowid=second_stats["next_retry_rowid"],
+        )
+        assert [fact["delivery_id"] for fact in third] == failed
+        collected = [fact["delivery_id"] for fact in first] + [
+            fact["delivery_id"] for fact in second
+        ]
+        assert len(collected) == len(set(collected)) == 9
+
+
+# ---------------------------------------------------------------------------
+# Audit follow-up P3: a refusing writer and the carry priority order
+# ---------------------------------------------------------------------------
+
+
+def test_a_refused_cancel_reports_a_competing_completion(tmp_path):
+    """A refusal that meets a completed row reports it instead of raising."""
+    root = tmp_path / "library"
+    root.mkdir()
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _job, (delivery,) = prepared(repo, root, "refuse-race")
+        stale = repo.get_delivery(delivery)
+        assert stale["state"] == "prepared"
+        assert h.executor(repo, root, h.Transport()).recover_local() == (
+            (delivery, "completed"),
+        )
+        assert repo.get_artifact(delivery) is not None
+        executor = h.executor(repo, root, h.Transport())
+        result = executor._abort_unpublished(
+            stale,
+            stale["prepared"],
+            {"allowed": False, "reason": "intent_excluded"},
+        )
+        assert result == ("completed", "")
+        assert repo.get_delivery(delivery)["state"] == "completed"
+        with sqlite3.connect(repo.database_path) as conn:
+            issues = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE kind = 'delivery_issue' "
+                "AND safe_payload LIKE ?",
+                (f'%"delivery_id":"{delivery}"%',),
+            ).fetchone()[0]
+        assert issues == 0, "a losing refusal must not write an issue for a winner"
+
+
+def test_carry_and_recovery_resolve_the_same_successor(tmp_path):
+    """Carry may not pick a successor the shared resolver would not pick."""
+    root = tmp_path
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        first = g.submit(repo, request_id="carry-parity-first")
+        ids = g.accept(
+            repo, first["batch_id"], g.source((g.candidate(pages=(0, 1)),))
+        )
+        transport = h.Transport(h.Response(), h.Response(status=404))
+        assert h.run(repo, first, ids[0], h.executor(repo, root, transport)).state == "completed"
+        assert h.run(repo, first, ids[1], h.executor(repo, root, transport)).state == "failed"
+        settle(repo, first)
+        h.target(root).write_bytes(h.SAME_SIZE_PNG)
+        second, (hold,) = h.second_task(repo, root)
+        settle(repo, second)
+        resumed = repo.resume(first["job_id"], "carry-parity-resume")
+        assert repo.activate_next()["batch_id"] == resumed["batch_id"]
+        repo.carry_unresolved_items(resumed["batch_id"])
+        h.target(root).write_bytes(h.PNG_BYTES)
+        assert repo.recover_verification_page(resumed["batch_id"], h.ARTWORK, 0)[
+            "outcome"
+        ] == "reused"
+        settle(repo, resumed)
+
+        third = h.submit(
+            repo, request_id="carry-parity-third", dedup_policy="redownload"
+        )
+        (pending,) = h.accept(
+            repo, third["batch_id"], h.source((h.candidate(),), page_identity="third")
+        )
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM deliveries WHERE delivery_id = ?", (hold,)
+            ).fetchone()
+            shared = resolve_successor(conn, row)
+            carried = repo._resolve_carried_successor(conn, row)
+        print("CARRY_PARITY", carried, shared, pending)
+        assert carried is not None and shared is not None
+        assert carried.delivery_id == shared.delivery_id
+        assert carried.delivery_id != hold
