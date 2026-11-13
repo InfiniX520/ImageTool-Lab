@@ -491,24 +491,70 @@ class PageDeliveryExecutor:
                 error_code=reason,
             )
             return ("recovery_needed", reason)
+        # Only a delivery with no final name and a provably owned temp may be
+        # cancelled.  recovery_needed is not "unpublished" by definition: a
+        # crash between link and confirm leaves prepared + final behind.
+        final = self.resolver.resolve(PathRef(**evidence["final_ref"]))
+        temp = self.resolver.resolve(PathRef(**evidence["temp_ref"]))
+        if final.exists() or final == temp:
+            self._db(
+                "set_delivery_issue",
+                row["delivery_id"],
+                row["current_batch_id"],
+                state="recovery_needed",
+                error_code="published_before_abort",
+            )
+            return ("recovery_needed", "published_before_abort")
+        owned = False
+        if temp.exists():
+            try:
+                self._verify_owned(temp, evidence)
+                owned = True
+            except (OSError, _Fault, ContractError):
+                # Foreign or changed bytes are never deleted; leave the row
+                # for an explicit local review.
+                self._db(
+                    "set_delivery_issue",
+                    row["delivery_id"],
+                    row["current_batch_id"],
+                    state="recovery_needed",
+                    error_code="unowned_staged_temp",
+                )
+                return ("recovery_needed", "unowned_staged_temp")
+        current = self._db("get_delivery", row["delivery_id"])
+        expected_state = str(current["state"])
+        if expected_state == "cancelled":
+            return ("cancelled", reason)
+        if expected_state not in {"prepared", "recovery_needed"}:
+            self._db(
+                "set_delivery_issue",
+                row["delivery_id"],
+                row["current_batch_id"],
+                state="recovery_needed",
+                error_code="unexpected_unpublished_state",
+            )
+            return ("recovery_needed", "unexpected_unpublished_state")
         self._db(
             "cancel_unpublished_delivery",
             row["delivery_id"],
             row["current_batch_id"],
             error_code=reason,
+            expected_state=expected_state,
         )
-        temp = self.resolver.resolve(PathRef(**evidence["temp_ref"]))
-        if temp.exists():
+        if owned:
             try:
-                self._verify_owned(temp, evidence)
                 temp.unlink()
-            except (OSError, _Fault, ContractError):
-                pass  # an unverified leftover stays recoverable
+            except OSError:
+                # The cleanup fact stays queryable; cleanup_cancelled_delivery
+                # retries it later without scanning a directory.
+                pass
         return ("cancelled", reason)
 
     def cleanup_delivery(self, delivery_id):
         """Explicit local cleanup, safe even after a crash just after confirmation."""
         row = self._db("get_delivery", delivery_id)
+        if row["state"] == "cancelled":
+            return self.cleanup_cancelled_delivery(delivery_id)
         evidence = row.get("prepared")
         if row["state"] != "completed" or not isinstance(evidence, dict):
             return False
@@ -519,6 +565,51 @@ class PageDeliveryExecutor:
         self._verify_owned(final, evidence)
         self._verify_owned(temp, evidence)
         temp.unlink()
+        return True
+
+    def cleanup_cancelled_delivery(self, delivery_id):
+        """Retry deleting a cancelled delivery's own staged temp.
+
+        The final name is never touched, no directory is scanned, and the file
+        is removed only after its identity, size and digest still match the
+        prepared evidence.  A failure leaves a retryable cleanup fact.
+        """
+        row = self._db("get_delivery", delivery_id)
+        if row.get("state") != "cancelled":
+            return False
+        evidence = row.get("prepared")
+        if not isinstance(evidence, dict):
+            return False
+        final_ref = PathRef(**evidence["final_ref"])
+        temp_ref = PathRef(**evidence["temp_ref"])
+        final = self.resolver.resolve(final_ref)
+        temp = self.resolver.resolve(temp_ref)
+        if final == temp or temp.parent != final.parent or temp.suffix != ".part":
+            return False
+        if final.exists():
+            # A published name belongs to the user's gallery; cleanup never
+            # removes it, even for a cancelled row.
+            return False
+        if not temp.exists():
+            self._db(
+                "mark_cleanup_completed",
+                delivery_id,
+                outcome="cleaned",
+                error_code="already_absent",
+            )
+            return True
+        try:
+            self._verify_owned(temp, evidence)
+            temp.unlink()
+        except (OSError, _Fault, ContractError):
+            self._db(
+                "mark_cleanup_completed",
+                delivery_id,
+                outcome="failed",
+                error_code="cleanup_failed",
+            )
+            return False
+        self._db("mark_cleanup_completed", delivery_id, outcome="cleaned")
         return True
 
     def _finish_issue(self, row, stop, outcome, *, block=False):
@@ -651,4 +742,11 @@ class PageDeliveryExecutor:
                 self._db("set_delivery_issue", row["delivery_id"], row["current_batch_id"],
                          state="recovery_needed", error_code="local_recovery_conflict")
                 results.append((row["delivery_id"], "recovery_needed"))
+        # Bounded retry of cancelled-by-intent temps; never part of a delivery
+        # result and never allowed to fail startup.
+        for fact in self._db("list_cleanup_candidates", limit=limit):
+            try:
+                self.cleanup_cancelled_delivery(fact["delivery_id"])
+            except (_Fault, OSError, ContractError, _StorageFault):
+                continue
         return tuple(results)

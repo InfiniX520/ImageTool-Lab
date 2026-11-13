@@ -21,6 +21,13 @@ import sqlite3
 from contextlib import closing
 from typing import Any
 
+from core.delivery_cleanup import cleanup_fact
+from core.delivery_lineage import (
+    ACTIVE_FOLLOWUP,
+    Successor,
+    is_supersede_code,
+    resolve_successor,
+)
 from core.task_contracts import ContractError, PathRef, canonical_json, normalize_json
 
 # New table/index DDL is imported by core.library_repository and appended to
@@ -60,6 +67,7 @@ _DELIVERY_COMMAND_KINDS = frozenset(
         "request_block",
         "finish_source",
         "settle_batch",
+        "mark_cleanup_completed",
     }
 )
 
@@ -505,6 +513,75 @@ class DeliveryRepositoryMixin:
             ).fetchall()
         return tuple(self._delivery_dict(row) for row in rows)
 
+    def list_cleanup_candidates(self, *, limit: int = 200) -> tuple[dict, ...]:
+        """Cancelled deliveries whose staged temp may still need deleting.
+
+        Only rows that still carry parseable prepared evidence qualify; the
+        evidence is what proves the '.part' belongs to this delivery.
+        """
+        lib = _lib()
+        self._ensure_open()
+        if not _is_int(limit):
+            raise lib.LibraryError("limit must be an integer")
+        limit = max(0, min(limit, 200))
+        if limit == 0:
+            return ()
+        with closing(self._readonly_connection()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM deliveries WHERE state = 'cancelled' "
+                "AND prepared_json IS NOT NULL ORDER BY rowid LIMIT ?",
+                (limit,),
+            ).fetchall()
+        facts: list[dict] = []
+        for row in rows:
+            try:
+                final_ref = self._delivery_final_ref(row)
+                prepared = _parse_prepared_json(
+                    row["prepared_json"], str(row["delivery_id"]), final_ref
+                )
+            except (lib.LibraryError, ContractError):
+                continue
+            fact = cleanup_fact(
+                {
+                    "delivery_id": row["delivery_id"],
+                    "current_batch_id": row["current_batch_id"],
+                    "job_id": row["job_id"],
+                    "state": row["state"],
+                    "prepared": prepared,
+                    "generation": row["generation"],
+                }
+            )
+            if fact is not None:
+                facts.append(
+                    {
+                        "delivery_id": fact.delivery_id,
+                        "batch_id": fact.batch_id,
+                        "job_id": fact.job_id,
+                        "prepared": dict(fact.prepared),
+                        "generation": fact.generation,
+                    }
+                )
+        return tuple(facts)
+
+    def mark_cleanup_completed(
+        self, delivery_id: str, *, outcome: str, error_code: str = ""
+    ) -> bool:
+        """Record the result of one cleanup attempt; never a delivery success."""
+        lib = _lib()
+        delivery_id = lib._validate_identifier(delivery_id, "delivery id")
+        if outcome not in {"cleaned", "failed"}:
+            raise lib.LibraryError("Unsupported cleanup outcome")
+        if error_code:
+            error_code = lib._validate_error_code(error_code)
+        return self._enqueue(
+            "mark_cleanup_completed",
+            {
+                "delivery_id": delivery_id,
+                "outcome": outcome,
+                "error_code": error_code,
+            },
+        )
+
     def get_artifact(self, delivery_id: str) -> dict | None:
         lib = _lib()
         delivery_id = lib._validate_identifier(delivery_id, "delivery id")
@@ -602,6 +679,8 @@ class DeliveryRepositoryMixin:
             return self._finish_source(conn, payload)
         if kind == "settle_batch":
             return self._settle_batch(conn, payload)
+        if kind == "mark_cleanup_completed":
+            return self._mark_cleanup_completed(conn, payload)
         raise _lib().LibraryError(f"Unknown delivery command: {kind}")
 
     @staticmethod
@@ -987,6 +1066,50 @@ class DeliveryRepositoryMixin:
                     conn, str(row["batch_id"]), str(row["illust_id"]), now
                 )
             return None
+
+    def _mark_cleanup_completed(
+        self, conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> bool:
+        lib = _lib()
+        delivery_id = str(payload["delivery_id"])
+        outcome = str(payload["outcome"])
+        error_code = str(payload.get("error_code", ""))
+        if outcome not in {"cleaned", "failed"}:
+            raise lib.LibraryError("Unsupported cleanup outcome")
+        with self._transaction(conn):
+            delivery = self._get_delivery_row(conn, delivery_id)
+            if delivery is None:
+                raise lib.NotFoundError(f"Unknown delivery: {delivery_id}")
+            if str(delivery["state"]) != "cancelled":
+                return False
+            recent = conn.execute(
+                "SELECT safe_payload FROM events WHERE kind = 'delivery_cleanup' "
+                "ORDER BY event_seq DESC LIMIT 200"
+            ).fetchall()
+            for row in recent:
+                try:
+                    info = json.loads(row["safe_payload"])
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    isinstance(info, dict)
+                    and str(info.get("delivery_id")) == delivery_id
+                    and info.get("outcome") == outcome
+                ):
+                    return outcome == "cleaned"
+            self._insert_event(
+                conn,
+                job_id=str(delivery["job_id"]),
+                batch_id=str(delivery["current_batch_id"]),
+                kind="delivery_cleanup",
+                payload={
+                    "delivery_id": delivery_id,
+                    "batch_id": str(delivery["current_batch_id"]),
+                    "outcome": outcome,
+                    "error_code": error_code,
+                },
+            )
+            return outcome == "cleaned"
 
     # ------------------------------------------------------------------
     # Batch lifecycle extensions
@@ -1389,6 +1512,10 @@ class DeliveryRepositoryMixin:
             "SELECT * FROM batch_item_pages WHERE batch_id = ? AND illust_id = ?",
             (source_batch_id, illust_id),
         ).fetchall()
+        target_batch = self._get_batch_row(conn, target_batch_id)
+        if target_batch is None:
+            raise _lib().NotFoundError(f"Unknown batch: {target_batch_id}")
+        target_job_id = str(target_batch["job_id"])
         for row in rows:
             target_exists = conn.execute(
                 "SELECT 1 FROM batch_item_pages WHERE batch_id = ? AND illust_id = ? "
@@ -1399,6 +1526,79 @@ class DeliveryRepositoryMixin:
                 continue
             artifact_id = row["artifact_id"]
             delivery_id = row["delivery_id"]
+            source_delivery = None
+            if delivery_id is not None:
+                source_delivery = conn.execute(
+                    "SELECT * FROM deliveries WHERE delivery_id = ?",
+                    (str(delivery_id),),
+                ).fetchone()
+            if (
+                source_delivery is not None
+                and str(source_delivery["state"]) == "cancelled"
+                and is_supersede_code(source_delivery["error_code"])
+            ):
+                # The historical link points at a row that a later owner
+                # deliberately superseded.  Resolve the successor instead of
+                # copying a cancelled reference into the active batch.
+                successor = self._resolve_carried_successor(conn, source_delivery)
+                if successor is not None and successor.is_completed:
+                    artifact = conn.execute(
+                        "SELECT * FROM artifacts WHERE artifact_id = ?",
+                        (successor.artifact_id,),
+                    ).fetchone()
+                    if artifact is not None:
+                        gate = getattr(self, "_health_allows_reuse", None)
+                        health = (
+                            None
+                            if health_by_artifact is None
+                            else health_by_artifact.get(str(artifact["artifact_id"]))
+                        )
+                        if not enforce_completed_health or (
+                            callable(gate) and gate(health, artifact)
+                        ):
+                            same_job = str(artifact["job_id"]) == target_job_id
+                            self._link_batch_item_page(
+                                conn,
+                                target_batch_id,
+                                illust_id,
+                                int(row["page_index"]),
+                                str(row["output_key"]),
+                                str(row["quality_json"]),
+                                delivery_id=(
+                                    str(artifact["delivery_id"]) if same_job else None
+                                ),
+                                artifact_id=str(artifact["artifact_id"]),
+                                overwrite=False,
+                            )
+                            continue
+                elif successor is not None and successor.state == "needs_verification":
+                    self._link_batch_item_page(
+                        conn,
+                        target_batch_id,
+                        illust_id,
+                        int(row["page_index"]),
+                        str(row["output_key"]),
+                        str(row["quality_json"]),
+                        delivery_id=successor.delivery_id,
+                        artifact_id=None,
+                        overwrite=False,
+                    )
+                    continue
+                self._create_carried_unverified_delivery(
+                    conn,
+                    target_batch_id,
+                    illust_id,
+                    int(row["page_index"]),
+                    str(row["output_key"]),
+                    str(row["quality_json"]),
+                    str(source_delivery["delivery_id"]),
+                    error_code=(
+                        "carried_superseded_unverified"
+                        if successor is not None and successor.is_completed
+                        else "carried_superseded_unresolved"
+                    ),
+                )
+                continue
             artifact = None
             if artifact_id is not None:
                 artifact = conn.execute(
@@ -1441,6 +1641,87 @@ class DeliveryRepositoryMixin:
                 overwrite=False,
             )
 
+    def _resolve_carried_successor(self, conn, delivery):
+        """Resolve a superseded link for carry.
+
+        The superseding batch recorded the replacement on its own page link;
+        following that link is exact and works across jobs (a reuse successor
+        is usually an older completed delivery from another task).  The frozen
+        lineage helper remains the fallback for same-job repair generations.
+        """
+        link = conn.execute(
+            "SELECT delivery_id, artifact_id FROM batch_item_pages "
+            "WHERE batch_id = ? AND illust_id = ? AND page_index = ?",
+            (
+                str(delivery["current_batch_id"]),
+                str(delivery["illust_id"]),
+                int(delivery["page_index"]),
+            ),
+        ).fetchone()
+        if link is not None:
+            if link["artifact_id"] is not None:
+                artifact = conn.execute(
+                    "SELECT * FROM artifacts WHERE artifact_id = ?",
+                    (str(link["artifact_id"]),),
+                ).fetchone()
+                if artifact is not None:
+                    row = conn.execute(
+                        "SELECT * FROM deliveries WHERE delivery_id = ?",
+                        (str(artifact["delivery_id"]),),
+                    ).fetchone()
+                    if row is not None:
+                        return Successor(
+                            delivery_id=str(row["delivery_id"]),
+                            job_id=str(row["job_id"]),
+                            batch_id=str(row["current_batch_id"]),
+                            state="completed",
+                            generation=int(row["generation"]),
+                            artifact_id=str(artifact["artifact_id"]),
+                        )
+            elif link["delivery_id"] is not None and str(
+                link["delivery_id"]
+            ) != str(delivery["delivery_id"]):
+                row = conn.execute(
+                    "SELECT * FROM deliveries WHERE delivery_id = ?",
+                    (str(link["delivery_id"]),),
+                ).fetchone()
+                if row is not None and str(row["state"]) in ACTIVE_FOLLOWUP:
+                    return Successor(
+                        delivery_id=str(row["delivery_id"]),
+                        job_id=str(row["job_id"]),
+                        batch_id=str(row["current_batch_id"]),
+                        state=str(row["state"]),
+                        generation=int(row["generation"]),
+                        artifact_id=None,
+                    )
+        candidates = conn.execute(
+            "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
+            "AND output_key = ? AND quality_key = ? AND state = 'completed' "
+            "ORDER BY rowid DESC LIMIT 4",
+            (
+                str(delivery["illust_id"]),
+                int(delivery["page_index"]),
+                str(delivery["output_key"]),
+                str(delivery["quality_key"]),
+            ),
+        ).fetchall()
+        for row in candidates:
+            artifact = conn.execute(
+                "SELECT artifact_id FROM artifacts WHERE delivery_id = ?",
+                (str(row["delivery_id"]),),
+            ).fetchone()
+            if artifact is None:
+                continue
+            return Successor(
+                delivery_id=str(row["delivery_id"]),
+                job_id=str(row["job_id"]),
+                batch_id=str(row["current_batch_id"]),
+                state="completed",
+                generation=int(row["generation"]),
+                artifact_id=str(artifact["artifact_id"]),
+            )
+        return resolve_successor(conn, delivery)
+
     def _create_carried_unverified_delivery(
         self,
         conn: sqlite3.Connection,
@@ -1450,6 +1731,8 @@ class DeliveryRepositoryMixin:
         output_key: str,
         quality_json: str,
         source_delivery_id: str,
+        *,
+        error_code: str = "artifact_unverified_carry",
     ) -> None:
         lib = _lib()
         batch = self._get_batch_row(conn, target_batch_id)
@@ -1503,7 +1786,7 @@ class DeliveryRepositoryMixin:
                 "source_identity, state, attempts, retry_at, error_code, "
                 "generation, checkpoint_json, prepared_json, created_at, updated_at"
                 ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "'needs_verification', 0, NULL, 'artifact_unverified_carry', ?, ?, NULL, ?, ?)",
+                "'needs_verification', 0, NULL, ?, ?, ?, NULL, ?, ?)",
                 (
                     delivery_id,
                     job_id,
@@ -1517,6 +1800,7 @@ class DeliveryRepositoryMixin:
                     quality_key,
                     str(source["payload_json"]),
                     None if source["source_identity"] is None else str(source["source_identity"]),
+                    error_code,
                     generation,
                     # A transfer checkpoint embeds its owning delivery id; it
                     # is not portable to a new generation.  Keep the carried
