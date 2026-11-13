@@ -146,6 +146,8 @@ def probe_ref(resolver: PathResolver, ref: PathRef) -> PresenceResult: ...
 * SQL 侧排除终态清理事实（同时覆盖新布尔与旧 `outcome=cleaned`），`d.state='cancelled'`、`prepared_json IS NOT NULL`；
 * `WHERE d.rowid > after_rowid ORDER BY d.rowid LIMIT ?`，单次最多检查 `min(limit*5, 2000)` 行，凑满 `limit` 个可解析事实即返回；
 * 坏 `prepared_json` 只跳过该行，不缩小后续窗口；
+* **窗口内排序（v3.2 冻结）**：先"从未尝试过"的行，再"已有 `failed` 事实"的行，各自按 rowid 升序。理由：新工作不能被重试churn 饿死，而失败行仍然必须在更宽的窗口里出现并被重试。
+* `after_rowid` = 本页**检查过的最大 rowid**（不是返回的最后一条），保证分层顺序不会让游标回退。
 * `recover_local` 持有内存游标做公平轮转（用完回到 0），重启从 0 开始；不新增列、不加索引。
 
 ### 2.5 删除只有一条实现
@@ -153,6 +155,8 @@ def probe_ref(resolver: PathResolver, ref: PathRef) -> PresenceResult: ...
 `_discard_owned_temp(temp, evidence, *, recheck_after_db=False)`：`probe_ref` → `_verify_owned`（size+`file_id`+sha256）→（若发生过 DB 往返）再 `probe_ref` + `_verify_owned` → `unlink`。任何一步不匹配：保留文件，写诊断（`unowned_staged_temp` / `temp_replaced_after_observation`），返回"未删除"。
 
 取消路径、清理路径、确认后清理都走这一条；禁止独立 `unlink` 快捷分支，禁止按扩展名或目录扫描判断所有权。
+
+**诊断事实的边界（v3.2 冻结）**：只有"身份/在场存疑"（`unowned_staged_temp`、`temp_replaced_after_observation`、`temp_unreadable`、`root_unavailable`）才写 `failed` 事实。**纯 `unlink` 失败**（文件被占用、共享冲突）不写持久事实：行留在队列里，由下一次 sweep 重新尝试并记录结果。这样"取消成功但文件被锁"的行不会因为一条 `failed` 事实而被排到队尾。
 
 严格 TOCTOU（另一进程在 `unlink` 瞬间替换）本轮**不宣称**已原子解决；需要文件句柄/独占语义时另立 Windows 实测，未证明前保持"宁可不删"。
 
@@ -169,6 +173,8 @@ except (_Fault, OSError, ContractError):
 ```
 
 `_settle_local_failure`：重读当前行；`completed` → 报告 completed；`cancelled` → cancelled；已是目标状态 → 直接报告；否则 `set_delivery_issue(expected_state=...)`，其 CAS 失败时再重读一次并按赢家状态收敛。真正"数据库不可读"才上抛 storage/trust fault，不得吞掉后谎称"仍可恢复"。
+
+**账本可读但补偿写失败（v3.2 冻结）**：报告 `recovery_needed`（行保持原状、仍可恢复），原因保留在结果/日志里；不中止整个 `recover_local`、不谎称 `completed`。只有账本本身不可读才算 storage/trust fault。
 
 ### 2.7 已冻结的 CAS 原语（S0 已落地）
 
