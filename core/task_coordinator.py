@@ -10,12 +10,35 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 
 from core.http_client import close_current_http_session
-from core.library_repository import BudgetExceeded, CorruptDataError
+from core.library_repository import (
+    BudgetExceeded,
+    CorruptDataError,
+    InvalidStateError,
+)
+from core.observation_snapshot import PageBudget
 from core.task_contracts import BatchBudget, CollectionRequest, SourcePage
 
 
 class CoordinatorClosed(RuntimeError):
     pass
+
+
+# One acceptance may look at several candidates; the whole page must stay
+# bounded even when no single file is large.
+_PAGE_BUDGET = PageBudget()
+
+
+class AdmissionTicket:
+    """Proof that a page was admitted before the batch's pause boundary."""
+
+    __slots__ = ("batch_id", "epoch")
+
+    def __init__(self, batch_id: str, epoch: int):
+        self.batch_id = batch_id
+        self.epoch = epoch
+
+    def __repr__(self) -> str:
+        return f"AdmissionTicket({self.batch_id!r}, {self.epoch})"
 
 
 class CommandQueueFull(RuntimeError):
@@ -69,8 +92,16 @@ class TaskCoordinator:
         self._queued, self._inflight = set(), {}
         self._dispatch = False
         self._closing = False
+        self._closed = False
         self._started = False
         self._fatal = None
+        # Admission is a per-batch protocol: an epoch is issued under the same
+        # guard that closes it on pause/close.  A ticket taken before the pause
+        # may finish; a page admitted after it is rejected.
+        self._admission_open = False
+        self._admission_epoch = 0
+        self._outstanding = 0
+        self._trust_fault = False
         self._ready = Future()
         self._owner = threading.Thread(target=self._run, name="collection-coordinator", daemon=False)
         self._workers = [threading.Thread(target=self._worker, name=f"collection-page-{n}", daemon=False)
@@ -99,13 +130,11 @@ class TaskCoordinator:
         if name in {"snapshot", "request_stop"}:
             return self._run_control_command(name, args, kwargs)
         result = Future()
-        admitted_running = False
         if name == "accept_source_page":
-            # Admission happens here, while the batch is known to be running.
-            # An observation that was admitted before a pause may still commit
-            # into 'pausing'; a page admitted after the pause may not.
+            # Keep one read for batch existence/identity; the admission
+            # decision itself uses the ticket flag, never this snapshot.
             try:
-                admitted_running = self.repository.get_batch(args[0])["phase"] == "running"
+                self.repository.get_batch(args[0])
             except BaseException as exc:
                 result.set_exception(exc)
                 return result
@@ -114,13 +143,28 @@ class TaskCoordinator:
                 result.set_exception(CoordinatorClosed("Coordinator is not accepting commands"))
                 return result
             if name == "accept_source_page":
-                # The put happens under the same guard as the closed check, so
-                # close() can never strand an accepted Future.
+                # Admission is the ticket protocol, not a database read: the
+                # pause/close path closes this flag under the same guard, so a
+                # page read before the pause cannot slip in after it.
+                if (
+                    not self._admission_open
+                    or self._stop.is_set()
+                    or self._active is None
+                    or self._active["batch_id"] != args[0]
+                ):
+                    result.set_exception(
+                        InvalidStateError(
+                            "The batch is not admitting new source pages"
+                        )
+                    )
+                    return result
+                self._outstanding += 1
                 try:
                     self._observations.put_nowait(
-                        (args[0], args[1], admitted_running, result)
+                        (args[0], args[1], self._admission_epoch, result)
                     )
                 except queue.Full:
+                    self._outstanding -= 1
                     result.set_exception(
                         CommandQueueFull("Observation capacity reached; try again")
                     )
@@ -155,6 +199,9 @@ class TaskCoordinator:
                 # The UI signal is immediate; the durable stop is applied on
                 # the control thread, never behind an in-flight hash.
                 self._stop.set()
+                if self._admission_open:
+                    self._admission_open = False
+                    self._admission_epoch += 1
         return result
 
     def _control_loop(self):
@@ -162,39 +209,65 @@ class TaskCoordinator:
             try:
                 item = self._control_commands.get(timeout=0.1)
             except queue.Empty:
-                if self._closing:
+                if self._closing or self._shutdown.is_set():
                     break
                 continue
             if item is None:
                 break
             self._execute(item)
 
+    def _release_ticket(self) -> None:
+        with self._guard:
+            if self._outstanding:
+                self._outstanding -= 1
+
+    def _block_batch(self, batch_id: str, reason: str) -> None:
+        """Durably block the batch for a library-level fault."""
+        try:
+            self.repository.request_block(batch_id, reason)
+        except BaseException:
+            pass
+
     def _observation_loop(self):
         while True:
             try:
                 item = self._observations.get(timeout=0.1)
             except queue.Empty:
-                if self._closing:
+                if self._closing or self._shutdown.is_set():
                     break
                 continue
             if item is None:
                 break
-            batch_id, page, admitted_running, future = item
+            batch_id, page, epoch, future = item
             if not future.set_running_or_notify_cancel():
+                self._release_ticket()
                 continue
             with self._guard:
                 self._observing += 1
             try:
                 future.set_result(
                     self.repository.accept_source_page(
-                        batch_id, page, admitted_running=admitted_running
+                        batch_id,
+                        page,
+                        admitted_running=True,
+                        cancel=self._stop,
+                        page_budget=_PAGE_BUDGET,
                     )
                 )
+            except CorruptDataError as exc:
+                # A corrupt intent projection is a library-level trust fault:
+                # stop the whole dispatch round and leave a durable diagnosis.
+                self._trust_fault = True
+                self._dispatch = False
+                self._stop.set()
+                self._block_batch(batch_id, "intent_unreadable")
+                future.set_exception(exc)
             except BaseException as exc:
                 future.set_exception(exc)
             finally:
                 with self._guard:
                     self._observing -= 1
+                self._release_ticket()
                 self._wake.set()
 
     def submit(self, request: CollectionRequest, command_id: str, *, parent_job_id: str | None = None) -> Future:
@@ -389,26 +462,30 @@ class TaskCoordinator:
                         self._stop.set()
                         self._drain_pages()
                         with self._guard:
-                            busy = (
-                                bool(self._inflight)
-                                or bool(self._observing)
-                                or bool(self._observations.qsize())
-                            )
+                            busy = bool(self._inflight) or self._outstanding > 0
                         if not busy:
                             self.repository.settle_stop(batch["batch_id"])
                             batch = self.repository.get_batch(batch["batch_id"])
+                            if str(batch.get("stop_reason") or "") in {
+                                "intent_unreadable",
+                                "source_runner_failed",
+                            }:
+                                # A library/source trust fault must not roll on
+                                # to the next queued job by itself.
+                                self._dispatch = False
                     if batch["phase"] not in {"running", "cooling", "settling", "pausing", "cancelling"}:
                         with self._guard:
                             self._active = None
                             self._stop.clear()
+                            self._admission_open = False
+                            self._admission_epoch += 1
                     elif batch["phase"] in {"running", "settling"}:
                         self._fill_pages()
                         with self._guard:
                             idle = (
                                 not self._queued
                                 and not self._inflight
-                                and not self._observing
-                                and not self._observations.qsize()
+                                and self._outstanding == 0
                             )
                         if idle:
                             budget = self.repository.budget_status(batch["batch_id"])
@@ -424,6 +501,9 @@ class TaskCoordinator:
                     with self._guard:
                         self._active = activated
                         self._stop.clear()
+                        self._admission_open = activated is not None
+                        if activated is not None:
+                            self._admission_epoch += 1
                 if self._closing and not self._active:
                     break
                 self._wake.wait(0.05)
@@ -435,25 +515,49 @@ class TaskCoordinator:
         finally:
             self._stop.set()
             self._shutdown.set()
+            self._closing = True
+            with self._guard:
+                self._admission_open = False
+                self._admission_epoch += 1
+                self._outstanding = 0
             self._drain_pages()
-            for channel in (self._control, self._commands):
+            for channel in (
+                self._commands,
+                self._control,
+                self._control_commands,
+                self._observations,
+            ):
                 while True:
                     try:
-                        _, _, _, future = channel.get_nowait()
+                        item = channel.get_nowait()
                     except queue.Empty:
                         break
-                    if not future.done():
+                    future = item[3] if isinstance(item, tuple) and len(item) == 4 else None
+                    if future is not None and not future.done():
                         future.set_exception(CoordinatorClosed("Coordinator stopped"))
-                    channel.task_done()
+                    try:
+                        channel.task_done()
+                    except ValueError:
+                        pass
 
     def close(self, timeout=20):
-        if threading.current_thread() in (self._owner, *self._workers):
+        if threading.current_thread() in (
+            self._owner,
+            *self._workers,
+            self._observer,
+            self._control_thread,
+        ):
             raise RuntimeError("Coordinator cannot be closed from its own worker")
-        deadline = time.monotonic() + timeout
         with self._guard:
+            if self._closed:
+                return
             self._closing = True
             self._stop.set()
             self._wake.set()
+            if self._admission_open:
+                self._admission_open = False
+                self._admission_epoch += 1
+        deadline = time.monotonic() + timeout
         if self._started:
             for channel in (self._observations, self._control_commands):
                 try:
@@ -476,6 +580,7 @@ class TaskCoordinator:
             if any(thread.is_alive() for thread in threads):
                 raise TimeoutError("Collection workers are still settling; repository remains open")
         self.repository.close(timeout=max(0, deadline - time.monotonic()))
+        self._closed = True
         if self._fatal:
             raise RuntimeError("Coordinator stopped after a storage/control failure") from self._fatal
 
