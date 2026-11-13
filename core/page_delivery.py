@@ -475,9 +475,11 @@ class PageDeliveryExecutor:
         own temp (identity, size and digest all verified).  Any doubt keeps
         the '.part' for local recovery instead of guessing.
         """
-        reason = "intent_excluded"
-        if isinstance(decision, dict) and decision.get("reason") == "intent_unreadable":
-            reason = "intent_unreadable"
+        # Unknown or malformed authorization is treated as unreadable: keep
+        # the staged bytes instead of assuming an exclusion that never existed.
+        reason = "intent_unreadable"
+        if isinstance(decision, dict) and decision.get("reason") == "intent_excluded":
+            reason = "intent_excluded"
         if reason == "intent_unreadable":
             # An unreadable intent is not permission to discard staged bytes:
             # keep prepared/.part and park the delivery for an explicit review.

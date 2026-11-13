@@ -16,6 +16,7 @@ import test_u1a_recovery as h
 from core.library_repository import CorruptDataError, LibraryRepository
 from core.observation_snapshot import PreflightSnapshot, PreflightUnavailable
 from core.page_delivery import _Fault
+from core.task_coordinator import TaskCoordinator
 
 
 def _corrupt_removal_intents(repo):
@@ -92,6 +93,52 @@ def test_an_unobservable_trusted_candidate_is_retried_not_called_unknown(tmp_pat
             )
         assert repo.list_dispatchable(job["job_id"]) == ()
         assert repo.get_batch(job["batch_id"])["phase"] == "running"
+
+
+def test_a_paused_batch_does_not_create_a_health_hold(tmp_path, monkeypatch):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        h.first_delivery(repo, tmp_path)
+        monkeypatch.setattr(
+            repo,
+            "_preflight_page_health",
+            lambda batch_id, page: PreflightSnapshot(
+                run_id=f"batch-{batch_id}", pages={}, degraded=True,
+                reason="batch_not_running",
+            ),
+        )
+        job = h.submit(repo, request_id="paused-preflight")
+        repo.activate_next()
+        with pytest.raises(PreflightUnavailable):
+            repo.accept_source_page(
+                job["batch_id"], h.source((h.candidate(),), page_identity="paused")
+            )
+        with sqlite3.connect(repo.database_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM deliveries WHERE job_id = ?", (job["job_id"],)
+            ).fetchone()[0]
+        assert count == 0, "a paused batch must not turn a completed page into a hold"
+
+
+def test_a_blocked_batch_survives_restart_and_keeps_the_next_job_queued(tmp_path):
+    database = tmp_path / "ledger.sqlite3"
+    with LibraryRepository(database) as repo:
+        job, pending, _ = h.queued_repair(repo, tmp_path)
+        repo.record_removal_intent(
+            job["batch_id"], h.ARTWORK, 0, h.OUTPUT_REF,
+            intent="none", command_id="mark-none-3",
+        )
+        _corrupt_removal_intents(repo)
+        with pytest.raises(CorruptDataError):
+            repo.claim_delivery(pending, job["batch_id"])
+        second = repo.submit(h.request("queued-behind"), "submit-behind")
+
+    with LibraryRepository(database) as repo:
+        service = h.executor(repo, tmp_path, h.Transport())
+        with TaskCoordinator(repo, service, workers=1) as coordinator:
+            coordinator.start().result(10)
+            assert repo.get_batch(job["batch_id"])["phase"] == "blocked"
+            assert _stop_reason(repo, job["batch_id"]) == "intent_unreadable"
+            assert repo.get_batch(second["batch_id"])["phase"] == "queued"
 
 
 def test_unreadable_intent_keeps_staged_bytes_and_parks_the_delivery(tmp_path):

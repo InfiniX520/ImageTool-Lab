@@ -1350,9 +1350,11 @@ class LibraryRepository(
         """Read-only publication gate for the delivery executor.
 
         Returns `{"allowed", "reason"}`.  The executor calls this immediately
-        before it creates the final name; the writer-side confirmation remains
-        authoritative.  An unreadable intent projection denies publication
-        instead of guessing that the user never excluded the page.
+        before it creates the final name; that call is the publication
+        linearization point.  Confirmation does not re-check intent: it only
+        completes bytes that are already on disk.  An unreadable projection
+        denies publication instead of guessing that the user never excluded
+        the page.
         """
         delivery_id = _validate_identifier(delivery_id, "delivery id")
         self._ensure_open()
@@ -2921,6 +2923,7 @@ class LibraryRepository(
                                 if degraded_reason in {
                                     "preflight_failed",
                                     "observation_failed",
+                                    "batch_not_running",
                                 }:
                                     raise RetryPreflight(degraded_reason)
                                 degraded_hold = True
@@ -3009,7 +3012,11 @@ class LibraryRepository(
                                     snapshot is not None
                                     and snapshot.degraded
                                     and degraded_reason
-                                    not in {"preflight_failed", "observation_failed"}
+                                    not in {
+                                        "preflight_failed",
+                                        "observation_failed",
+                                        "batch_not_running",
+                                    }
                                 ):
                                     # Nothing could be observed; hold honestly.
                                     degraded_hold = True
@@ -3035,6 +3042,12 @@ class LibraryRepository(
                                         LocalState.HASH_MATCH,
                                         LocalState.QUICK_MATCH,
                                     }:
+                                        if not self._health_is_current(record):
+                                            # Matching bytes whose record is
+                                            # stale are not a healthy verdict;
+                                            # keep the precise diagnostic.
+                                            observed = record.state
+                                            break
                                         continue
                                     observed = record.state
                                     break
@@ -3889,7 +3902,8 @@ class LibraryRepository(
                 job_id = str(batch["job_id"])
                 conn.execute(
                     "UPDATE batches SET phase = 'blocked', active_slot = NULL, "
-                    "stop_target = 'blocked', stop_reason = 'interrupted', "
+                    "stop_target = 'blocked', "
+                    "stop_reason = COALESCE(stop_reason, 'interrupted'), "
                     "ended_at = ? WHERE batch_id = ?",
                     (now, batch_id),
                 )

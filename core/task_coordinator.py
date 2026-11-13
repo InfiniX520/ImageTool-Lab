@@ -10,7 +10,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 
 from core.http_client import close_current_http_session
-from core.library_repository import BudgetExceeded
+from core.library_repository import BudgetExceeded, CorruptDataError
 from core.task_contracts import BatchBudget, CollectionRequest, SourcePage
 
 
@@ -159,14 +159,24 @@ class TaskCoordinator:
 
     def _control_loop(self):
         while True:
-            item = self._control_commands.get()
+            try:
+                item = self._control_commands.get(timeout=0.1)
+            except queue.Empty:
+                if self._closing:
+                    break
+                continue
             if item is None:
                 break
             self._execute(item)
 
     def _observation_loop(self):
         while True:
-            item = self._observations.get()
+            try:
+                item = self._observations.get(timeout=0.1)
+            except queue.Empty:
+                if self._closing:
+                    break
+                continue
             if item is None:
                 break
             batch_id, page, admitted_running, future = item
@@ -327,6 +337,13 @@ class TaskCoordinator:
                                 outcome = DeliveryOutcome("failed", "invalid_executor_result")
                     except BudgetExceeded:
                         outcome = DeliveryOutcome("suspended", "work_budget")
+                    except CorruptDataError:
+                        # The writer blocked this batch on unreadable intent.
+                        # Do not immediately activate the next queued job: the
+                        # corruption is library-wide until the user repairs it.
+                        self._dispatch = False
+                        self._stop.set()
+                        outcome = DeliveryOutcome("failed", "intent_unreadable")
                     except Exception:
                         outcome = DeliveryOutcome("failed", "page_executor_error")
                     self._results.put((delivery_id, batch_id, claimed, outcome))
