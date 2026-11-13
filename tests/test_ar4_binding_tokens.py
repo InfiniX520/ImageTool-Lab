@@ -886,10 +886,14 @@ def test_index_only_binding_has_an_explicit_token_and_cannot_be_cleared(library,
             )
     assert_untouched(conn, after_changed_asset)
 
-    # The supported path still works and keeps the accepted evidence chain.
-    accept(conn, changed)
+    # The supported path still works and keeps the accepted evidence chain.  The
+    # pre-indexed row above reserved a generation, so the fresh decision allocates
+    # the next free one instead of reusing the hand-inserted revision.
+    fresh, fresh_acceptance = accept(conn, changed)
     final = load_content_binding(conn, entry2.path)
-    assert final.content == changed_resolution.content
+    assert final.content == fresh.content
+    assert final.acceptance_id == fresh_acceptance.acceptance_id
+    assert final.content.revision >= changed_resolution.content.revision
     assert final.acceptance_id is not None and final.root_revision == 1
     validate_archive_facts(conn)
 
