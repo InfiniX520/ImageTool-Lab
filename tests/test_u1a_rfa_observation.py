@@ -20,16 +20,23 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 import test_u1a_recovery as h
+from core.artifact_health import (
+    ArtifactExpectation,
+    ArtifactHealthPolicy,
+    unobserved_health,
+)
 from core.library_repository import LibraryError
 from core.observation_snapshot import (
     PROGRESS_EVENT_KIND,
     PageBudget,
     PreflightCancelled,
 )
+from core.preservation_policy import LocalState
 from core.task_contracts import CandidateDecision, PageSpec, PathRef
 from delivery_fixtures import Response, Transport
 
@@ -495,3 +502,189 @@ def test_a_rejected_progress_write_never_fails_the_page(tmp_path, monkeypatch):
         assert repo._progress_write_error == "LibraryError"
         assert checkpoint(repo, job) is not None
         assert progress_events(repo) == []
+
+# ---------------------------------------------------------------------------
+# Negative evidence: a page of broken files must still reach its commit
+# ---------------------------------------------------------------------------
+
+
+def seed_many(repo, root, count, *, request_id="seed-many"):
+    """Deliver `count` one page works so every candidate owns an artifact."""
+    job = h.submit(repo, request_id=request_id, max_works=count)
+    candidates = tuple(candidate(str(3000 + index)) for index in range(count))
+    page = source(candidates, page_identity="many-" + request_id)
+    ids = h.accept(repo, job["batch_id"], page)
+    service = h.executor(repo, root, h.Transport(*(h.Response() for _ in ids)))
+    for delivery in ids:
+        assert h.run(repo, job, delivery, service).state == "completed"
+    settle(repo, job)
+    return candidates, page
+
+
+def negative_health(artifact, state: LocalState, quality_key: str):
+    """A fail-closed record, shaped exactly like a real unreadable observation."""
+    expectation = ArtifactExpectation.from_artifact_row(
+        artifact,
+        path=PathRef(**json.loads(artifact["output_ref_json"])),
+        root_revision=1,
+        quality_key=quality_key,
+        policy_version=1,
+    )
+    return unobserved_health(
+        expectation,
+        state=state,
+        reason="observation_failed",
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        policy=ArtifactHealthPolicy(),
+    )
+
+
+def negative_observer(state: LocalState):
+    """Replace the file observation; every candidate reports the same state."""
+    calls: list[str] = []
+
+    def observe(artifact, *, resolver, run_id, quality_key):
+        calls.append(str(artifact["artifact_id"]))
+        return negative_health(artifact, state, quality_key)
+
+    return calls, observe
+
+
+def age_progress_events(repo, *, seconds: int) -> None:
+    """Backdate every stored observation by `seconds`."""
+    checked = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    with sqlite3.connect(repo.database_path) as conn:
+        for (payload,) in conn.execute(
+            "SELECT safe_payload FROM events WHERE kind = ?", (PROGRESS_EVENT_KIND,)
+        ).fetchall():
+            event = json.loads(payload)
+            for record in event["records"]:
+                record["health"]["checked_at"] = checked
+            conn.execute(
+                "UPDATE events SET safe_payload = ? WHERE kind = ? AND safe_payload = ?",
+                (
+                    json.dumps(event, sort_keys=True, separators=(",", ":")),
+                    PROGRESS_EVENT_KIND,
+                    payload,
+                ),
+            )
+        conn.commit()
+
+
+def test_a_page_of_three_hundred_unreadable_files_still_commits(tmp_path, monkeypatch):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        candidates, page = seed_many(repo, tmp_path, 300)
+        job = h.submit(repo, request_id="reuse-unreadable", max_works=300)
+        calls, observe = negative_observer(LocalState.UNREADABLE)
+        monkeypatch.setattr(repo, "_observe_artifact", observe)
+        budget = PageBudget(max_files=32, max_slices=8)
+
+        with pytest.raises(PreflightCancelled) as caught:
+            repo.accept_source_page(job["batch_id"], page, page_budget=budget)
+        assert caught.value.reason == "page_slice_limit"
+        assert len(calls) == 256
+        assert checkpoint(repo, job) is None
+
+        calls.clear()
+        ids = repo.accept_source_page(job["batch_id"], page, page_budget=budget)
+        assert len(ids) == 300
+        # 256 negative records are reused; only the 44 new files are opened.
+        assert len(calls) == 44
+        assert checkpoint(repo, job) is not None
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM deliveries WHERE job_id = ? AND state = 'needs_verification' "
+            "AND error_code = 'artifact_unreadable'",
+            (job["job_id"],),
+        ) == 300
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM deliveries WHERE job_id = ? AND state = 'completed'",
+            (job["job_id"],),
+        ) == 0
+        assert scalar(
+            repo, "SELECT COUNT(*) FROM artifacts WHERE job_id = ?", (job["job_id"],)
+        ) == 0
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM batch_item_pages WHERE batch_id = ? "
+            "AND artifact_id IS NOT NULL",
+            (job["batch_id"],),
+        ) == 0
+        # 300 page links exist, but not one of them names an artifact.
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM batch_item_pages WHERE batch_id = ?",
+            (job["batch_id"],),
+        ) == 300
+
+
+def test_a_page_of_three_hundred_unreachable_files_never_commits(tmp_path, monkeypatch):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        candidates, page = seed_many(repo, tmp_path, 300, request_id="seed-root")
+        job = h.submit(repo, request_id="reuse-unreachable", max_works=300)
+        calls, observe = negative_observer(LocalState.ROOT_UNAVAILABLE)
+        monkeypatch.setattr(repo, "_observe_artifact", observe)
+        budget = PageBudget(max_files=32, max_slices=8)
+
+        with pytest.raises(PreflightCancelled) as caught:
+            repo.accept_source_page(job["batch_id"], page, page_budget=budget)
+        assert caught.value.reason == "page_slice_limit"
+        assert len(calls) == 256
+
+        calls.clear()
+        with pytest.raises(PreflightCancelled) as caught:
+            repo.accept_source_page(job["batch_id"], page, page_budget=budget)
+        assert caught.value.reason == "page_slice_limit"
+        # An unreachable root is never reused: the same 256 files are observed.
+        assert len(calls) == 256
+        assert checkpoint(repo, job) is None
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM deliveries WHERE job_id = ?",
+            (job["job_id"],),
+        ) == 0
+
+
+def test_an_expired_negative_record_is_observed_again(tmp_path, monkeypatch):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, page = deliver(repo, tmp_path, pages=(0, 1, 2), request_id="seed")
+        job = h.submit(repo, request_id="reuse-negative-stale")
+        calls, observe = negative_observer(LocalState.UNREADABLE)
+        monkeypatch.setattr(repo, "_observe_artifact", observe)
+        with pytest.raises(PreflightCancelled):
+            repo.accept_source_page(
+                job["batch_id"], page, page_budget=PageBudget(max_files=1, max_slices=1)
+            )
+        assert len(calls) == 1
+        age_progress_events(repo, seconds=130)
+
+        calls.clear()
+        ids = repo.accept_source_page(
+            job["batch_id"], page, page_budget=PageBudget(max_files=1)
+        )
+        assert len(ids) == 3
+        # The aged record is history: all three files are observed again.
+        assert len(calls) == 3
+
+
+def test_reusing_a_negative_record_costs_no_slice_slot(tmp_path, monkeypatch):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, page = deliver(repo, tmp_path, pages=(0, 1, 2), request_id="seed")
+        job = h.submit(repo, request_id="reuse-negative-slot")
+        calls, observe = negative_observer(LocalState.UNREADABLE)
+        monkeypatch.setattr(repo, "_observe_artifact", observe)
+        with pytest.raises(PreflightCancelled):
+            repo.accept_source_page(
+                job["batch_id"], page, page_budget=PageBudget(max_files=1, max_slices=1)
+            )
+        assert len(calls) == 1
+
+        calls.clear()
+        ids = repo.accept_source_page(
+            job["batch_id"], page, page_budget=PageBudget(max_files=1)
+        )
+        assert len(ids) == 3
+        # One record reused, two files opened, each in its own one file slice.
+        assert len(calls) == 2
+

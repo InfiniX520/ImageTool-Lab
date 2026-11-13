@@ -101,6 +101,13 @@ _ARTIFACT_OBSERVATION_BUDGET = ObservationBudget(
     max_seconds=30.0,
 )
 _MAX_HEALTH_CANDIDATES = 8
+# Negative evidence is still evidence, but only for a short window: "the file
+# could not be read (or was not recognised) a few seconds ago" may hold a page
+# that its slice budget interrupted, yet it must never harden into a permanent
+# verdict.  Reusing it only lets the writer create the same needs_verification
+# hold it would create from a fresh look; it never becomes a reuse or a
+# completion, and it never occupies a slice slot.
+_NEGATIVE_REUSE_SECONDS = 120
 # The writer may see evidence the preflight never covered (a concurrent
 # completion).  It then asks for a new preflight instead of inventing a hold;
 # the retry is bounded in count and wall time so a pathological page cannot
@@ -2762,17 +2769,22 @@ class LibraryRepository(
         Anything else is dropped and observed again: an absent or unreadable
         artifact is never promoted to healthy, and a stale record is never
         treated as current proof.
+
+        A negative observation (unreadable or unrecognised) is the one
+        controlled exception: inside `_NEGATIVE_REUSE_SECONDS` it may stand for
+        this attempt so that a page of broken files can still finish instead of
+        re-reading the same slice forever.  It carries no health: the writer
+        turns it into the same needs_verification hold a fresh look would, and
+        an unreachable root is never reused at all.
         """
         if record is None or not _artifact_is_valid(artifact):
             return None
         health = record.health
         if health.policy != _ARTIFACT_HEALTH_POLICY:
             return None
-        if health.state in {
-            LocalState.UNKNOWN,
-            LocalState.UNREADABLE,
-            LocalState.ROOT_UNAVAILABLE,
-        }:
+        if health.state is LocalState.ROOT_UNAVAILABLE:
+            # An unreachable root is a reason to wait for the volume, never a
+            # reason to turn the whole page into a hold.
             return None
         expectation = health.expectation
         if not expectation.matches_row(artifact):
@@ -2787,11 +2799,32 @@ class LibraryRepository(
             return None
         if revision != expectation.root_revision or revision != record.root_revision:
             return None
+        if health.state in {LocalState.UNREADABLE, LocalState.UNKNOWN}:
+            if not self._negative_observation_is_fresh(health):
+                return None
+            return health
         if not health.is_fresh(_utcnow()):
             return None
         if not self._progress_object_is_unchanged(health, resolver):
             return None
         return health
+
+    @staticmethod
+    def _negative_observation_is_fresh(health: ArtifactHealth) -> bool:
+        """True while a negative observation may hold a page's next slice.
+
+        The window is deliberately much shorter than the health policy: it only
+        bridges the slices of one page, so a broken file is looked at again by
+        the next run instead of being frozen into a hold forever.
+        """
+        try:
+            checked = datetime.fromisoformat(health.checked_at)
+        except (TypeError, ValueError):
+            return False
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - checked).total_seconds()
+        return 0 <= age <= _NEGATIVE_REUSE_SECONDS
 
     @staticmethod
     def _progress_object_is_unchanged(
