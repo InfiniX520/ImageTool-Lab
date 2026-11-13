@@ -2995,8 +2995,10 @@ class LibraryRepository(
         A stat is not a read: it costs one metadata lookup, never a hash.  It
         catches the file that was replaced, moved or resized between slices
         while the record was still inside its freshness window.  A same-size
-        in-place rewrite keeps the identity and is deliberately left to the
-        publication/confirmation gates instead of re-hashing every page.
+        in-place rewrite keeps identity and size, so this check cannot see it;
+        that is exactly why a positive hint is only confirmed by a full hash in
+        the pre-commit pass (contract v4 §2.2) and never treated as evidence on
+        its own.
         """
         identity = health.identity
         if identity is None or health.observed_size is None:
@@ -3025,9 +3027,13 @@ class LibraryRepository(
 
         The page budget is clipped into the observer's own per-file limits so a
         file the page cannot pay for halts instead of being read silently past
-        the declared limit (RFB-06).  The cancellation flag reaches the observer
-        for the same reason: a pause must stop mid-file, not after it.
+        the declared limit (RFB-06).  A control stop is checked here, before
+        this file is opened, and never inside the read: an already admitted
+        observation runs to its verdict (contract v3 §3.1, v4.1), so a pause
+        cannot turn an in-flight hash into a CANCELLED file verdict.
         """
+        if cancel is not None and cancel.is_set():
+            raise PreflightCancelled("cancelled")
         if not _artifact_is_valid(artifact):
             return None
         artifact_id = str(artifact["artifact_id"])
