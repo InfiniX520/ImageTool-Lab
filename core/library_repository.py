@@ -46,7 +46,22 @@ from core.delivery_repository import (
 )
 from core.follow_repository import FOLLOW_DDL, FOLLOW_TABLES, FOLLOW_COMMANDS, FollowRepositoryMixin
 from core.local_observation import LocalObserver, ObservationBudget, ObservationRequest
+from core.observation_snapshot import (
+    PageKey,
+    PageSnapshot,
+    PreflightSnapshot,
+    PreflightUnavailable,
+    RetryPreflight,
+    SnapshotError,
+)
 from core.preservation_policy import LocalState, RemovalIntent
+from core.removal_scope import (
+    CANCELLABLE_STATES,
+    CorruptIntentError,
+    IntentKey,
+    IntentProjection,
+    read_projection,
+)
 from core.query_repository import QUERY_DDL, QUERY_TABLES, QUERY_COMMANDS, QueryRepositoryMixin
 from core.library_paths import InstanceLock, PathResolver
 from core.task_contracts import (
@@ -74,6 +89,12 @@ _ARTIFACT_OBSERVATION_BUDGET = ObservationBudget(
     max_seconds=30.0,
 )
 _MAX_HEALTH_CANDIDATES = 8
+# The writer may see evidence the preflight never covered (a concurrent
+# completion).  It then asks for a new preflight instead of inventing a hold;
+# the retry is bounded in count and wall time so a pathological page cannot
+# spin the caller forever.
+_ACCEPT_PREFLIGHT_ATTEMPTS = 3
+_ACCEPT_PREFLIGHT_SECONDS = 2.0
 
 # A failed constructor whose writer refused to terminate must keep its OS lock
 # alive instead of pretending the resource is closed.
@@ -1239,25 +1260,45 @@ class LibraryRepository(
             raise LibraryError("accept_source_page requires SourcePage")
         page_json = canonical_json(asdict(page))
         digest = _sha256_text(page_json)
-        health = self._preflight_page_health(batch_id, page)
-        health_payload = [record.to_payload() for record in health]
-        payload = {
-            "batch_id": batch_id,
-            "page": page,
-            "page_json": page_json,
-            "page_digest": digest,
-            "health": health_payload,
-        }
-        return self._enqueue(
-            "accept_source_page",
-            payload,
-            size_payload={
-                "kind": "accept_source_page",
+        deadline = time.monotonic() + _ACCEPT_PREFLIGHT_SECONDS
+        attempts = 0
+        last_reason = "preflight_incomplete"
+        while True:
+            attempts += 1
+            replay = self._accepted_page_receipt(batch_id, page, digest)
+            snapshot_payload = None
+            if replay is None:
+                snapshot = self._preflight_page_health(batch_id, page)
+                snapshot_payload = snapshot.to_payload()
+            payload = {
                 "batch_id": batch_id,
-                "page": asdict(page),
-                "health": health_payload,
-            },
-        )
+                "page": page,
+                "page_json": page_json,
+                "page_digest": digest,
+                "snapshot": snapshot_payload,
+                "replay": replay is not None,
+            }
+            try:
+                return self._enqueue(
+                    "accept_source_page",
+                    payload,
+                    size_payload={
+                        "kind": "accept_source_page",
+                        "batch_id": batch_id,
+                        "page": asdict(page),
+                        "snapshot": snapshot_payload,
+                        "replay": replay is not None,
+                    },
+                )
+            except RetryPreflight as exc:
+                # The writer saw a completion the snapshot never covered; the
+                # transaction rolled back and wrote nothing.  Preflight again
+                # outside it and let the writer make the decision on evidence.
+                last_reason = exc.reason
+            except SnapshotError as exc:
+                raise LibraryError("Corrupt preflight snapshot") from exc
+            if attempts >= _ACCEPT_PREFLIGHT_ATTEMPTS or time.monotonic() >= deadline:
+                raise PreflightUnavailable(last_reason)
 
     def record_removal_intent(
         self,
@@ -1299,6 +1340,51 @@ class LibraryRepository(
                 "intent": normalized_intent.value,
             },
         )
+
+    def publish_authorized(self, delivery_id: str) -> dict[str, Any]:
+        """Read-only publication gate for the delivery executor.
+
+        Returns `{"allowed", "reason"}`.  The executor calls this immediately
+        before it creates the final name; the writer-side confirmation remains
+        authoritative.  An unreadable intent projection denies publication
+        instead of guessing that the user never excluded the page.
+        """
+        delivery_id = _validate_identifier(delivery_id, "delivery id")
+        self._ensure_open()
+        with contextlib_closing(self._readonly_connection()) as conn:
+            delivery = self._get_delivery_row(conn, delivery_id)
+            if delivery is None:
+                raise NotFoundError(f"Unknown delivery: {delivery_id}")
+            try:
+                output_ref = path_ref_from_object(
+                    _parse_json_object(
+                        delivery["output_ref_json"], "delivery output reference"
+                    )
+                )
+            except (ContractError, LibraryError) as exc:
+                raise CorruptDataError(
+                    "Delivery has an invalid output reference"
+                ) from exc
+            projection = read_projection(conn)
+        if projection.corrupt_events:
+            return {
+                "delivery_id": delivery_id,
+                "allowed": False,
+                "reason": "intent_unreadable",
+            }
+        key = IntentKey(
+            illust_id=str(delivery["illust_id"]),
+            page_index=int(delivery["page_index"]),
+            output_key=str(delivery["output_key"]),
+            root_revision=self._root_revision_for(output_ref),
+        )
+        if projection.is_excluded(key):
+            return {
+                "delivery_id": delivery_id,
+                "allowed": False,
+                "reason": "intent_excluded",
+            }
+        return {"delivery_id": delivery_id, "allowed": True, "reason": "ok"}
 
     def get_request(self, job_id: str) -> CollectionRequest:
         job_id = _validate_identifier(job_id, "job id")
@@ -2021,28 +2107,81 @@ class LibraryRepository(
             row = self._get_batch_row(conn, batch_id)
             return self._batch_dict(row)
 
+    def _accepted_page_receipt(
+        self, batch_id: str, page: SourcePage, digest: str
+    ) -> tuple[str, ...] | None:
+        """Return the stored delivery ids when this exact page was accepted.
+
+        A pure read: no artifact file is opened, so an idempotent replay cannot
+        rehash a multi-gigabyte image (UA-09).  A different digest is not a
+        replay; the writer raises CursorConflict for it as before.
+        """
+        try:
+            with contextlib_closing(self._readonly_connection()) as conn:
+                row = conn.execute(
+                    "SELECT p.content_digest, p.delivery_ids_json "
+                    "FROM source_batch_pages AS p "
+                    "JOIN batches AS b ON b.batch_id = p.batch_id "
+                    "WHERE p.batch_id = ? AND p.source_id = ? AND p.pass_id = ? "
+                    "AND p.entity_id = ? AND p.page_identity = ? "
+                    "AND b.phase = 'running'",
+                    (
+                        batch_id,
+                        page.source_id,
+                        page.pass_id,
+                        page.entity_id,
+                        page.page_identity,
+                    ),
+                ).fetchone()
+        except (sqlite3.Error, LibraryError):
+            return None
+        if row is None or str(row["content_digest"]) != digest:
+            return None
+        try:
+            stored = json.loads(row["delivery_ids_json"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(stored, list) or not all(
+            isinstance(item, str) for item in stored
+        ):
+            return None
+        return tuple(stored)
+
     def _preflight_page_health(
         self, batch_id: str, page: SourcePage
-    ) -> tuple[ArtifactHealth, ...]:
-        """Observe candidate artifacts before the writer transaction.
+    ) -> PreflightSnapshot:
+        """Observe this page's candidates before the writer transaction.
 
-        The read-only snapshot only selects candidates.  The writer revalidates
-        every record against its own row and root mapping; a failure here means
-        "no reusable evidence", never a silent database-only reuse.
+        Returns a frozen snapshot, never a bare health list.  The writer must be
+        able to tell "the preflight looked at this exact completed generation
+        and found the file changed" from "the preflight never saw this page"
+        (UA-01); the old empty list collapsed both into `artifact_unknown`.
+
+        Every database read happens in one read-only snapshot before any file
+        is opened; the writer revalidates each record against its own row.
         """
+        run_id = f"batch-{batch_id}"
         resolver = self._path_resolver_snapshot()
         if resolver is None:
-            return ()
-        candidates: dict[str, dict[str, Any]] = {}
+            return PreflightSnapshot(
+                run_id=run_id, pages={}, degraded=True, reason="no_resolver"
+            )
+        selected: dict[
+            tuple[str, int, str, str], tuple[PageKey, int, str | None, list[Any]]
+        ] = {}
         quality_key = ""
         try:
             with contextlib_closing(self._readonly_connection()) as conn:
                 batch = self._get_batch_row(conn, batch_id)
                 if batch is None or str(batch["phase"]) != "running":
-                    return ()
+                    return PreflightSnapshot(
+                        run_id=run_id, pages={}, degraded=True, reason="batch_not_running"
+                    )
                 job = self._get_job_row(conn, str(batch["job_id"]))
                 if job is None:
-                    return ()
+                    return PreflightSnapshot(
+                        run_id=run_id, pages={}, degraded=True, reason="job_missing"
+                    )
                 request = self._request_from_row(job)
                 quality_json = canonical_json(asdict(request.quality))
                 quality_key = _sha256_text(quality_json)
@@ -2050,9 +2189,17 @@ class LibraryRepository(
                     if candidate.decision != "download":
                         continue
                     for page_spec in candidate.pages:
+                        key = PageKey(
+                            illust_id=candidate.illust_id,
+                            page_index=int(page_spec.page_index),
+                            output_key=page_spec.output_ref.target_key,
+                            quality_key=quality_key,
+                        )
+                        generation = 0
+                        delivery_id: str | None = None
                         artifacts: list[Any] = []
                         same = conn.execute(
-                            "SELECT delivery_id FROM deliveries "
+                            "SELECT delivery_id, generation FROM deliveries "
                             "WHERE job_id = ? AND illust_id = ? AND page_index = ? "
                             "AND quality_key = ? AND output_key = ? AND state = 'completed' "
                             "ORDER BY generation DESC LIMIT 1",
@@ -2065,9 +2212,11 @@ class LibraryRepository(
                             ),
                         ).fetchone()
                         if same is not None:
+                            generation = int(same["generation"])
+                            delivery_id = str(same["delivery_id"])
                             artifact = conn.execute(
                                 "SELECT * FROM artifacts WHERE delivery_id = ?",
-                                (str(same["delivery_id"]),),
+                                (delivery_id,),
                             ).fetchone()
                             if artifact is not None:
                                 artifacts.append(artifact)
@@ -2084,29 +2233,68 @@ class LibraryRepository(
                                     limit=_MAX_HEALTH_CANDIDATES,
                                 )
                             )
-                        for artifact in artifacts:
-                            artifact_id = str(artifact["artifact_id"])
-                            if artifact_id not in candidates:
-                                candidates[artifact_id] = dict(artifact)
-            # The read transaction is closed before any file is opened.  The
-            # writer revalidates these records, so the gap is explicit and
-            # cannot turn into a silent reuse.
-            records: dict[str, ArtifactHealth] = {}
-            run_id = f"batch-{batch_id}"
-            for artifact in candidates.values():
-                artifact_id = str(artifact["artifact_id"])
-                record = self._observe_artifact(
-                    artifact,
-                    resolver=resolver,
-                    run_id=run_id,
-                    quality_key=quality_key,
-                )
-                if record is not None:
-                    records[artifact_id] = record
-            return tuple(records.values())
+                        selected[key.storage_key] = (key, generation, delivery_id, artifacts)
         except (sqlite3.Error, ContractError, OSError, ValueError):
-            # The writer will see an empty/partial health map and fail closed.
-            return ()
+            # No page was observed; the writer decides on an honest failure,
+            # never on a fabricated "unknown" hold for a completed delivery.
+            return PreflightSnapshot(
+                run_id=run_id, pages={}, degraded=True, reason="preflight_failed"
+            )
+
+        # The read snapshot is closed before any file is opened.
+        records: dict[str, ArtifactHealth | None] = {}
+        for _, _, _, artifacts in selected.values():
+            for artifact in artifacts:
+                artifact_id = str(artifact["artifact_id"])
+                if artifact_id in records:
+                    continue
+                try:
+                    artifact_path = path_ref_from_object(
+                        _parse_json_object(
+                            artifact["output_ref_json"], "artifact output reference"
+                        )
+                    )
+                    resolver.root_path(artifact_path)
+                except (ContractError, LibraryError, KeyError, TypeError, ValueError):
+                    records[artifact_id] = None
+                    continue
+                try:
+                    records[artifact_id] = self._observe_artifact(
+                        artifact,
+                        resolver=resolver,
+                        run_id=run_id,
+                        quality_key=quality_key,
+                    )
+                except (ContractError, OSError, ValueError):
+                    return PreflightSnapshot(
+                        run_id=run_id, pages={}, degraded=True, reason="observation_failed"
+                    )
+        try:
+            pages: dict[tuple[str, int, str, str], PageSnapshot] = {}
+            for key, generation, delivery_id, artifacts in selected.values():
+                observed: list[ArtifactHealth] = []
+                unobserved: list[str] = []
+                for artifact in artifacts:
+                    artifact_id = str(artifact["artifact_id"])
+                    record = records.get(artifact_id)
+                    if record is None:
+                        unobserved.append(artifact_id)
+                    else:
+                        observed.append(record)
+                pages[key.storage_key] = PageSnapshot(
+                    key=key,
+                    generation=generation,
+                    delivery_id=delivery_id,
+                    observed=tuple(observed),
+                    unobserved=tuple(unobserved),
+                    degraded=False,
+                    reason="ok",
+                )
+            return PreflightSnapshot(run_id=run_id, pages=pages)
+        except SnapshotError:
+            return PreflightSnapshot(
+                run_id=run_id, pages={}, degraded=True, reason="snapshot_invalid"
+            )
 
     def _observe_artifact(
         self,
@@ -2203,6 +2391,26 @@ class LibraryRepository(
             records[record.expectation.artifact_id] = record
         return records
 
+    def _health_is_current(self, health) -> bool:
+        """Same currency gate `_health_map` applies to a queued payload.
+
+        Freshness, policy version and the currently mapped root revision must
+        all still hold.  The snapshot is produced milliseconds earlier, but the
+        writer re-checks instead of trusting its own message.
+        """
+        if health is None or health.policy != _ARTIFACT_HEALTH_POLICY:
+            return False
+        if not health.is_fresh(_utcnow()):
+            return False
+        resolver = self._path_resolver_snapshot()
+        if resolver is None:
+            return False
+        try:
+            revision = resolver.root_revision(health.expectation.path)
+        except ContractError:
+            return False
+        return revision == health.expectation.root_revision
+
     def _health_allows_reuse(self, health, artifact) -> bool:
         resolver = self._path_resolver_snapshot()
         if health is None or resolver is None:
@@ -2215,23 +2423,6 @@ class LibraryRepository(
             health, artifact, now=_utcnow(), root_revision=root_revision
         )
 
-    @staticmethod
-    def _health_state_for_page(
-        health_by_artifact: dict[str, ArtifactHealth],
-        illust_id: str,
-        page_index: int,
-        output_key: str,
-    ) -> LocalState | None:
-        for record in health_by_artifact.values():
-            expectation = record.expectation
-            if (
-                expectation.illust_id == illust_id
-                and expectation.page_index == page_index
-                and expectation.output_key == output_key
-            ):
-                return record.state
-        return None
-
     def _root_revision_for(self, output_ref: PathRef) -> int:
         resolver = self._path_resolver_snapshot()
         if resolver is None:
@@ -2241,32 +2432,23 @@ class LibraryRepository(
         except ContractError:
             return 1
 
-    def _removal_intents_for_page(self, conn, page: SourcePage) -> dict:
-        """Load latest intent events once per source page.
+    def _removal_intents_for_page(self, conn, page: SourcePage) -> IntentProjection:
+        """Read the one global intent projection for this source page.
 
-        The write transaction must not scan the whole event table once per
-        candidate page; this single ordered scan keeps the lock short while
-        preserving the same latest-event semantics.
+        The scan is ordered and latest-wins, exactly as before, but an
+        unreadable event now blocks the command instead of silently becoming
+        "no intent" (UA-10).  The caller's write transaction then rolls back
+        with no page accepted.
         """
-        latest: dict[tuple[str, int, str, int], RemovalIntent] = {}
-        rows = conn.execute(
-            "SELECT safe_payload FROM events WHERE kind = 'removal_intent' "
-            "ORDER BY event_seq"
-        ).fetchall()
-        for row in rows:
-            try:
-                info = _parse_json_object(row["safe_payload"], "removal intent")
-                intent = RemovalIntent(str(info["intent"]))
-                key = (
-                    str(info["illust_id"]),
-                    int(info["page_index"]),
-                    str(info["output_key"]),
-                    int(info["root_revision"]),
-                )
-                latest[key] = intent
-            except (KeyError, TypeError, ValueError, CorruptDataError):
-                continue
-        return latest
+        del page  # the projection is global; the parameter keeps call sites explicit
+        try:
+            projection = read_projection(conn)
+            projection.require_clean()
+        except CorruptIntentError as exc:
+            raise CorruptDataError(
+                f"Removal intent event {exc.event_seq} is unreadable"
+            ) from exc
+        return projection
 
     def _record_removal_intent(
         self, conn: sqlite3.Connection, payload: dict[str, Any]
@@ -2319,19 +2501,22 @@ class LibraryRepository(
                 accepted_command_id=command_id,
             )
             if intent == RemovalIntent.EXCLUDED.value:
+                # The exclusion is content-addressed: every queued delivery for
+                # this page, in this job or any other, must stop.  Published
+                # bytes are never rewritten (UA-02).
+                placeholders = ",".join("?" for _ in CANCELLABLE_STATES)
                 rows = conn.execute(
                     "SELECT delivery_id FROM deliveries "
-                    "WHERE job_id = ? AND output_key = ? "
-                    "AND state IN ('pending','suspended','retry_wait','needs_verification')",
-                    (str(job["job_id"]), output_ref.target_key),
+                    "WHERE illust_id = ? AND page_index = ? AND output_key = ? "
+                    f"AND state IN ({placeholders})",
+                    (illust_id, page_index, output_ref.target_key, *CANCELLABLE_STATES),
                 ).fetchall()
                 for row in rows:
                     conn.execute(
                         "UPDATE deliveries SET state = 'cancelled', "
                         "error_code = 'intent_excluded', retry_at = NULL, updated_at = ? "
-                        "WHERE delivery_id = ? AND state IN "
-                        "('pending','suspended','retry_wait','needs_verification')",
-                        (now, str(row["delivery_id"])),
+                        f"WHERE delivery_id = ? AND state IN ({placeholders})",
+                        (now, str(row["delivery_id"]), *CANCELLABLE_STATES),
                     )
                     self._refresh_items_for_delivery(conn, str(row["delivery_id"]), now)
             return result
@@ -2342,7 +2527,15 @@ class LibraryRepository(
         batch_id = str(payload["batch_id"])
         page: SourcePage = payload["page"]
         page_digest = str(payload["page_digest"])
-        health_by_artifact = self._health_map(payload.get("health"))
+        replay = bool(payload.get("replay"))
+        snapshot_payload = payload.get("snapshot")
+        snapshot = None if replay else PreflightSnapshot.from_payload(snapshot_payload)
+        health_by_artifact: dict[str, ArtifactHealth] = {}
+        if snapshot is not None:
+            for page_snapshot in snapshot.pages.values():
+                for record in page_snapshot.observed:
+                    if self._health_is_current(record):
+                        health_by_artifact[record.expectation.artifact_id] = record
 
         with self._transaction(conn):
             batch = self._get_batch_row(conn, batch_id)
@@ -2387,6 +2580,11 @@ class LibraryRepository(
                 if local_receipt is not None:
                     return tuple(stored_ids)
 
+            if replay:
+                # The receipt vanished between the caller's fast path and this
+                # transaction.  Re-preflight instead of planning on no evidence.
+                raise RetryPreflight("receipt_missing")
+
             checkpoint = conn.execute(
                 "SELECT * FROM checkpoints WHERE job_id = ? AND source_id = ? "
                 "AND pass_id = ? AND entity_id = ?",
@@ -2422,7 +2620,7 @@ class LibraryRepository(
                         page_spec.output_ref.target_key,
                     )
                     revision = self._root_revision_for(page_spec.output_ref)
-                    if intents.get((*key, revision)) is RemovalIntent.EXCLUDED:
+                    if intents.is_excluded(IntentKey(*key, revision)):
                         excluded_pages.add(key)
 
             planned: set[str] = set()
@@ -2638,7 +2836,19 @@ class LibraryRepository(
                             output_key,
                         ),
                     ).fetchone()
+                    page_key = PageKey(
+                        illust_id=candidate.illust_id,
+                        page_index=int(page_spec.page_index),
+                        output_key=output_key,
+                        quality_key=quality_key,
+                    )
+                    page_snapshot = (
+                        None
+                        if snapshot is None or snapshot.degraded
+                        else snapshot.page(page_key)
+                    )
                     blocked_state: LocalState | None = None
+                    degraded_hold = False
                     candidates: list = []
                     if (
                         existing is not None
@@ -2659,23 +2869,40 @@ class LibraryRepository(
                                 raise CorruptDataError(
                                     "Completed delivery has invalid artifact evidence"
                                 )
-                            health = health_by_artifact.get(str(artifact["artifact_id"]))
-                            if self._health_allows_reuse(health, artifact):
-                                self._link_batch_item_page(
-                                    conn,
-                                    batch_id,
-                                    candidate.illust_id,
-                                    page_spec.page_index,
-                                    output_key,
-                                    quality_json,
-                                    delivery_id=str(existing["delivery_id"]),
-                                    artifact_id=str(artifact["artifact_id"]),
-                                )
-                                delivery_ids.append(str(existing["delivery_id"]))
-                                continue
-                            blocked_state = (
-                                health.state if health is not None else LocalState.UNKNOWN
-                            )
+                            artifact_id = str(artifact["artifact_id"])
+                            if snapshot is None or snapshot.degraded:
+                                # The preflight could not observe this page at
+                                # all.  Say so honestly and hold, instead of
+                                # inventing "artifact_unknown" for a delivery
+                                # that may be perfectly intact (UA-01).
+                                degraded_hold = True
+                            else:
+                                if page_snapshot is None or page_snapshot.stale_for(
+                                    int(existing["generation"]),
+                                    str(existing["delivery_id"]),
+                                ):
+                                    # A completion the snapshot never covered:
+                                    # re-preflight outside this transaction.
+                                    raise RetryPreflight("generation_advanced")
+                                health = page_snapshot.health_for(artifact_id)
+                                if health is None:
+                                    raise RetryPreflight("artifact_not_preflighted")
+                                if self._health_is_current(
+                                    health
+                                ) and self._health_allows_reuse(health, artifact):
+                                    self._link_batch_item_page(
+                                        conn,
+                                        batch_id,
+                                        candidate.illust_id,
+                                        page_spec.page_index,
+                                        output_key,
+                                        quality_json,
+                                        delivery_id=str(existing["delivery_id"]),
+                                        artifact_id=artifact_id,
+                                    )
+                                    delivery_ids.append(str(existing["delivery_id"]))
+                                    continue
+                                blocked_state = health.state
                         else:
                             self._link_batch_item_page(
                                 conn,
@@ -2726,15 +2953,40 @@ class LibraryRepository(
                             )
                             continue
                         if candidates and blocked_state is None:
-                            observed = self._health_state_for_page(
-                                health_by_artifact,
-                                candidate.illust_id,
-                                page_spec.page_index,
-                                output_key,
-                            )
-                            blocked_state = (
-                                observed if observed is not None else LocalState.UNKNOWN
-                            )
+                            if page_snapshot is None:
+                                if snapshot is not None and snapshot.degraded:
+                                    # Nothing could be observed; hold honestly.
+                                    degraded_hold = True
+                                else:
+                                    raise RetryPreflight("page_not_preflighted")
+                            else:
+                                covered = [
+                                    str(item["artifact_id"])
+                                    for item in candidates
+                                    if page_snapshot.health_for(
+                                        str(item["artifact_id"])
+                                    )
+                                    is not None
+                                    or str(item["artifact_id"]) in page_snapshot.unobserved
+                                ]
+                                if not covered:
+                                    # A candidate appeared after the candidate
+                                    # read; never turn that into "unknown".
+                                    raise RetryPreflight("trusted_candidate_uncovered")
+                                observed = None
+                                for record in page_snapshot.observed:
+                                    if record.state in {
+                                        LocalState.HASH_MATCH,
+                                        LocalState.QUICK_MATCH,
+                                    }:
+                                        continue
+                                    observed = record.state
+                                    break
+                                if observed is None and page_snapshot.observed:
+                                    observed = page_snapshot.observed[0].state
+                                blocked_state = (
+                                    observed if observed is not None else LocalState.UNKNOWN
+                                )
                     max_generation_row = conn.execute(
                         "SELECT COALESCE(MAX(generation), 0) AS generation FROM deliveries "
                         "WHERE job_id = ? AND illust_id = ? AND page_index = ? "
@@ -2761,6 +3013,9 @@ class LibraryRepository(
                     if excluded:
                         new_state = "cancelled"
                         new_error_code = "intent_excluded"
+                    elif degraded_hold:
+                        new_state = "needs_verification"
+                        new_error_code = "artifact_health_unavailable"
                     elif blocked_state is not None and blocked_state is not LocalState.MISSING:
                         new_state = "needs_verification"
                         new_error_code = (
@@ -3106,9 +3361,45 @@ class LibraryRepository(
             delivery = self._get_delivery_row(conn, delivery_id)
             if delivery is None or delivery["job_id"] != batch["job_id"]:
                 return None
+            if delivery["state"] == "completed":
+                # Claiming a finished delivery is a no-op success.  A retried
+                # accept that raced a completion must be able to report the
+                # same completed page, not "unavailable".
+                return self._delivery_dict(delivery)
             if delivery["state"] not in _DISPATCHABLE_STATES:
                 return None
             if delivery["state"] == "retry_wait" and not _retry_due(delivery["retry_at"]):
+                return None
+            projection = read_projection(conn)
+            if projection.corrupt_events:
+                # Unreadable intent is not permission to download.
+                return None
+            try:
+                delivery_ref = path_ref_from_object(
+                    _parse_json_object(
+                        delivery["output_ref_json"], "delivery output reference"
+                    )
+                )
+            except (ContractError, LibraryError) as exc:
+                raise CorruptDataError(
+                    "Delivery has an invalid output reference"
+                ) from exc
+            intent_key = IntentKey(
+                illust_id=str(delivery["illust_id"]),
+                page_index=int(delivery["page_index"]),
+                output_key=str(delivery["output_key"]),
+                root_revision=self._root_revision_for(delivery_ref),
+            )
+            if projection.is_excluded(intent_key):
+                now = _utcnow()
+                placeholders = ",".join("?" for _ in CANCELLABLE_STATES)
+                conn.execute(
+                    "UPDATE deliveries SET state = 'cancelled', "
+                    "error_code = 'intent_excluded', retry_at = NULL, updated_at = ? "
+                    f"WHERE delivery_id = ? AND state IN ({placeholders})",
+                    (now, delivery_id, *CANCELLABLE_STATES),
+                )
+                self._refresh_items_for_delivery(conn, delivery_id, now)
                 return None
             health_raw = payload.get("health")
             health_by_artifact = (
