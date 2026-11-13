@@ -781,6 +781,19 @@ class DeliveryRecoveryMixin:
                     conn, batch, result, command_id,
                     requested_action=action, applied_action="none",
                 )
+            # The user's current intent is checked after the observation gate
+            # and before any write: an exclusion blocks reuse, repair and park
+            # alike, and an unreadable event blocks instead of meaning "no
+            # exclusion" (UA-02/UA-10, recovery side).
+            _, intent_reason = self._recovery_intent_state(conn, link, delivery)
+            if intent_reason is not None:
+                result["outcome"] = RecoveryOutcome.REFUSED.value
+                result["reason"] = intent_reason
+                result["repair_delivery_id"] = None
+                return self._finish_recovery(
+                    conn, batch, result, command_id,
+                    requested_action=action, applied_action="none",
+                )
             if action == RecoveryAction.REUSE.value:
                 reason = self._apply_recovery_reuse(
                     conn, batch, link, delivery, artifact, result, foreign
@@ -891,6 +904,35 @@ class DeliveryRecoveryMixin:
         else:
             return None, "unsupported_evidence"
         return artifact, None
+
+    def _recovery_intent_state(self, conn, link, delivery) -> tuple[Any, str | None]:
+        """The current global intent for this page, or a blocking reason.
+
+        The key is content-addressed and global: an exclusion recorded from any
+        task covers this page.  A corrupt event is never read as "not
+        excluded"; it refuses the command without touching a row.
+        """
+        lib = _lib()
+        from core.delivery_repository import path_ref_from_object
+        from core.removal_scope import IntentKey, read_projection
+
+        projection = read_projection(conn)
+        if projection.corrupt_events:
+            return None, "intent_unreadable"
+        output_ref = path_ref_from_object(
+            lib._parse_json_object(
+                delivery["output_ref_json"], "delivery output reference"
+            )
+        )
+        key = IntentKey(
+            illust_id=str(link["illust_id"]),
+            page_index=int(link["page_index"]),
+            output_key=str(link["output_key"]),
+            root_revision=self._root_revision_for(output_ref),
+        )
+        if projection.is_excluded(key):
+            return key, "intent_excluded"
+        return key, None
 
     def _record_owner_transfer(self, conn, batch, delivery, artifact_id, action: str) -> None:
         """Append the cross-task handover fact; never rewrite the other task."""

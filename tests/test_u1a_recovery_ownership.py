@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -459,3 +460,101 @@ def test_a_live_foreign_transfer_is_never_stolen(tmp_path):
         assert result["outcome"] == "refused", result
         assert result["reason"] in {"output_blocked_by_other_task", "state_changed"}
         assert repo.get_delivery(foreign_hold)["state"] == "transferring"
+
+# ---------------------------------------------------------------------------
+# UA-02 / UA-10 (recovery side): the current global intent is a write gate
+#
+# Events are appended directly so the gate is tested in isolation from the
+# record-path cascade (lane D makes record_removal_intent cancel every task's
+# queued rows; that cascade has its own tests).  The gate must still refuse
+# when the row survived, which is exactly the historical-task case.
+# ---------------------------------------------------------------------------
+
+
+def _raw_intent(repo, job_id, payload):
+    with sqlite3.connect(repo.database_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO events(event_uuid, accepted_command_id, job_id, batch_id, "
+            "kind, safe_payload, created_at) "
+            "VALUES (?, NULL, ?, NULL, 'removal_intent', ?, ?)",
+            (uuid.uuid4().hex, job_id, payload, datetime.now(timezone.utc).isoformat()),
+        )
+        return int(cursor.lastrowid)
+
+
+def _intent_event(repo, job_id, output_key, intent):
+    return _raw_intent(
+        repo,
+        job_id,
+        json.dumps(
+            {
+                "illust_id": ARTWORK,
+                "page_index": 0,
+                "output_key": output_key,
+                "root_revision": 1,
+                "intent": intent,
+            }
+        ),
+    )
+
+
+def test_an_excluded_page_is_never_reused_by_recovery(tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, hold, first = h.parked_hold(repo, root)
+        h.target(root).write_bytes(h.PNG_BYTES)
+        row = _delivery_row(repo, hold)
+        _intent_event(
+            repo, repo.get_delivery(first)["job_id"], row["output_key"], "excluded"
+        )
+        after_exclusion = _table_snapshot(repo)
+
+        result = repo.recover_verification_page(job["batch_id"], ARTWORK, 0)
+
+        assert result["outcome"] == "refused", result
+        assert result["reason"] == "intent_excluded"
+        assert repo.get_delivery(hold)["state"] == "needs_verification"
+        assert repo.list_dispatchable(job["job_id"]) == ()
+        assert _table_snapshot(repo) == after_exclusion
+
+
+def test_a_corrupt_intent_blocks_a_repair_recovery(tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, hold, first = h.parked_hold(repo, root)
+        h.target(root).unlink()
+        _raw_intent(repo, repo.get_delivery(first)["job_id"], "{broken")
+        before = _table_snapshot(repo)
+
+        result = repo.recover_verification_page(job["batch_id"], ARTWORK, 0)
+
+        assert result["outcome"] == "refused", result
+        assert result["reason"] == "intent_unreadable"
+        assert repo.get_delivery(hold)["state"] == "needs_verification"
+        assert repo.list_dispatchable(job["job_id"]) == ()
+        assert _table_snapshot(repo) == before
+
+
+def test_revoking_the_exclusion_allows_reuse_again(tmp_path):
+    root = tmp_path / "library"
+    root.mkdir()
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, hold, first = h.parked_hold(repo, root)
+        h.target(root).write_bytes(h.PNG_BYTES)
+        job_id = repo.get_delivery(first)["job_id"]
+        output_key = _delivery_row(repo, hold)["output_key"]
+        _intent_event(repo, job_id, output_key, "excluded")
+        assert repo.recover_verification_page(job["batch_id"], ARTWORK, 0)["reason"] == (
+            "intent_excluded"
+        )
+
+        _intent_event(repo, job_id, output_key, "none")
+
+        result = repo.recover_verification_page(job["batch_id"], ARTWORK, 0)
+
+        assert result["outcome"] == "reused", result
+        assert repo.get_delivery(hold)["state"] == "cancelled"
+        assert repo.get_delivery(hold)["error_code"] == "recovered_hash_match"
+        assert _page_link(repo, job["batch_id"])["artifact_id"] == result["artifact_id"]
