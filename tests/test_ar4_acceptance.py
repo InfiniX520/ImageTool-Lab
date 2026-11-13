@@ -45,7 +45,9 @@ Coverage map:
   ASCII or mixed-script spelling, and case folding never crosses genuinely
   different directory entries (NFC/NFD, strasse with an eszett).
 * AR4-06  the low-level writers refuse a cross-path or cross-generation
-  acceptance and an impossible expected generation *before* any write.
+  acceptance and an impossible expected generation *before* any write; naming
+  the acceptance the binding already has stays a no-op with or without its
+  token, while a real pointer move still needs the expected token.
 """
 from __future__ import annotations
 
@@ -1348,10 +1350,25 @@ def test_ar4_05_case_folding_never_crosses_a_real_directory_entry():
 # ---------------------------------------------------------------------------
 
 
-def bind_with_acceptance(conn, content, path, *, acceptance_id, bound_at=T2):
+_OMITTED = object()
+
+
+def bind_with_acceptance(
+    conn, content, path, *, acceptance_id, expected_acceptance_id=_OMITTED, bound_at=T2,
+):
+    """Call the low-level binder, optionally with the expected acceptance token.
+
+    The token argument is omitted entirely unless a case supplies it, so the
+    negative calls keep the exact shape a product without the token would see,
+    and the no-op controls can state both accepted call shapes explicitly.
+    """
+    options = {}
+    if expected_acceptance_id is not _OMITTED:
+        options["expected_acceptance_id"] = expected_acceptance_id
     with conn:
         bind_archive_path(
             conn, content, path, bound_at=bound_at, acceptance_id=acceptance_id,
+            **options,
         )
 
 
@@ -1409,16 +1426,59 @@ def test_ar4_06_a_binding_cannot_borrow_another_paths_acceptance(library, tmp_pa
     )
     assert after.physical_identity != a_entry.physical_identity
 
-    # The boundary is "the acceptance must be this path's", not "refuse every
-    # acceptance": rebinding B with its own current acceptance stays a no-op.
-    control = outcome(lambda: bind_with_acceptance(
+    # The boundary is "this acceptance must describe this path", not "refuse every
+    # acceptance": naming the acceptance the binding already has is a no-op, both
+    # with the matching expected token and without one.  Neither call may rewrite
+    # the binding row.
+    no_op_before = pointer_rows(conn)
+    control_with_token = outcome(lambda: bind_with_acceptance(
+        conn, b_content, b_entry.path, acceptance_id=b_binding.acceptance_id,
+        expected_acceptance_id=b_binding.acceptance_id,
+    ))
+    assert control_with_token is None, (
+        "AR4-06: a no-op rebind with the matching expected acceptance token raised %s"
+        % describe(control_with_token)
+    )
+    control_without_token = outcome(lambda: bind_with_acceptance(
         conn, b_content, b_entry.path, acceptance_id=b_binding.acceptance_id,
     ))
-    assert control is None, (
-        "AR4-06: rebinding the path with its own current acceptance raised %s"
-        % describe(control)
+    assert control_without_token is None, (
+        "AR4-06: renaming the current acceptance is a no-op and must not need a "
+        "token; the call raised %s" % describe(control_without_token)
+    )
+    assert pointer_rows(conn) == no_op_before, (
+        "AR4-06: a no-op rebind still rewrote the binding row"
     )
     assert load_content_binding(conn, b_entry.path) == b_binding
+
+    # The relaxation above must not reach a real pointer move: a second, later
+    # acceptance for the same bytes exists, and pointing the path back at the
+    # older one without an expectation is refused and changes nothing.
+    receipt_3, entry_3, observed_3 = observe_path(
+        conn, root, "gallery/b.bin",
+        run_id="run-ar4-borrow-3", check_id="check-ar4-borrow-3", checked_at=T1,
+    )
+    require_bind(conn, observed_3, label="AR4-06 B second acceptance")
+    latest = load_content_binding(conn, entry_3.path)
+    assert latest is not None
+    assert latest.acceptance_id != b_binding.acceptance_id, (
+        "AR4-06: the second observation reused the first acceptance row"
+    )
+    move_before = pointer_rows(conn)
+    move_exc = refusal(
+        lambda: bind_with_acceptance(
+            conn, b_content, entry_3.path, acceptance_id=b_binding.acceptance_id,
+        ),
+        label="AR4-06 pointer move back to the older acceptance without a token",
+    )
+    assert move_exc is not None, (
+        "AR4-06: a real pointer move (newer acceptance to older acceptance) was "
+        "allowed without an expected acceptance ID"
+    )
+    assert pointer_rows(conn) == move_before, (
+        "AR4-06: the refused pointer move still rewrote binding or acceptance rows"
+    )
+    assert load_content_binding(conn, entry_3.path) == latest
     validate_archive_facts(conn)
 
 
