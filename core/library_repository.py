@@ -27,6 +27,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from core.artifact_health import (
+    ArtifactExpectation,
+    ArtifactHealth,
+    ArtifactHealthPolicy,
+    artifact_health_allows_reuse,
+    assess_observation,
+    unobserved_health,
+)
 from core.collection_scope import scope_fingerprint
 from core.delivery_repository import (
     DELIVERY_DDL,
@@ -36,8 +44,10 @@ from core.delivery_repository import (
     path_ref_from_object,
 )
 from core.follow_repository import FOLLOW_DDL, FOLLOW_TABLES, FOLLOW_COMMANDS, FollowRepositoryMixin
+from core.local_observation import LocalObserver, ObservationBudget, ObservationRequest
+from core.preservation_policy import LocalState, RemovalIntent
 from core.query_repository import QUERY_DDL, QUERY_TABLES, QUERY_COMMANDS, QueryRepositoryMixin
-from core.library_paths import InstanceLock
+from core.library_paths import InstanceLock, PathResolver
 from core.task_contracts import (
     BatchBudget,
     CollectionRequest,
@@ -57,6 +67,12 @@ _BUSY_TIMEOUT_MS = 30_000
 _MAX_DISPATCH_PAGE = 200
 _MAX_EXCLUDED_IDS = 200
 _MAX_EXCLUDE_ID_LEN = 512
+_ARTIFACT_HEALTH_POLICY = ArtifactHealthPolicy()
+_ARTIFACT_OBSERVATION_BUDGET = ObservationBudget(
+    max_bytes=4 * 1024 * 1024 * 1024,
+    max_seconds=30.0,
+)
+_MAX_HEALTH_CANDIDATES = 8
 
 # A failed constructor whose writer refused to terminate must keep its OS lock
 # alive instead of pretending the resource is closed.
@@ -647,6 +663,8 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         self._writer_thread: threading.Thread | None = None
         self._lock: InstanceLock | None = None
         self._lock_acquired = False
+        self._path_resolver: PathResolver | None = None
+        self._path_resolver_lock = threading.RLock()
 
         self._lock = InstanceLock(self._path.parent / ".writer.lock")
         try:
@@ -685,6 +703,35 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
     @property
     def database_path(self) -> Path:
         return self._path
+
+    def bind_path_resolver(self, resolver: PathResolver) -> None:
+        """Bind the root owner that can observe already-delivered files.
+
+        The repository deliberately does not guess a root from its database
+        location.  The production executor and the delivery tests construct the
+        same resolver they use to publish files, so reuse planning and file I/O
+        share one mapping.  Rebinding may add external roots but may not replace
+        the project root or remove an existing external root.
+        """
+        if not isinstance(resolver, PathResolver):
+            raise LibraryError("A PathResolver is required for artifact health")
+        with self._path_resolver_lock:
+            current = self._path_resolver
+            if current is None:
+                self._path_resolver = resolver
+                return
+            if current.project_root != resolver.project_root:
+                raise LibraryError("A library cannot change its project root")
+            previous = current.external_roots
+            replacement = resolver.external_roots
+            for key, root in previous.items():
+                if replacement.get(key) != root:
+                    raise LibraryError("A library cannot remove or move an external root")
+            self._path_resolver = resolver
+
+    def _path_resolver_snapshot(self) -> PathResolver | None:
+        with self._path_resolver_lock:
+            return self._path_resolver
 
     def __enter__(self) -> "LibraryRepository":
         return self
@@ -1038,6 +1085,8 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
             return self._activate_next(conn)
         if command.kind == "accept_source_page":
             return self._accept_source_page(conn, command.payload)
+        if command.kind == "record_removal_intent":
+            return self._record_removal_intent(conn, command.payload)
         if command.kind == "claim_delivery":
             return self._claim_delivery(conn, command.payload)
         if command.kind == "release_delivery":
@@ -1165,11 +1214,13 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
             raise LibraryError("accept_source_page requires SourcePage")
         page_json = canonical_json(asdict(page))
         digest = _sha256_text(page_json)
+        health = self._preflight_page_health(batch_id, page)
         payload = {
             "batch_id": batch_id,
             "page": page,
             "page_json": page_json,
             "page_digest": digest,
+            "health": [record.to_payload() for record in health],
         }
         return self._enqueue(
             "accept_source_page",
@@ -1178,6 +1229,47 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 "kind": "accept_source_page",
                 "batch_id": batch_id,
                 "page": asdict(page),
+            },
+        )
+
+    def record_removal_intent(
+        self,
+        batch_id: str,
+        illust_id: str,
+        page_index: int,
+        output_ref: PathRef,
+        *,
+        intent: str,
+        command_id: str,
+    ) -> dict[str, Any]:
+        """Record or revoke a user's intentional removal/transfer decision.
+
+        This is an append-only event, not a deletion.  EXCLUDED suppresses an
+        automatic repair of a missing page; OFFLOADED records the user's
+        transfer intent without claiming that a remote copy is verified.
+        """
+        batch_id = _validate_identifier(batch_id, "batch id")
+        illust_id = _validate_identifier(illust_id, "illust id")
+        command_id = _validate_identifier(command_id, "command id")
+        if type(page_index) is not int or not 0 <= page_index <= 9999:
+            raise LibraryError("Invalid page index")
+        if not isinstance(output_ref, PathRef):
+            raise LibraryError("A validated output reference is required")
+        try:
+            normalized_intent = RemovalIntent(intent)
+        except ValueError:
+            raise LibraryError("Unsupported removal intent") from None
+        if normalized_intent not in {RemovalIntent.EXCLUDED, RemovalIntent.NONE}:
+            raise LibraryError("Offloaded removal intent is not wired yet")
+        return self._enqueue(
+            "record_removal_intent",
+            {
+                "batch_id": batch_id,
+                "command_id": command_id,
+                "illust_id": illust_id,
+                "page_index": page_index,
+                "output_ref": asdict(output_ref),
+                "intent": normalized_intent.value,
             },
         )
 
@@ -1736,12 +1828,311 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
             row = self._get_batch_row(conn, batch_id)
             return self._batch_dict(row)
 
+    def _preflight_page_health(
+        self, batch_id: str, page: SourcePage
+    ) -> tuple[ArtifactHealth, ...]:
+        """Observe candidate artifacts before the writer transaction.
+
+        The read-only snapshot only selects candidates.  The writer revalidates
+        every record against its own row and root mapping; a failure here means
+        "no reusable evidence", never a silent database-only reuse.
+        """
+        resolver = self._path_resolver_snapshot()
+        if resolver is None:
+            return ()
+        candidates: dict[str, dict[str, Any]] = {}
+        quality_key = ""
+        try:
+            with contextlib_closing(self._readonly_connection()) as conn:
+                batch = self._get_batch_row(conn, batch_id)
+                if batch is None or str(batch["phase"]) != "running":
+                    return ()
+                job = self._get_job_row(conn, str(batch["job_id"]))
+                if job is None:
+                    return ()
+                request = self._request_from_row(job)
+                quality_json = canonical_json(asdict(request.quality))
+                quality_key = _sha256_text(quality_json)
+                for candidate in page.candidates:
+                    if candidate.decision != "download":
+                        continue
+                    for page_spec in candidate.pages:
+                        artifacts: list[Any] = []
+                        same = conn.execute(
+                            "SELECT delivery_id FROM deliveries "
+                            "WHERE job_id = ? AND illust_id = ? AND page_index = ? "
+                            "AND quality_key = ? AND output_key = ? AND state = 'completed' "
+                            "ORDER BY generation DESC LIMIT 1",
+                            (
+                                str(job["job_id"]),
+                                candidate.illust_id,
+                                int(page_spec.page_index),
+                                quality_key,
+                                page_spec.output_ref.target_key,
+                            ),
+                        ).fetchone()
+                        if same is not None:
+                            artifact = conn.execute(
+                                "SELECT * FROM artifacts WHERE delivery_id = ?",
+                                (str(same["delivery_id"]),),
+                            ).fetchone()
+                            if artifact is not None:
+                                artifacts.append(artifact)
+                        if request.dedup_policy == "trusted":
+                            artifacts.extend(
+                                self._find_reusable_artifact_candidates(
+                                    conn,
+                                    job_id=str(job["job_id"]),
+                                    illust_id=candidate.illust_id,
+                                    page_index=int(page_spec.page_index),
+                                    output_key=page_spec.output_ref.target_key,
+                                    original=request.quality.original,
+                                    validation_policy_version=request.quality.validation_policy_version,
+                                    limit=_MAX_HEALTH_CANDIDATES,
+                                )
+                            )
+                        for artifact in artifacts:
+                            artifact_id = str(artifact["artifact_id"])
+                            if artifact_id not in candidates:
+                                candidates[artifact_id] = dict(artifact)
+            # The read transaction is closed before any file is opened.  The
+            # writer revalidates these records, so the gap is explicit and
+            # cannot turn into a silent reuse.
+            records: dict[str, ArtifactHealth] = {}
+            run_id = f"batch-{batch_id}"
+            for artifact in candidates.values():
+                artifact_id = str(artifact["artifact_id"])
+                record = self._observe_artifact(
+                    artifact,
+                    resolver=resolver,
+                    run_id=run_id,
+                    quality_key=quality_key,
+                )
+                if record is not None:
+                    records[artifact_id] = record
+            return tuple(records.values())
+        except (sqlite3.Error, ContractError, OSError, ValueError):
+            # The writer will see an empty/partial health map and fail closed.
+            return ()
+
+    def _observe_artifact(
+        self,
+        artifact: Any,
+        *,
+        resolver: PathResolver,
+        run_id: str,
+        quality_key: str,
+    ) -> ArtifactHealth | None:
+        if not _artifact_is_valid(artifact):
+            return None
+        artifact_id = str(artifact["artifact_id"])
+        try:
+            output_ref = _parse_json_object(
+                artifact["output_ref_json"], "artifact output reference"
+            )
+            path = path_ref_from_object(output_ref)
+            root = resolver.root_path(path)
+            root_revision = resolver.root_revision(path)
+            expectation = ArtifactExpectation.from_artifact_row(
+                artifact,
+                path=path,
+                root_revision=root_revision,
+                quality_key=quality_key,
+                policy_version=_ARTIFACT_HEALTH_POLICY.version,
+            )
+        except (ContractError, KeyError, TypeError, ValueError):
+            return None
+        try:
+            observer = LocalObserver(
+                root,
+                root_id=path.root_id,
+                kind=path.kind,
+                root_revision=root_revision,
+            )
+            observation = observer.observe(
+                ObservationRequest(
+                    content=expectation.content,
+                    path=path,
+                    run_id=run_id,
+                    check_id=f"artifact-{artifact_id}",
+                    budget=_ARTIFACT_OBSERVATION_BUDGET,
+                )
+            )
+            return assess_observation(
+                expectation, observation, _ARTIFACT_HEALTH_POLICY
+            )
+        except ContractError:
+            return unobserved_health(
+                expectation,
+                state=LocalState.UNKNOWN,
+                reason="observation_rejected",
+                checked_at=_utcnow(),
+                policy=_ARTIFACT_HEALTH_POLICY,
+            )
+        except OSError:
+            return unobserved_health(
+                expectation,
+                state=LocalState.UNREADABLE,
+                reason="observation_failed",
+                checked_at=_utcnow(),
+                policy=_ARTIFACT_HEALTH_POLICY,
+            )
+
+    def _health_map(self, value: object) -> dict[str, ArtifactHealth]:
+        """Parse only fresh records bound to the currently mapped roots.
+
+        A queued command can outlive its preflight.  Dropping stale or
+        re-mapped records here makes every downstream path fail closed instead
+        of treating an old observation as current.
+        """
+        if not isinstance(value, list):
+            return {}
+        resolver = self._path_resolver_snapshot()
+        if resolver is None:
+            return {}
+        now = _utcnow()
+        records: dict[str, ArtifactHealth] = {}
+        for item in value:
+            try:
+                record = ArtifactHealth.from_payload(item)
+            except (ContractError, TypeError, ValueError):
+                continue
+            if not record.is_fresh(now):
+                continue
+            try:
+                revision = resolver.root_revision(record.expectation.path)
+            except ContractError:
+                continue
+            if revision != record.expectation.root_revision:
+                continue
+            records[record.expectation.artifact_id] = record
+        return records
+
+    def _health_allows_reuse(self, health, artifact) -> bool:
+        resolver = self._path_resolver_snapshot()
+        if health is None or resolver is None:
+            return False
+        try:
+            root_revision = resolver.root_revision(health.expectation.path)
+        except ContractError:
+            return False
+        return artifact_health_allows_reuse(
+            health, artifact, now=_utcnow(), root_revision=root_revision
+        )
+
+    @staticmethod
+    def _health_state_for_page(
+        health_by_artifact: dict[str, ArtifactHealth],
+        illust_id: str,
+        page_index: int,
+        output_key: str,
+    ) -> LocalState | None:
+        for record in health_by_artifact.values():
+            expectation = record.expectation
+            if (
+                expectation.illust_id == illust_id
+                and expectation.page_index == page_index
+                and expectation.output_key == output_key
+            ):
+                return record.state
+        return None
+
+    def _root_revision_for(self, output_ref: PathRef) -> int:
+        resolver = self._path_resolver_snapshot()
+        if resolver is None:
+            return 1
+        try:
+            return resolver.root_revision(output_ref)
+        except ContractError:
+            return 1
+
+    def _removal_intent_for(
+        self,
+        conn: sqlite3.Connection,
+        illust_id: str,
+        page_index: int,
+        output_key: str,
+        output_ref: PathRef,
+    ) -> RemovalIntent:
+        revision = self._root_revision_for(output_ref)
+        row = conn.execute(
+            "SELECT safe_payload FROM events WHERE kind = 'removal_intent' "
+            "AND json_extract(safe_payload, '$.illust_id') = ? "
+            "AND json_extract(safe_payload, '$.page_index') = ? "
+            "AND json_extract(safe_payload, '$.output_key') = ? "
+            "AND json_extract(safe_payload, '$.root_revision') = ? "
+            "ORDER BY event_seq DESC LIMIT 1",
+            (illust_id, int(page_index), output_key, int(revision)),
+        ).fetchone()
+        if row is None:
+            return RemovalIntent.NONE
+        info = _parse_json_object(row["safe_payload"], "removal intent")
+        try:
+            return RemovalIntent(str(info["intent"]))
+        except (KeyError, ValueError):
+            raise CorruptDataError("Corrupt removal intent") from None
+
+    def _record_removal_intent(
+        self, conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        batch_id = str(payload["batch_id"])
+        command_id = str(payload["command_id"])
+        illust_id = str(payload["illust_id"])
+        page_index = int(payload["page_index"])
+        output_ref = path_ref_from_object(payload["output_ref"])
+        intent = str(payload["intent"])
+        with self._transaction(conn):
+            batch = self._get_batch_row(conn, batch_id)
+            if batch is None:
+                raise NotFoundError(f"Unknown batch: {batch_id}")
+            if str(batch["phase"]) != "running":
+                raise InvalidStateError("removal intent requires a running batch")
+            job = self._get_job_row(conn, str(batch["job_id"]))
+            if job is None:
+                raise CorruptDataError("Batch references a missing job")
+            request = self._request_from_row(job)
+            self._validate_output_ref(request.output.root_ref, output_ref)
+            existing = self._command_event(conn, command_id)
+            if existing is not None:
+                result = self._command_result(existing)
+                if (
+                    result.get("illust_id") != illust_id
+                    or result.get("page_index") != page_index
+                    or result.get("output_key") != output_ref.target_key
+                    or result.get("intent") != intent
+                ):
+                    raise CommandConflict("command id was already used for another intent")
+                return result
+            revision = self._root_revision_for(output_ref)
+            now = _utcnow()
+            result = {
+                "illust_id": illust_id,
+                "page_index": page_index,
+                "output_key": output_ref.target_key,
+                "root_revision": revision,
+                "intent": intent,
+            }
+            self._insert_event(
+                conn,
+                job_id=str(job["job_id"]),
+                batch_id=batch_id,
+                kind="removal_intent",
+                payload={
+                    **result,
+                    "path": asdict(output_ref),
+                    "result": result,
+                },
+                accepted_command_id=command_id,
+            )
+            return result
+
     def _accept_source_page(
         self, conn: sqlite3.Connection, payload: dict[str, Any]
     ) -> tuple[str, ...]:
         batch_id = str(payload["batch_id"])
         page: SourcePage = payload["page"]
         page_digest = str(payload["page_digest"])
+        health_by_artifact = self._health_map(payload.get("health"))
 
         with self._transaction(conn):
             batch = self._get_batch_row(conn, batch_id)
@@ -1809,6 +2200,26 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                     (batch_id,),
                 ).fetchall()
             }
+            excluded_pages: set[tuple[str, int, str]] = set()
+            for candidate in page.candidates:
+                if candidate.decision != "download":
+                    continue
+                for page_spec in candidate.pages:
+                    if self._removal_intent_for(
+                        conn,
+                        candidate.illust_id,
+                        page_spec.page_index,
+                        page_spec.output_ref.target_key,
+                        page_spec.output_ref,
+                    ) is RemovalIntent.EXCLUDED:
+                        excluded_pages.add(
+                            (
+                                candidate.illust_id,
+                                page_spec.page_index,
+                                page_spec.output_ref.target_key,
+                            )
+                        )
+
             planned: set[str] = set()
             selected_pages: dict[str, list[PageSpec]] = {}
             output_keys: set[str] = set()
@@ -1816,7 +2227,9 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 pages = list(candidate.pages)
                 if candidate.decision == "download":
                     self._validate_page_policy(candidate.page_count, pages, request.quality.all_pages)
-                    if self._candidate_requires_write(conn, candidate, request):
+                    if self._candidate_requires_write(
+                        conn, candidate, request, health_by_artifact, excluded_pages
+                    ):
                         planned.add(candidate.illust_id)
                     for page_spec in pages:
                         self._validate_output_ref(request.output.root_ref, page_spec.output_ref)
@@ -2003,6 +2416,11 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
 
                 for page_spec in pages:
                     output_key = page_spec.output_ref.target_key
+                    excluded = (
+                        candidate.illust_id,
+                        page_spec.page_index,
+                        output_key,
+                    ) in excluded_pages
                     existing = conn.execute(
                         "SELECT * FROM deliveries WHERE job_id = ? AND illust_id = ? "
                         "AND page_index = ? AND quality_key = ? AND output_key = ? "
@@ -2015,7 +2433,13 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                             output_key,
                         ),
                     ).fetchone()
-                    if existing is not None and (request.dedup_policy != "redownload" or receipt is not None):
+                    blocked_state: LocalState | None = None
+                    candidates: list = []
+                    if (
+                        existing is not None
+                        and (request.dedup_policy != "redownload" or receipt is not None)
+                        and (not excluded or existing["state"] == "completed")
+                    ):
                         if existing["state"] == "completed":
                             artifact = conn.execute(
                                 "SELECT * FROM artifacts WHERE delivery_id = ?",
@@ -2029,24 +2453,47 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                                 raise CorruptDataError(
                                     "Completed delivery has invalid artifact evidence"
                                 )
-                            link_delivery_id = str(existing["delivery_id"])
-                            link_artifact_id = str(artifact["artifact_id"])
+                            health = health_by_artifact.get(str(artifact["artifact_id"]))
+                            if self._health_allows_reuse(health, artifact):
+                                self._link_batch_item_page(
+                                    conn,
+                                    batch_id,
+                                    candidate.illust_id,
+                                    page_spec.page_index,
+                                    output_key,
+                                    quality_json,
+                                    delivery_id=str(existing["delivery_id"]),
+                                    artifact_id=str(artifact["artifact_id"]),
+                                )
+                                delivery_ids.append(str(existing["delivery_id"]))
+                                continue
+                            blocked_state = (
+                                health.state if health is not None else LocalState.UNKNOWN
+                            )
                         else:
-                            link_delivery_id = str(existing["delivery_id"])
-                            link_artifact_id = None
-                        self._link_batch_item_page(
-                            conn,
-                            batch_id,
-                            candidate.illust_id,
-                            page_spec.page_index,
-                            output_key,
-                            quality_json,
-                            delivery_id=link_delivery_id,
-                            artifact_id=link_artifact_id,
-                        )
-                        delivery_ids.append(str(existing["delivery_id"]))
-                        continue
+                            self._link_batch_item_page(
+                                conn,
+                                batch_id,
+                                candidate.illust_id,
+                                page_spec.page_index,
+                                output_key,
+                                quality_json,
+                                delivery_id=str(existing["delivery_id"]),
+                                artifact_id=None,
+                            )
+                            delivery_ids.append(str(existing["delivery_id"]))
+                            continue
                     if request.dedup_policy == "trusted":
+                        candidates = self._find_reusable_artifact_candidates(
+                            conn,
+                            job_id=job_id,
+                            illust_id=candidate.illust_id,
+                            page_index=page_spec.page_index,
+                            output_key=output_key,
+                            original=request.quality.original,
+                            validation_policy_version=request.quality.validation_policy_version,
+                            limit=_MAX_HEALTH_CANDIDATES,
+                        )
                         reusable = self._find_reusable_artifact(
                             conn,
                             job_id=job_id,
@@ -2055,6 +2502,8 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                             output_key=output_key,
                             original=request.quality.original,
                             validation_policy_version=request.quality.validation_policy_version,
+                            health_by_artifact=health_by_artifact,
+                            candidates=candidates,
                         )
                         if reusable is not None:
                             # all_pages is a work-selection option, not a page
@@ -2070,6 +2519,16 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                                 artifact_id=str(reusable["artifact_id"]),
                             )
                             continue
+                        if candidates and blocked_state is None:
+                            observed = self._health_state_for_page(
+                                health_by_artifact,
+                                candidate.illust_id,
+                                page_spec.page_index,
+                                output_key,
+                            )
+                            blocked_state = (
+                                observed if observed is not None else LocalState.UNKNOWN
+                            )
                     max_generation_row = conn.execute(
                         "SELECT COALESCE(MAX(generation), 0) AS generation FROM deliveries "
                         "WHERE job_id = ? AND illust_id = ? AND page_index = ? "
@@ -2091,6 +2550,18 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                         "page": asdict(page_spec),
                         "quality": asdict(request.quality),
                     }
+                    new_state = "pending"
+                    new_error_code = None
+                    if excluded:
+                        new_state = "cancelled"
+                        new_error_code = "intent_excluded"
+                    elif blocked_state is not None and blocked_state is not LocalState.MISSING:
+                        new_state = "needs_verification"
+                        new_error_code = (
+                            "artifact_stale_health"
+                            if blocked_state in {LocalState.HASH_MATCH, LocalState.QUICK_MATCH}
+                            else f"artifact_{blocked_state.value}"
+                        )
                     try:
                         conn.execute(
                             "INSERT INTO deliveries("
@@ -2099,8 +2570,7 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                             "output_ref_json, quality_json, quality_key, payload_json, "
                             "source_identity, state, attempts, retry_at, error_code, "
                             "generation, checkpoint_json, prepared_json, created_at, updated_at"
-                            ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, "
-                            "'pending', 0, NULL, NULL, ?, ?, NULL, ?, ?)",
+                            ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, NULL, ?, ?)",
                             (
                                 delivery_id,
                                 job_id,
@@ -2114,6 +2584,8 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                                 quality_key,
                                 canonical_json(delivery_payload),
                                 f"{page.source_id}/{page.pass_id}/{page.entity_id}",
+                                new_state,
+                                new_error_code,
                                 generation,
                                 page.cursor_after_json,
                                 now,

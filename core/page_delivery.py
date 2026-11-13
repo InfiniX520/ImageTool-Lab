@@ -161,6 +161,11 @@ class PageDeliveryExecutor:
     def __init__(self, repository, resolver, *, get=request_get, headers_factory=None,
                  policy=TransferPolicy(), clock=time.monotonic, fault_hook=None,before_request=None):
         self.repository, self.resolver = repository, resolver
+        # The root owner must be the same object used to publish files.  The
+        # repository cannot infer an output root from its database location.
+        bind_roots = getattr(repository, 'bind_path_resolver', None)
+        if callable(bind_roots):
+            bind_roots(resolver)
         self.get, self.headers_factory, self.policy = get, headers_factory, policy
         self.clock, self.fault_hook = clock, fault_hook
         self.before_request=before_request

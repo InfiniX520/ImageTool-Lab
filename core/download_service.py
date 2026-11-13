@@ -308,9 +308,10 @@ def download_image(
         # otherwise a compressed probe could report a different expected length.
         expected_size = get_remote_content_length(target_url, request_headers)
         # P1: a local file whose size happens to equal the remote length is not
-        # trusted as complete.  Trusted historical skips remain the job of the
-        # record_manager checks in the outer orchestration; every other case
-        # performs a real, validated full download.
+        # trusted as complete.  Legacy record_manager skips are historical
+        # orchestration, not U1-A current-file health evidence; the v2 library
+        # path verifies artifact bytes before reuse.  Every other case performs
+        # a real, validated full download.
         retry_attempts = 0
 
         def note_retry(_attempt, _total, _exception) -> None:

@@ -397,13 +397,38 @@ class FollowRepositoryMixin:
             self._insert_event(conn,job_id=job['job_id'],batch_id=batch['batch_id'],kind='source_artist_admitted',payload={'artist_id':payload['artist_id']})
             return True
 
-    def _candidate_requires_write(self, conn, candidate, request):
+    def _candidate_requires_write(self, conn, candidate, request, health_by_artifact=None,
+                                  excluded_pages=None):
+        """Decide the work budget from the same frozen health evidence as reuse.
+
+        A missing health map means no current observation exists; fail closed
+        instead of trusting a database receipt.  This method never opens a file
+        and is called inside the writer transaction.
+        """
         if request.dedup_policy == 'redownload':
             return True
+        if health_by_artifact is None:
+            return True
+        excluded_pages = set() if excluded_pages is None else set(excluded_pages)
         for page in candidate.pages:
-            artifact = self._find_reusable_artifact(conn,job_id='',illust_id=candidate.illust_id,
-                page_index=page.page_index,output_key=page.output_ref.target_key,original=request.quality.original,
-                validation_policy_version=request.quality.validation_policy_version)
-            if artifact is None:
+            if (candidate.illust_id, page.page_index, page.output_ref.target_key) in excluded_pages:
+                continue
+            reusable = False
+            for record in health_by_artifact.values():
+                expectation = getattr(record, 'expectation', None)
+                state = getattr(record, 'state', None)
+                if (expectation is not None
+                        and getattr(state, 'value', state) == 'hash_match'
+                        and expectation.illust_id == candidate.illust_id
+                        and expectation.page_index == page.page_index
+                        and expectation.output_key == page.output_ref.target_key):
+                    row = conn.execute(
+                        'SELECT * FROM artifacts WHERE artifact_id = ?',
+                        (expectation.artifact_id,),
+                    ).fetchone()
+                    if row is not None and expectation.matches_row(row):
+                        reusable = True
+                        break
+            if not reusable:
                 return True
         return False

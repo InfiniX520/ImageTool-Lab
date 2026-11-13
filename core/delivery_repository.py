@@ -1242,7 +1242,7 @@ class DeliveryRepositoryMixin:
             ),
         )
 
-    def _find_reusable_artifact(
+    def _find_reusable_artifact_candidates(
         self,
         conn: sqlite3.Connection,
         *,
@@ -1252,16 +1252,25 @@ class DeliveryRepositoryMixin:
         output_key: str,
         original: bool,
         validation_policy_version: int,
-    ):
+        limit: int = 16,
+    ) -> list:
+        """Return quality-matching historical artifacts, newest first.
+
+        This is only candidate selection for the file-I/O preflight.  Reuse
+        itself must go through _find_reusable_artifact with current health.
+        """
+        if type(limit) is not int or not 1 <= limit <= 64:
+            raise _lib().LibraryError("Invalid artifact candidate limit")
         rows = conn.execute(
             "SELECT a.* FROM artifacts AS a "
             "JOIN deliveries AS ad ON ad.delivery_id = a.delivery_id "
             "WHERE ad.job_id != ? AND a.illust_id = ? AND a.page_index = ? "
             "AND a.output_key = ? AND a.verification = 'structure_checked' "
             "AND a.size IS NOT NULL AND a.sha256 IS NOT NULL "
-            "ORDER BY a.completed_at DESC, a.artifact_id DESC",
-            (job_id, illust_id, int(page_index), output_key),
+            "ORDER BY a.completed_at DESC, a.artifact_id DESC LIMIT ?",
+            (job_id, illust_id, int(page_index), output_key, int(limit)),
         ).fetchall()
+        candidates = []
         for artifact in rows:
             if not _artifact_is_valid(artifact):
                 continue
@@ -1276,7 +1285,47 @@ class DeliveryRepositoryMixin:
                 and quality.get("validation_policy_version")
                 == validation_policy_version
             ):
-                return artifact
+                candidates.append(artifact)
+        return candidates
+
+    def _find_reusable_artifact(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        job_id: str,
+        illust_id: str,
+        page_index: int,
+        output_key: str,
+        original: bool,
+        validation_policy_version: int,
+        health_by_artifact=None,
+        candidates=None,
+    ):
+        """Select a current, hash-matched artifact; never a bare receipt.
+
+        health_by_artifact is the frozen preflight evidence.  Without it this
+        returns None (fail closed): a database row alone is history, not proof
+        that the file still exists with the recorded bytes.
+        """
+        if health_by_artifact is None:
+            return None
+        if candidates is None:
+            candidates = self._find_reusable_artifact_candidates(
+                conn,
+                job_id=job_id,
+                illust_id=illust_id,
+                page_index=page_index,
+                output_key=output_key,
+                original=original,
+                validation_policy_version=validation_policy_version,
+            )
+        for artifact in candidates:
+            health = health_by_artifact.get(str(artifact["artifact_id"]))
+            if health is None or not health.reusable:
+                continue
+            if not health.expectation.matches_row(artifact):
+                continue
+            return artifact
         return None
 
     def _ensure_claimed_page_link(

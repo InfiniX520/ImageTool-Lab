@@ -16,6 +16,8 @@ from contextlib import closing
 
 import pytest
 
+from core.app_paths import AppPaths
+from core.library_paths import PathResolver
 from core.library_repository import (
     CommandConflict,
     CorruptDataError,
@@ -1116,7 +1118,14 @@ def test_all_pages_flag_is_not_page_byte_quality(tmp_path):
     with LibraryRepository(db_path) as repo:
         first, _page, first_ids = _start(repo, _request("req-1", all_pages=True))
         _claim(repo, first_ids[0], first["batch_id"])
-        _complete(repo, first_ids[0], first["batch_id"])
+        payload = b"x" * 1000
+        digest = hashlib.sha256(payload).hexdigest()
+        _complete(repo, first_ids[0], first["batch_id"], size=len(payload), prefix=digest)
+        target = tmp_path / ROOT / "100_p0.jpg"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(payload)
+        # Current health needs the same root owner that published the file.
+        repo.bind_path_resolver(PathResolver(AppPaths(tmp_path)))
         repo.finish_source(first["batch_id"], coverage_complete=True)
         assert repo.settle_batch(first["batch_id"]) is True
 

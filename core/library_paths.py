@@ -71,6 +71,27 @@ class PathResolver:
     def external_roots(self) -> dict[str, Path]:
         return dict(self._external)
 
+    def root_path(self, ref: PathRef) -> Path:
+        """Return the immutable local root bound to a validated PathRef."""
+        if not isinstance(ref, PathRef):
+            raise ContractError("Expected a validated path reference")
+        if ref.kind == "project":
+            return self.project_root
+        try:
+            return self._external[ref.root_id.casefold()]
+        except KeyError as exc:
+            raise ContractError("External output root has not been mapped") from exc
+
+    def root_revision(self, ref: PathRef) -> int:
+        """Revision of the mapping used for observations.
+
+        Roots cannot be moved or replaced in this version, so every valid
+        binding is revision 1.  A future remap must return a new number rather
+        than silently reusing old observations.
+        """
+        self.root_path(ref)
+        return 1
+
     def display(self, ref: PathRef) -> str:
         """A UI label from the known mapping; no filesystem access."""
         if ref.kind == 'project':
@@ -83,13 +104,7 @@ class PathResolver:
     def resolve(self, ref: PathRef) -> Path:
         if not isinstance(ref, PathRef):
             raise ContractError("Expected a validated path reference")
-        if ref.kind == "project":
-            root = self.project_root
-        else:
-            try:
-                root = self._external[ref.root_id.casefold()]
-            except KeyError as exc:
-                raise ContractError("External output root has not been mapped") from exc
+        root = self.root_path(ref)
         target = root.joinpath(*ref.relative_path.split("/"))
         _reject_links(target)
         resolved = _canonical_path(target.resolve())

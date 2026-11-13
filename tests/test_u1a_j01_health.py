@@ -481,16 +481,48 @@ def test_a_later_task_never_rewrites_or_deletes_the_historical_receipt(repo, tmp
     )
 
 
-def test_intentional_removal_intent_suppresses_automatic_redownload_and_keeps_the_receipt():
-    pytest.skip(
-        "有意移除入口尚未实现（明确未实现断言，不是 xfail）：core/delivery_repository.py 与 "
-        "core/library_repository.py 没有保存用户删除/排除意图的表或命令；"
-        "core/preservation_policy.py 只有纯决策 RemovalIntent，accept/plan 未调用。"
-        "实现后本用例必须断言：①同一 root/作品/页存在 EXCLUDED 意图时，新任务不产生修复交付、"
-        "HTTP 调用为 0、pages.pending 与 pages.needs_verification 均为 0；"
-        "②旧 artifact 行、delivery 行与该批次计数逐字段不变；"
-        "③撤销意图后重新运行能再次发现缺失并允许补齐，撤销不得被当成已核验完成。"
+def test_intentional_removal_intent_suppresses_automatic_redownload_and_keeps_the_receipt(repo, tmp_path):
+    """EXCLUDED is a user decision, not a repair order; revocation is not a match."""
+    _, first_delivery = first_task(repo, tmp_path)
+    recorded = receipt(repo, first_delivery)
+    target_path(tmp_path).unlink()
+
+    job = submit_task(repo, "second-intent")
+    repo.record_removal_intent(
+        job["batch_id"], ARTWORK, 0, OUTPUT_REF,
+        intent="excluded", command_id="intent-excluded",
     )
+    accepted = accept_page(repo, job["batch_id"])
+    counts = pages(repo, job)
+    report = state_report(repo, job, tmp_path)
+    assert counts["total"] == 1, report
+    assert counts["pending"] == 0, report
+    assert counts["needs_verification"] == 0, report
+    assert counts["cancelled"] == 1, report
+    assert len(accepted) == 1, accepted
+    assert repo.get_delivery(accepted[0])["state"] == "cancelled", report
+    assert repo.list_dispatchable(job["job_id"]) == (), report
+    assert not target_path(tmp_path).exists(), "EXCLUDED must not recreate the file"
+    assert receipt(repo, first_delivery) == recorded
+    assert len(artifact_rows(repo.database_path)) == 1
+
+    repo.finish_source(job["batch_id"], coverage_complete=True)
+    assert repo.settle_batch(job["batch_id"]) is True
+    assert repo.get_batch(job["batch_id"])["phase"] == "partial"
+
+    third = submit_task(repo, "third-intent")
+    repo.record_removal_intent(
+        third["batch_id"], ARTWORK, 0, OUTPUT_REF,
+        intent="none", command_id="intent-revoked",
+    )
+    repair_ids = accept_page(repo, third["batch_id"])
+    assert pages(repo, third)["pending"] == 1, state_report(repo, third, tmp_path)
+    outcome = run(repo, third, repair_ids[0], executor(repo, tmp_path, Transport(Response())))
+    assert outcome.state == "completed", outcome
+    assert target_path(tmp_path).read_bytes() == PNG_BYTES
+    assert pages(repo, third)["new_completed"] == 1
+    assert pages(repo, third)["existing"] == 0
+    assert receipt(repo, first_delivery) == recorded
 
 
 def test_removal_intent_decision_never_offers_an_automatic_redownload():
