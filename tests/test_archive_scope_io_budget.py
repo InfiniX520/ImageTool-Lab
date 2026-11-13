@@ -130,12 +130,12 @@ def drain(source):
 
 
 def test_explicit_files_never_rescan_their_parent_per_file(tmp_path):
-    """n distinct files in one directory need no directory read at all.
+    """n distinct files in one directory need one listing, never n listings.
 
-    The spelling of a selection only matters when two selections share one
-    display key, so the enumerator no longer reads a parent directory for every
-    selected file.  Before the fix this shape visited n * (n/2) directory
-    entries: 3,240 for 80 files and 51,360 for 320.
+    Since AR4-05 every explicit selection is resolved to its real directory entry,
+    so the parent is listed once per enumeration and reused for all selections in
+    it.  Before the earlier fix this shape visited n * (n/2) directory entries:
+    3,240 for 80 files and 51,360 for 320.
     """
     for count in (80, 160):
         root = tmp_path / ("flat-%d" % count)
@@ -151,15 +151,16 @@ def test_explicit_files_never_rescan_their_parent_per_file(tmp_path):
         page = source.page()
         assert paths(page) == names
         assert page.completion.full
-        assert recorder.scan_count == 0
-        assert recorder.scanned_items == 0
+        # Exactly one listing of the one parent for every selection in it.
+        assert recorder.scan_count == 1
+        assert recorder.scanned_items == count
         # One lstat per selection to capture it, one for the closing check.
         assert 2 * count <= len(recorder.lstat_paths) <= 2 * count + 40
         assert source.identity_comparisons == count
 
 
 def test_explicit_file_io_grows_with_n_and_not_with_n_squared(tmp_path):
-    """n versus 2n: metadata doubles, directory reads stay at zero."""
+    """n versus 2n: metadata doubles, directory reads stay constant."""
     measured = {}
     for count in (160, 320):
         root = tmp_path / ("growth-%d" % count)
@@ -172,7 +173,7 @@ def test_explicit_file_io_grows_with_n_and_not_with_n_squared(tmp_path):
                                  ScopePolicy(max_seconds=60), _io=recorder.adapter())
         source.page()
         measured[count] = (recorder.scan_count, len(recorder.lstat_paths))
-    assert measured[160][0] == measured[320][0] == 0
+    assert measured[160][0] == measured[320][0] == 1
     assert measured[320][1] <= 2.2 * measured[160][1]
     assert measured[320][1] < 320 * 10
 
@@ -200,8 +201,10 @@ def test_case_alias_selections_read_each_parent_once(tmp_path):
         # One pass over the root and one over the shared parent, whatever n is.
         assert recorder.scan_count == 2
         assert recorder.scanned_items <= 2 * count + 4
-        assert {str(record["path"].name) for record in recorder.scandir_calls} == {
-            root.name, "gallery"}
+        # Either spelling may be the one that was listed; it is still one pass over
+        # each physical directory, resolved by identity rather than by path string.
+        listed = {os.path.normcase(record["path"].name) for record in recorder.scandir_calls}
+        assert listed == {os.path.normcase(root.name), "gallery"}
         duplicate = [item for item in page.exclusions
                      if item.reason == "duplicate_selection"]
         assert len(duplicate) == len(aliases)
@@ -249,13 +252,14 @@ def test_repeated_selection_of_one_file_does_not_rescan(tmp_path):
                              ScopePolicy(max_seconds=60), _io=recorder.adapter())
     page = source.page()
     assert paths(page) == names
-    assert recorder.scan_count == 0
+    # One listing of the root and one of "gallery" serve all repeated selections.
+    assert recorder.scan_count == 2
     assert len([item for item in page.exclusions
                 if item.reason == "duplicate_selection"]) == 3 * len(names)
 
 
 def test_deep_directory_selections_stay_linear_in_files_and_depth(tmp_path):
-    """Depth adds one ancestor check per file; it never multiplies the scans."""
+    """Depth adds one ancestor check and one parent listing, never a scan per file."""
     measured = {}
     deep = "a/b/c/d/e/f"
     for count in (60, 120):
@@ -271,7 +275,8 @@ def test_deep_directory_selections_stay_linear_in_files_and_depth(tmp_path):
                                  ScopePolicy(max_seconds=60), _io=recorder.adapter())
         page = source.page()
         assert page.completion.full
-        assert recorder.scan_count == 0
+        # a, a/b, ... a/b/c/d/e/f: one listing per distinct parent, not per file.
+        assert recorder.scan_count == 7
         measured[count] = len(recorder.lstat_paths)
     # 60 -> 120 files: 6 ancestor checks plus 2 file checks each.
     assert measured[120] <= 2.2 * measured[60]
@@ -324,8 +329,11 @@ def test_raw_name_index_never_opens_an_excluded_output_directory(tmp_path):
     assert paths(page) == ["gallery/a.jpg"]
     assert page.completion.full
     opened = [record["path"] for record in recorder.scandir_calls]
-    assert all(path == root for path in opened)
+    # Resolving spellings may list an ordinary parent such as "gallery", but never
+    # a managed output or credential directory, and never outside the root.
+    assert all(path == root or root in path.parents for path in opened)
     assert not [path for path in opened if "archive_store" in path.parts]
+    assert {path.name for path in opened} <= {root.name, "gallery"}
 
 
 def test_raw_name_index_refuses_a_directory_that_keeps_changing(tmp_path):
