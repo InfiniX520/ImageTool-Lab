@@ -128,6 +128,30 @@ DDL 改动，因此：
 - v3（含审计期间的 schema 3 草稿）与 v2 一律明确拒绝，错误信息写清原因；
 - 旧批次/旧计划不改写：它们仍引用旧 `(asset_id, revision)`，重开、重放、审计判定一致。
 
+## 7.1 schema 4 → 5（R4，AR4-07）
+
+schema 5 与 4 的**表结构相同**，只多两条显式命名的覆盖索引（顺序即列前缀）：
+
+```text
+CREATE INDEX idx_archive_contents_digest ON archive_contents(sha256, size_bytes, asset_id, revision)
+CREATE INDEX idx_archive_assets_path   ON archive_assets(path_key, asset_id)
+```
+
+- 摘要查询从 `SCAN + TEMP B-TREE` 变为单条覆盖索引查找；路径所有者查询从扫描
+  `sqlite_autoindex_archive_assets_1` 变为 `(path_key, asset_id)` 查找，触发器与
+  `_replacement_conflicts` 的那次扫描一起消失。
+- `_check_existing_objects` 仍要求对象逐条相等：v5 库少一条索引、或同名索引换了列前缀，
+  都会得到 `Missing or incompatible archive object: …`，不会静默退化为扫描。
+- **v4 草案显式拒绝（不迁移）**：工作区里 1,534 个 v4 库全是 `.runtime` 合成临时库、
+  项目树内 0 个，没有生产库；因此 `_inspect_source` / `_inspect_source_for_migration`
+  共用 `_refuse_source_version`，文案点名 "schema 4 acceptance-event draft, superseded by
+  schema 5; no production library exists" 并给出"从 schema 1 重建"的动作，源文件与备份
+  都不被改写。v2 / v3 / 未知 / 未来版本同样拒绝。
+- 迁移入口仍只接受 v1：`migrate_archive_copy` 逐条执行 `ARCHIVE_DDL` 时自动建立两条索引，
+  随后 `_check_existing_objects`、完整性、外键与维护审计照常复核；已是 v5 的副本再次迁移
+  返回 `already_current` 且 `sqlite_master` 不变。
+- 计划协议（plan 3 / receipt 2）与旧计划正文不变；旧计划不可跨版本搬运，临时库从 v1 重建。
+
 ## 8. 验收矩阵
 
 每个正向都检查最后路径绑定、全部历史行和恢复路径，而不只是"不抛异常"：
