@@ -1,6 +1,6 @@
 # JpgPng 文档导航
 
-**当前接续（2026-11-14）**：f7c389b（产品 48a6968）独立复审：现有非 Tk 1,827 通过/4 跳过，Tk 首轮同进程 9/9；新增 12 项边界为 10 失败/2 通过，确认 RFB-01..06（1 P1、5 P2）。旧 RFA 12/RF 15/UA 14 仍通过。未改产品、未部署，日常目录保持 5465e0c。 先读[最新审计](audits/2026-11-14-u1a-rfa-recheck/README.md)和[下一轮执行指导](audits/2026-11-14-u1a-rfa-recheck/DEVELOPMENT_GUIDE.md)；先关闭 RFB 六项再评估 W5。原[修复记录](maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md)与[契约 v3](optimization/2026-11-14/U1A_STATE_CONTRACT_V3.md)保留原文。
+**当前接续（2026-11-14）**：`fix/a1-u1a-rfb-20261114`（产品 `5c2f5fc`）关闭 RFB-01..06（1 P1、5 P2：提交前严格确认 pass、进度不可用即完成式尝试、清理 EOF 与检查预算分离、节点集合内展开中间 handover、账本不可读上抛、每页字节/时间硬限额）。12 项 RFB 探针 12/12；非 Tk 1,893 项 1,889 通过/4 跳过；Tk 逐条隔离 9/9（同进程 Tk 重初始化会 TclError，失败记录保留）。先读[修复记录](maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md)与[契约 v4](optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md)；审计报告、v3 契约与旧修复记录保留原文。未合并 main、未部署、未触碰真实图库/账号/网络，日常目录保持 5465e0c。
 
 下载器 P0—P8、独立整理 CLI E1-2 已交付；E1-3 分类小样、E1-4 分批整理待实施。2026-11-11 三项目审计另发现需修复的库完整性和依赖风险，详见下方审计报告；历史交付不代表已消除这些问题。日常使用从根目录的说明进入，这里集中索引计划、当前进度和历史材料。
 
@@ -19,7 +19,7 @@
 
 ## 当前进度与计划
 
-- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：当前审计 f7c389b / 产品 48a6968；原反例通过，新增 RFB-01..06 待修，再评估 W5。
+- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：当前固定 5c2f5fc；RFB-01..06 已按行为关闭（见第 4J 节），下一步是 W5 与已登记遗留。
 - [前置接受事务复审与开发指导](audits/2026-11-13-a1-acceptance/README.md)：AR4、修复复核、R0–R6 和版本证据。
 - [U1-A/J-01 生产接线评审](audits/2026-11-13-u1a-wiring/README.md)：复用收据不等于当前磁盘健康；7 项独立红测试与 W0–W6。
 - [上一轮后续实现审计](audits/2026-11-12-a1-final/README.md)：历史 AR3、N0–N6 与原始证据，不能当新树结果。
@@ -35,6 +35,7 @@
 
 ## 最近交付与整理
 
+- [2026-11-14 U1-A RFB 修复记录](maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md)：RFB-01..06 关闭（确认 pass、进度推进、清理 EOF、中间 handover、账本故障、每页预算），1,893 项全量与合成测量数字。
 - [2026-11-14 U1-A RFA 修复记录](maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md)：RFA-01..07 关闭、审计追加 P2 修复、1,831 项全量与合成测量数字。
 - [2026-11-11 三项目详细审计](audits/2026-11-11/README.md)：JpgPng、gallery-dl、PixivUtil2 的功能/质量/性能/安全/维护对比，附问题明细、检索覆盖、离线复现和适用条件；未迁移或修改生产代码。
 - [gallery-dl、PixivUtil2 源码快照](../../references/pixiv_downloaders/2026-11-11/README.md)：完整源码、固定提交、原包及逐文件摘要；获取记录保留当时状态，本轮审计结论见上一项。
