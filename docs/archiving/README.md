@@ -40,6 +40,7 @@
 | [上一轮后续实现审计](../audits/2026-11-12-a1-final/README.md) | 历史 AR3 与 N0–N6，保留原结论 |
 | [A1 修复后复审](../audits/2026-11-12-a1-recheck/README.md) | 上轮 AR2 问题和 F0–F5 的历史依据 |
 | [候选→观察→内容代次交接设计](A1_IDENTITY_HANDOFF.md) | AR2-03/04/07 的四类身份、状态机、路径键与测试矩阵 |
+| [A1 绑定令牌与幂等协议](A1_BINDING_TOKENS.md) | R1/AR4-01/03/06 的三个版本、期望令牌、写入次序与重放/失败语义 |
 | [A1 修复维护记录](../maintenance/2026-11-12_jpgpng_a1_repair.md) | 上批实际修改、测试计数、检查点和未闭环项 |
 | [A1 复审修复记录](../maintenance/2026-11-12_jpgpng_a1_recheck_fix.md) | F1/F2/F4 提交、并行 F3/F5、验收计数与残余边界 |
 

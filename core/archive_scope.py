@@ -796,12 +796,39 @@ class ContentResolution:
     # historical placeholder the observation was probed with; it is not a binding
     # and must never be used as an expected old value.
     expected_binding_absent: bool = False
+    # The exact acceptance the binding pointed at when this decision was resolved.
+    # Together with previous_content and expected_root_revision it is the immutable
+    # expectation token the writer compares before inserting any row.  None means
+    # "the binding had no acceptance" (an index-only binding created by a plan),
+    # never "do not check": "there was no binding" is expected_binding_absent.
+    expected_acceptance_id: str | None = None
+    # The root mapping generation that acceptance recorded.  None belongs only to
+    # an index-only binding, which never claimed a physical object.
+    expected_root_revision: int | None = None
 
     def __post_init__(self):
         if not isinstance(self.kind, ResolutionKind):
             raise ContractError("Invalid content resolution kind")
         if type(self.expected_binding_absent) is not bool:
             raise ContractError("Invalid absent-binding flag")
+        if self.expected_acceptance_id is not None and (
+                not isinstance(self.expected_acceptance_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.expected_acceptance_id) is None):
+            raise ContractError("Invalid expected acceptance identity")
+        if self.expected_root_revision is not None:
+            _integer(
+                self.expected_root_revision, "expected binding root revision",
+                0, 2**63 - 1,
+            )
+        if self.expected_binding_absent:
+            if (self.expected_acceptance_id is not None
+                    or self.expected_root_revision is not None):
+                raise ContractError(
+                    "An absent binding cannot carry an acceptance token")
+        elif ((self.expected_acceptance_id is None)
+                != (self.expected_root_revision is None)):
+            raise ContractError(
+                "A binding expectation needs both its acceptance and root generation")
         if not isinstance(self.candidate, CandidateSnapshot):
             raise ContractError("Invalid content resolution candidate")
         for value, name in ((self.content, "content"),
@@ -838,22 +865,32 @@ class ContentResolution:
 def _resolution(
     kind: ResolutionKind, candidate: CandidateSnapshot,
     content: ContentVersion | None, previous: ContentVersion | None,
-    reason: str, *, next_action: str = "none",
+    reason: str, *, binding: ContentBinding | None, next_action: str = "none",
     requires_confirmation: bool = False, scope_complete: bool = True,
-    expected_binding_absent: bool = False,
 ) -> ContentResolution:
+    """Build one decision, freezing the binding generation it was computed from.
+
+    ``binding`` is the current binding the resolver read, or None when the path had
+    none.  The token is derived here and only here, so every resolved decision
+    carries the exact acceptance and root generation the writer must still see.
+    """
+    if binding is not None and not isinstance(binding, ContentBinding):
+        raise ContractError("Invalid existing content binding")
     return ContentResolution(
         kind, candidate, content, previous, reason, next_action,
-        requires_confirmation, scope_complete, expected_binding_absent,
+        requires_confirmation, scope_complete,
+        expected_binding_absent=binding is None,
+        expected_acceptance_id=None if binding is None else binding.acceptance_id,
+        expected_root_revision=None if binding is None else binding.root_revision,
     )
 
 
 def _unresolved(
     kind: ResolutionKind, candidate: CandidateSnapshot, reason: str,
-    next_action: str,
+    next_action: str, *, binding: ContentBinding | None,
 ) -> ContentResolution:
     return _resolution(
-        kind, candidate, None, None, reason, next_action=next_action,
+        kind, candidate, None, None, reason, binding=binding, next_action=next_action,
         requires_confirmation=True, scope_complete=False,
     )
 
@@ -878,39 +915,54 @@ def resolve_content_version(
     never authorize adopting a generation whose owner is unknown.  Two paths over
     one physical object (hardlinks) carry the same asset identity from the
     enumerator, so they still reuse one generation.
+
+    Every returned decision freezes the exact binding generation it was computed
+    from - the content key, the acceptance it points at and that acceptance's root
+    mapping generation.  The writer compares that token before inserting anything,
+    so a decision produced before another acceptance, root remap or same-content
+    physical replacement is refused instead of silently overwriting the newer
+    evidence.  "No binding" is its own value (``expected_binding_absent``), never a
+    None that also means "do not check".
     """
     if not isinstance(candidate, CandidateSnapshot) or not isinstance(observed, ObservedFile):
         raise ContractError("Expected a candidate and its observation")
+
+    def decision(*arguments: object, **keywords: object) -> ContentResolution:
+        return _resolution(*arguments, binding=existing, **keywords)
+
+    def refusal(*arguments: object, **keywords: object) -> ContentResolution:
+        return _unresolved(*arguments, binding=existing, **keywords)
+
     if observed.candidate != candidate:
-        return _unresolved(
+        return refusal(
             ResolutionKind.CONFLICT, candidate, "candidate_mismatch", "reobserve")
     if not observed.digest_complete or observed.content is None:
-        return _unresolved(
+        return refusal(
             ResolutionKind.CONFLICT, candidate, "observation_incomplete", "reobserve")
     if (observed.content.sha256 is None or observed.observed_size is None
             or observed.observed_mtime_ns is None or observed.observed_identity is None):
-        return _unresolved(
+        return refusal(
             ResolutionKind.NEEDS_CONFIRMATION, candidate,
             "physical_facts_unavailable", "reobserve")
     if candidate.physical_identity is None:
-        return _unresolved(
+        return refusal(
             ResolutionKind.NEEDS_CONFIRMATION, candidate,
             "candidate_physical_identity_missing", "reobserve")
     if observed.observed_identity != candidate.physical_identity:
-        return _unresolved(
+        return refusal(
             ResolutionKind.CONFLICT, candidate,
             "physical_identity_changed_during_observation", "reobserve")
     if observed.observed_size != candidate.size_bytes:
-        return _unresolved(
+        return refusal(
             ResolutionKind.CONFLICT, candidate, "size_changed_during_observation",
             "reobserve")
     if observed.observed_mtime_ns != candidate.mtime_ns:
-        return _unresolved(
+        return refusal(
             ResolutionKind.CONFLICT, candidate, "mtime_changed_during_observation",
             "reobserve")
     observed_content = observed.content
     if observed_content.size_bytes != observed.observed_size:
-        return _unresolved(
+        return refusal(
             ResolutionKind.CONFLICT, candidate, "observed_content_size_mismatch",
             "reobserve")
 
@@ -922,9 +974,9 @@ def resolve_content_version(
                 and known_content.asset_id == observed_content.asset_id
                 and known_content.sha256 == observed_content.sha256
                 and known_content.size_bytes == observed_content.size_bytes):
-            return _resolution(
+            return decision(
                 ResolutionKind.REUSE, candidate, known_content, None,
-                "known_content_first_binding", expected_binding_absent=True)
+                "known_content_first_binding")
         baseline_revision = max(
             observed.expected_content.revision, observed_content.revision) + 1
         baseline = ContentVersion(
@@ -933,9 +985,9 @@ def resolve_content_version(
         )
         # No previous binding exists, so previous_content stays None: the probe the
         # observation was taken with is not a bound generation.
-        return _resolution(
+        return decision(
             ResolutionKind.BASELINE, candidate, baseline, None,
-            "first_observation_baseline", expected_binding_absent=True)
+            "first_observation_baseline")
 
     if not isinstance(existing, ContentBinding):
         raise ContractError("Invalid existing content binding")
@@ -958,11 +1010,11 @@ def resolve_content_version(
     )
     if same_object is False:
         if not replacement_confirmed:
-            return _unresolved(
+            return refusal(
                 ResolutionKind.NEEDS_CONFIRMATION, candidate,
                 "physical_object_replaced", "confirm_same_name_replacement")
         if content_matches:
-            return _resolution(
+            return decision(
                 ResolutionKind.REPLACEMENT, candidate, previous, previous,
                 "confirmed_replacement_same_content")
         revision = max(
@@ -973,7 +1025,7 @@ def resolve_content_version(
             previous.asset_id, revision, observed_content.size_bytes,
             observed_content.sha256,
         )
-        return _resolution(
+        return decision(
             ResolutionKind.REPLACEMENT, candidate, replacement, previous,
             "confirmed_physical_replacement")
     if previous.sha256 is None:
@@ -985,11 +1037,11 @@ def resolve_content_version(
             previous.asset_id, revision, observed_content.size_bytes,
             observed_content.sha256,
         )
-        return _resolution(
+        return decision(
             ResolutionKind.BASELINE, candidate, baseline, previous,
             "unknown_history_baseline")
     if content_matches:
-        return _resolution(
+        return decision(
             ResolutionKind.REUSE, candidate, previous, previous,
             "same_physical_object_same_content")
     if same_object is None:
@@ -999,10 +1051,10 @@ def resolve_content_version(
                 previous.asset_id, revision, observed_content.size_bytes,
                 observed_content.sha256,
             )
-            return _resolution(
+            return decision(
                 ResolutionKind.REPLACEMENT, candidate, replacement, previous,
                 "confirmed_replacement_unknown_prior_identity")
-        return _unresolved(
+        return refusal(
             ResolutionKind.NEEDS_CONFIRMATION, candidate,
             "root_generation_changed" if root_generation_differs
             else "previous_physical_identity_unknown",
@@ -1012,7 +1064,7 @@ def resolve_content_version(
         previous.asset_id, revision, observed_content.size_bytes,
         observed_content.sha256,
     )
-    return _resolution(
+    return decision(
         ResolutionKind.NEW_REVISION, candidate, newer, previous,
         "same_physical_object_content_changed")
 
