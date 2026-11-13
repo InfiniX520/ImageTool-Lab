@@ -286,6 +286,10 @@ class PreflightSnapshot:
     def page(self, key: PageKey) -> PageSnapshot | None:
         return self.pages.get(key.storage_key)
 
+    def __len__(self) -> int:
+        """Number of recorded health observations (diagnostics only)."""
+        return sum(len(page.observed) for page in self.pages.values())
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "schema": self.schema,
