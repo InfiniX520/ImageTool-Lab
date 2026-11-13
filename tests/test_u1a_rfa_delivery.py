@@ -325,9 +325,12 @@ def test_the_cleanup_window_rotates_past_a_stuck_row(tmp_path, monkeypatch):
         assert cleanup_events(repo, stuck)[-1]["outcome"] == "failed"
         assert cleanup_events(repo, second)[-1]["outcome"] == "cleaned"
         assert cleanup_events(repo, third)[-1]["outcome"] == "cleaned"
-        # The cursor moved past the whole window, so the stuck row is retried
-        # on the next pass instead of occupying every window.
-        assert service._cleanup_cursor >= max(int(fact["rowid"]) for fact in window)
+        # Both tiers proved EOF in that pass, so their cursors wrapped to the
+        # start (contract v4 Sec.4: only a proven end of queue wraps).  The
+        # stuck row is retried by the next pass instead of occupying every
+        # window, which the assertions below still verify.
+        assert service._cleanup_cursor == 0
+        assert service._cleanup_retry_cursor == 0
         service._sweep_cleanup(200)
         assert cleanup_events(repo, stuck)[-1]["outcome"] == "cleaned"
         assert not list(root.rglob("*.part"))
