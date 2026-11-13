@@ -140,13 +140,16 @@ class FollowRepositoryMixin:
                 'GROUP BY bi.artist_id ORDER BY bi.artist_id LIMIT ?', (job_id,after,limit)).fetchall()
         return tuple(dict(row) for row in rows)
 
-    def carry_unresolved_items(self,batch_id,*,after='',limit=100,enforce_health=True):
+    def carry_unresolved_items(self,batch_id,*,after='',limit=100,enforce_health=True,health=None):
         _lib()._validate_identifier(batch_id,'batch id')
         if not isinstance(after,str) or (after and not after.isdecimal()) or type(limit) is not int or not 1<=limit<=200:
             raise _lib().LibraryError('Invalid unresolved item page')
-        if type(enforce_health) is not bool:
-            raise _lib().LibraryError('Invalid carry health flag')
-        return self._enqueue('carry_unresolved_items',{'batch_id':batch_id,'after':after,'limit':limit,'enforce_health':enforce_health})
+        if enforce_health is not True:
+            raise _lib().LibraryError('Carry health verification cannot be disabled')
+        if health is not None and not isinstance(health,list):
+            raise _lib().LibraryError('Invalid carry health evidence')
+        return self._enqueue('carry_unresolved_items',{'batch_id':batch_id,'after':after,'limit':limit,
+            'enforce_health':enforce_health,'health':[] if health is None else health})
 
     def _carry_unresolved_items(self,conn,payload):
         lib=_lib()
@@ -174,6 +177,7 @@ class FollowRepositoryMixin:
                      canonical_json(reasons),item['required_pages_json'],item['result_state'],item['bookmarks'],item['ai_flag'],canonical_json(provenance),now,now))
                 self._copy_batch_item_page_links(
                     conn,item['batch_id'],batch['batch_id'],item['illust_id'],
+                    health_by_artifact=self._health_map(payload.get('health')),
                     enforce_completed_health=bool(payload.get('enforce_health')),
                 )
                 self._refresh_batch_item_result(conn,batch['batch_id'],item['illust_id'],now)

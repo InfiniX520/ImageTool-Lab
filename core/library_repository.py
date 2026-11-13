@@ -1194,16 +1194,26 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
 
     def carry_unresolved_items(self, batch_id: str, *, after: str = "", limit: int = 100,
                                 enforce_health: bool = True) -> Any:
-        if type(enforce_health) is not bool:
-            raise LibraryError("enforce_health must be boolean")
+        if enforce_health is not True:
+            raise LibraryError("Carry health verification cannot be disabled")
+        if not isinstance(after, str) or (after and not after.isdecimal()):
+            raise LibraryError("Invalid unresolved item page")
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise LibraryError("Invalid unresolved item page")
+        health = None
+        if enforce_health:
+            records = self._preflight_carry_health(batch_id, after, limit)
+            health = [record.to_payload() for record in records]
         batch = self.get_batch(batch_id)
         request = self.get_request(str(batch["job_id"]))
         if request.query.source == "follow":
             return super().carry_unresolved_items(
-                batch_id, after=after, limit=limit, enforce_health=enforce_health
+                batch_id, after=after, limit=limit, enforce_health=enforce_health,
+                health=health,
             )
         return self.carry_query_unresolved_items(
-            batch_id, after=after, limit=limit, enforce_health=enforce_health
+            batch_id, after=after, limit=limit, enforce_health=enforce_health,
+            health=health,
         )
 
     def admit_source_artist(self, batch_id: str, artist_id: str) -> Any:
@@ -1494,8 +1504,6 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         would bypass the health decision made by the accept path.
         """
         resolver = self._path_resolver_snapshot()
-        if resolver is None:
-            return None
         records: dict[str, ArtifactHealth] = {}
         try:
             with contextlib_closing(self._readonly_connection()) as conn:
@@ -1506,21 +1514,28 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                     return ()
                 source_batch_id = str(delivery["origin_batch_id"])
                 illust_id = str(delivery["illust_id"])
-                already = conn.execute(
-                    "SELECT 1 FROM batch_item_pages WHERE batch_id = ? AND illust_id = ? "
-                    "LIMIT 1",
-                    (batch_id, illust_id),
-                ).fetchone()
-                if already is not None:
-                    # The target batch already made its own page decisions;
-                    # never overwrite them.  Missing pages still get fail-closed
-                    # handling when the claim copies links.
-                    return ()
+                target_pages = {
+                    int(row["page_index"])
+                    for row in conn.execute(
+                        "SELECT page_index FROM batch_item_pages "
+                        "WHERE batch_id = ? AND illust_id = ?",
+                        (batch_id, illust_id),
+                    ).fetchall()
+                }
                 rows = conn.execute(
                     "SELECT * FROM batch_item_pages WHERE batch_id = ? AND illust_id = ?",
                     (source_batch_id, illust_id),
                 ).fetchall()
-                for row in rows:
+                missing_rows = [
+                    row for row in rows if int(row["page_index"]) not in target_pages
+                ]
+                if not missing_rows:
+                    # The target batch already made all page decisions; never
+                    # overwrite them.
+                    return ()
+                if resolver is None:
+                    return ()
+                for row in missing_rows:
                     artifact = None
                     if row["artifact_id"] is not None:
                         artifact = conn.execute(
@@ -1551,6 +1566,96 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                         records[artifact_id] = record
         except (sqlite3.Error, ContractError, OSError, ValueError):
             return ()
+        return tuple(records.values())
+
+    def _preflight_work_health(
+        self, source_batch_id: str, illust_id: str, run_id: str
+    ) -> tuple[ArtifactHealth, ...]:
+        """Observe completed artifacts of one source work for carry/claim."""
+        resolver = self._path_resolver_snapshot()
+        if resolver is None:
+            return ()
+        records: dict[str, ArtifactHealth] = {}
+        try:
+            with contextlib_closing(self._readonly_connection()) as conn:
+                rows = conn.execute(
+                    "SELECT * FROM batch_item_pages WHERE batch_id = ? AND illust_id = ?",
+                    (source_batch_id, illust_id),
+                ).fetchall()
+                for row in rows:
+                    artifact = None
+                    if row["artifact_id"] is not None:
+                        artifact = conn.execute(
+                            "SELECT a.*, d.quality_key AS delivery_quality_key "
+                            "FROM artifacts AS a JOIN deliveries AS d "
+                            "ON d.delivery_id = a.delivery_id WHERE a.artifact_id = ?",
+                            (str(row["artifact_id"]),),
+                        ).fetchone()
+                    elif row["delivery_id"] is not None:
+                        artifact = conn.execute(
+                            "SELECT a.*, d.quality_key AS delivery_quality_key "
+                            "FROM artifacts AS a JOIN deliveries AS d "
+                            "ON d.delivery_id = a.delivery_id WHERE a.delivery_id = ?",
+                            (str(row["delivery_id"]),),
+                        ).fetchone()
+                    if artifact is None:
+                        continue
+                    artifact_id = str(artifact["artifact_id"])
+                    if artifact_id in records:
+                        continue
+                    record = self._observe_artifact(
+                        dict(artifact),
+                        resolver=resolver,
+                        run_id=run_id,
+                        quality_key=str(artifact["delivery_quality_key"] or ""),
+                    )
+                    if record is not None:
+                        records[artifact_id] = record
+        except (sqlite3.Error, ContractError, OSError, ValueError):
+            return ()
+        return tuple(records.values())
+
+    def _preflight_carry_health(
+        self, batch_id: str, after: str, limit: int
+    ) -> tuple[ArtifactHealth, ...]:
+        resolver = self._path_resolver_snapshot()
+        if resolver is None:
+            return ()
+        try:
+            with contextlib_closing(self._readonly_connection()) as conn:
+                batch = self._get_batch_row(conn, batch_id)
+                if batch is None:
+                    return ()
+                job = self._get_job_row(conn, str(batch["job_id"]))
+                if job is None:
+                    return ()
+                rows = conn.execute(
+                    "SELECT bi.batch_id, bi.illust_id FROM batch_items AS bi "
+                    "JOIN batches AS b ON b.batch_id = bi.batch_id "
+                    "WHERE b.job_id = ? AND bi.batch_id != ? AND bi.illust_id > ? "
+                    "AND NOT EXISTS (SELECT 1 FROM batch_items AS newer "
+                    "JOIN batches AS nb ON nb.batch_id = newer.batch_id "
+                    "WHERE nb.job_id = b.job_id AND newer.illust_id = bi.illust_id "
+                    "AND nb.rowid > b.rowid) "
+                    "AND (bi.decision IN ('metadata_unknown','unavailable','unsupported') "
+                    "OR (bi.decision = 'download' AND bi.result_state IN "
+                    "('failed','needs_verification','partial') AND NOT EXISTS ("
+                    "SELECT 1 FROM batch_item_pages AS bip JOIN deliveries AS d "
+                    "ON d.delivery_id = bip.delivery_id WHERE bip.batch_id = bi.batch_id "
+                    "AND bip.illust_id = bi.illust_id AND d.state IN "
+                    "('pending','transferring','validating','suspended','retry_wait')))) "
+                    "ORDER BY bi.illust_id LIMIT ?",
+                    (str(job["job_id"]), batch_id, after, int(limit)),
+                ).fetchall()
+        except (sqlite3.Error, ContractError, ValueError):
+            return ()
+        records: dict[str, ArtifactHealth] = {}
+        for row in rows:
+            for record in self._preflight_work_health(
+                str(row["batch_id"]), str(row["illust_id"]),
+                f"carry-{batch_id}-{row['illust_id']}",
+            ):
+                records[record.expectation.artifact_id] = record
         return tuple(records.values())
 
     def release_delivery(
@@ -2135,7 +2240,7 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         candidate page; this single ordered scan keeps the lock short while
         preserving the same latest-event semantics.
         """
-        latest: dict[tuple[str, int, str], tuple[RemovalIntent, int]] = {}
+        latest: dict[tuple[str, int, str, int], RemovalIntent] = {}
         rows = conn.execute(
             "SELECT safe_payload FROM events WHERE kind = 'removal_intent' "
             "ORDER BY event_seq"
@@ -2148,8 +2253,9 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                     str(info["illust_id"]),
                     int(info["page_index"]),
                     str(info["output_key"]),
+                    int(info["root_revision"]),
                 )
-                latest[key] = (intent, int(info["root_revision"]))
+                latest[key] = intent
             except (KeyError, TypeError, ValueError, CorruptDataError):
                 continue
         return latest
@@ -2207,15 +2313,16 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
             if intent == RemovalIntent.EXCLUDED.value:
                 rows = conn.execute(
                     "SELECT delivery_id FROM deliveries "
-                    "WHERE current_batch_id = ? AND output_key = ? "
-                    "AND state IN ('pending','suspended','retry_wait')",
-                    (batch_id, output_ref.target_key),
+                    "WHERE job_id = ? AND output_key = ? "
+                    "AND state IN ('pending','suspended','retry_wait','needs_verification')",
+                    (str(job["job_id"]), output_ref.target_key),
                 ).fetchall()
                 for row in rows:
                     conn.execute(
                         "UPDATE deliveries SET state = 'cancelled', "
                         "error_code = 'intent_excluded', retry_at = NULL, updated_at = ? "
-                        "WHERE delivery_id = ? AND state IN ('pending','suspended','retry_wait')",
+                        "WHERE delivery_id = ? AND state IN "
+                        "('pending','suspended','retry_wait','needs_verification')",
                         (now, str(row["delivery_id"])),
                     )
                     self._refresh_items_for_delivery(conn, str(row["delivery_id"]), now)
@@ -2306,14 +2413,8 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                         page_spec.page_index,
                         page_spec.output_ref.target_key,
                     )
-                    recorded = intents.get(key)
-                    if recorded is None:
-                        continue
-                    intent, revision = recorded
-                    if (
-                        intent is RemovalIntent.EXCLUDED
-                        and revision == self._root_revision_for(page_spec.output_ref)
-                    ):
+                    revision = self._root_revision_for(page_spec.output_ref)
+                    if intents.get((*key, revision)) is RemovalIntent.EXCLUDED:
                         excluded_pages.add(key)
 
             planned: set[str] = set()

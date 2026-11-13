@@ -106,16 +106,19 @@ class QueryRepositoryMixin:
         })
 
     def carry_query_unresolved_items(self, batch_id, *, after='', limit=100,
-                                     enforce_health=True):
+                                     enforce_health=True, health=None):
         lib = _lib()
         lib._validate_identifier(batch_id, 'batch id')
         if not isinstance(after, str) or (after and not after.isdecimal()) or type(limit) is not int or not 1 <= limit <= 200:
             raise lib.LibraryError('Invalid unresolved item page')
-        if type(enforce_health) is not bool:
-            raise lib.LibraryError('Invalid carry health flag')
+        if enforce_health is not True:
+            raise lib.LibraryError('Carry health verification cannot be disabled')
+        if health is not None and not isinstance(health, list):
+            raise lib.LibraryError('Invalid carry health evidence')
         return self._enqueue('carry_query_unresolved_items', {
             'batch_id': batch_id, 'after': after, 'limit': limit,
             'enforce_health': enforce_health,
+            'health': [] if health is None else health,
         })
 
     def query_member_count(self, batch_id, logical_source_id):
@@ -411,6 +414,7 @@ class QueryRepositoryMixin:
                 )
                 self._copy_batch_item_page_links(
                     conn, item['batch_id'], batch['batch_id'], item['illust_id'],
+                    health_by_artifact=self._health_map(payload.get('health')),
                     enforce_completed_health=bool(payload.get('enforce_health')),
                 )
                 self._refresh_batch_item_result(

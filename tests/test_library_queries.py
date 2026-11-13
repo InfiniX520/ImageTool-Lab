@@ -8,6 +8,7 @@ GUI, production database or image file outside ``tmp_path`` is touched.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -538,10 +539,17 @@ def test_multi_batch_existing_and_new_attribution(ledger):
     repo, _database = ledger
     job, ids = _open(repo, (_candidate("300", (0, 1, 2), page_count=3),))
     first_batch = job["batch_id"]
+    payload = b"x" * 1000
+    digest = hashlib.sha256(payload).hexdigest()
     _claim(repo, ids[0], first_batch)
-    _complete(repo, ids[0], first_batch)
+    _complete(repo, ids[0], first_batch, size=len(payload), prefix=digest)
     _claim(repo, ids[1], first_batch)
-    _complete(repo, ids[1], first_batch)
+    _complete(repo, ids[1], first_batch, size=len(payload), prefix=digest)
+    for index in (0, 1):
+        target = _database.parent / OUTPUT_ROOT / f"300_p{index}.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    repo.bind_path_resolver(PathResolver(AppPaths(_database.parent)))
     _finish_failed(repo, ids[2], first_batch)
 
     repo.request_stop(job["job_id"], "pause-p4")

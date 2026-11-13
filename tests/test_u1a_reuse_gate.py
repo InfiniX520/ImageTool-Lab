@@ -272,6 +272,29 @@ def test_new_task_supersedes_a_dormant_verification_hold(tmp_path):
         assert old["error_code"] == "superseded_by_new_task"
         assert repo.batch_results(third_job["batch_id"])["pages"]["needs_verification"] == 1
 
+def test_carry_keeps_an_intact_completed_page_as_existing(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job = submit(repo, request_id="carry-intact")
+        ids = accept(repo, job["batch_id"], source((candidate(pages=(0, 1)),)))
+        transport = Transport(Response(), Response(status=404))
+        assert run(repo, job, ids[0], executor(repo, tmp_path, transport)).state == "completed"
+        assert run(repo, job, ids[1], executor(repo, tmp_path, transport)).state == "failed"
+        repo.finish_source(job["batch_id"], coverage_complete=True)
+        assert repo.settle_batch(job["batch_id"]) is True
+        assert repo.get_batch(job["batch_id"])["phase"] == "partial"
+
+        resumed = repo.resume(job["job_id"], "resume-carry-intact")
+        batch = repo.activate_next()
+        assert batch is not None and batch["batch_id"] == resumed["batch_id"]
+        carried = repo.carry_unresolved_items(batch["batch_id"])
+        assert carried["count"] == 1
+        counts = repo.batch_results(batch["batch_id"])["pages"]
+        assert counts["completed"] == 1
+        assert counts["existing"] == 1
+        assert counts["failed"] == 1
+        assert counts["needs_verification"] == 0
+        assert target(tmp_path).exists()
+
 def test_changed_page_needs_verification_without_consuming_work_budget(tmp_path):
     with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
         first_delivery(repo, tmp_path)

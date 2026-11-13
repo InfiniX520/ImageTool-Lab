@@ -1460,6 +1460,32 @@ class DeliveryRepositoryMixin:
             raise lib.CorruptDataError("Carried completed page has no source delivery")
         job_id = str(batch["job_id"])
         quality_key = str(source["quality_key"])
+        blocker = conn.execute(
+            "SELECT delivery_id, state FROM deliveries WHERE output_key = ? "
+            "AND state IN ("
+            "'pending','transferring','validating','prepared',"
+            "'needs_verification','suspended','retry_wait','recovery_needed'"
+            ") ORDER BY rowid LIMIT 1",
+            (output_key,),
+        ).fetchone()
+        if blocker is not None:
+            if str(blocker["state"]) == "needs_verification":
+                # Link the existing hold instead of creating a second active
+                # row for the same output; the batch honestly reports NV.
+                self._link_batch_item_page(
+                    conn,
+                    target_batch_id,
+                    illust_id,
+                    int(page_index),
+                    output_key,
+                    quality_json,
+                    delivery_id=str(blocker["delivery_id"]),
+                    artifact_id=None,
+                )
+                return
+            raise lib.OutputConflict(
+                "carried page output is held by another active delivery"
+            )
         max_generation = conn.execute(
             "SELECT COALESCE(MAX(generation), 0) AS generation FROM deliveries "
             "WHERE job_id = ? AND illust_id = ? AND page_index = ? AND quality_key = ?",
@@ -1468,34 +1494,39 @@ class DeliveryRepositoryMixin:
         generation = int(max_generation) + 1
         delivery_id = lib._new_id()
         now = lib._utcnow()
-        conn.execute(
-            "INSERT INTO deliveries("
-            "delivery_id, job_id, origin_batch_id, current_batch_id, "
-            "completed_batch_id, illust_id, page_index, output_key, "
-            "output_ref_json, quality_json, quality_key, payload_json, "
-            "source_identity, state, attempts, retry_at, error_code, "
-            "generation, checkpoint_json, prepared_json, created_at, updated_at"
-            ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "'needs_verification', 0, NULL, 'artifact_unverified_carry', ?, ?, NULL, ?, ?)",
-            (
-                delivery_id,
-                job_id,
-                target_batch_id,
-                target_batch_id,
-                illust_id,
-                int(page_index),
-                output_key,
-                str(source["output_ref_json"]),
-                quality_json,
-                quality_key,
-                str(source["payload_json"]),
-                None if source["source_identity"] is None else str(source["source_identity"]),
-                generation,
-                None if source["checkpoint_json"] is None else str(source["checkpoint_json"]),
-                now,
-                now,
-            ),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO deliveries("
+                "delivery_id, job_id, origin_batch_id, current_batch_id, "
+                "completed_batch_id, illust_id, page_index, output_key, "
+                "output_ref_json, quality_json, quality_key, payload_json, "
+                "source_identity, state, attempts, retry_at, error_code, "
+                "generation, checkpoint_json, prepared_json, created_at, updated_at"
+                ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "'needs_verification', 0, NULL, 'artifact_unverified_carry', ?, ?, NULL, ?, ?)",
+                (
+                    delivery_id,
+                    job_id,
+                    target_batch_id,
+                    target_batch_id,
+                    illust_id,
+                    int(page_index),
+                    output_key,
+                    str(source["output_ref_json"]),
+                    quality_json,
+                    quality_key,
+                    str(source["payload_json"]),
+                    None if source["source_identity"] is None else str(source["source_identity"]),
+                    generation,
+                    None if source["checkpoint_json"] is None else str(source["checkpoint_json"]),
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise lib.OutputConflict(
+                "carried page output is held by another active delivery"
+            ) from exc
         self._link_batch_item_page(
             conn,
             target_batch_id,
@@ -1647,7 +1678,7 @@ class DeliveryRepositoryMixin:
         """Explicit resume retry: only failed deliveries, never successful ones."""
         lib = _lib()
         rows = conn.execute(
-            "SELECT delivery_id, illust_id, page_index, http_attempts "
+            "SELECT delivery_id, illust_id, page_index, http_attempts, output_key "
             "FROM deliveries WHERE job_id = ? AND state = 'failed' "
             "ORDER BY rowid",
             (job_id,),
@@ -1655,6 +1686,18 @@ class DeliveryRepositoryMixin:
         reset: list[dict[str, Any]] = []
         for row in rows:
             delivery_id = str(row["delivery_id"])
+            blocker = conn.execute(
+                "SELECT delivery_id FROM deliveries WHERE output_key = ? "
+                "AND delivery_id != ? AND state IN ("
+                "'pending','transferring','validating','prepared',"
+                "'needs_verification','suspended','retry_wait','recovery_needed'"
+                ") LIMIT 1",
+                (str(row["output_key"]), delivery_id),
+            ).fetchone()
+            if blocker is not None:
+                raise lib.OutputConflict(
+                    "failed delivery path is held by another active delivery"
+                )
             conn.execute(
                 "UPDATE deliveries SET state = 'suspended', http_attempts = 0, "
                 "error_code = NULL, retry_at = NULL, updated_at = ? "

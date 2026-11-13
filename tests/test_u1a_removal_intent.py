@@ -203,6 +203,32 @@ def test_intent_can_be_recorded_after_settlement_and_replayed(tmp_path):
         ) == result
 
 
+def test_exclusion_cancels_suspended_delivery_from_an_older_batch(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        first_task(repo, tmp_path)
+        target(tmp_path).unlink()
+        job = start(repo, "cross-batch")
+        (pending,) = repo.accept_source_page(job["batch_id"], page("page-cross-1"))
+        repo.request_stop(job["job_id"], "stop-cross")
+        assert repo.settle_stop(job["batch_id"]) is True
+        assert repo.get_delivery(pending)["state"] == "suspended"
+        resumed = repo.resume(job["job_id"], "resume-cross")
+        batch = repo.activate_next()
+        assert batch is not None and batch["batch_id"] == resumed["batch_id"]
+        repo.record_removal_intent(
+            batch["batch_id"], "123", 0, OUTPUT,
+            intent="excluded", command_id="intent-cross-batch",
+        )
+        (cancelled,) = repo.accept_source_page(
+            batch["batch_id"], page("page-cross-2", before='"cursor-1"', after='"cursor-2"')
+        )
+        assert repo.get_delivery(pending)["state"] == "cancelled"
+        assert repo.get_delivery(pending)["error_code"] == "intent_excluded"
+        assert repo.get_delivery(cancelled)["state"] == "cancelled"
+        assert repo.list_dispatchable(job["job_id"]) == ()
+        assert not target(tmp_path).exists()
+
+
 def test_offloaded_intent_is_not_falsely_advertised(tmp_path):
     with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
         job = start(repo, "offloaded")

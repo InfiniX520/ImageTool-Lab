@@ -874,7 +874,13 @@ def test_missing_source_page_link_is_rebuilt_on_resume(tmp_path):
         )
         batch_id = job["batch_id"]
         _claim(repo, ids[0], batch_id)
-        _complete(repo, ids[0], batch_id)
+        payload = b"x" * 1000
+        digest = hashlib.sha256(payload).hexdigest()
+        _complete(repo, ids[0], batch_id, size=len(payload), prefix=digest)
+        target = tmp_path / ROOT / "100_p0.jpg"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(payload)
+        repo.bind_path_resolver(PathResolver(AppPaths(tmp_path)))
         _sql(
             db_path,
             "DELETE FROM batch_item_pages WHERE batch_id = ? AND page_index = 1",
@@ -966,10 +972,17 @@ def test_multi_page_retry_only_failed_and_frozen_associations(tmp_path):
             db_path, "SELECT COUNT(*) FROM batch_item_pages WHERE batch_id = ?", (batch_id,)
         ) == 3
 
+        payload = b"x" * 1000
+        digest = hashlib.sha256(payload).hexdigest()
         _claim(repo, ids[0], batch_id)
-        _complete(repo, ids[0], batch_id)
+        _complete(repo, ids[0], batch_id, size=len(payload), prefix=digest)
         _claim(repo, ids[1], batch_id)
-        _complete(repo, ids[1], batch_id)
+        _complete(repo, ids[1], batch_id, size=len(payload), prefix=digest)
+        for index in (0, 1):
+            target = tmp_path / ROOT / f"100_p{index}.jpg"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        repo.bind_path_resolver(PathResolver(AppPaths(tmp_path)))
         _claim(repo, ids[2], batch_id)
         assert repo.start_transfer_attempt(ids[2], batch_id) == 1
         assert repo.start_transfer_attempt(ids[2], batch_id) == 2
