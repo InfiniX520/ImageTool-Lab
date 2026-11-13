@@ -575,10 +575,16 @@ class PageBudget:
     remaining allowance is clipped into every single-file observation, so a
     file the page cannot pay for is refused before it is opened instead of
     silently overrunning the declared limit.
+
+    max_bytes is the whole page's content ceiling, not one burst: accepting a
+    page has to read every candidate once (the slices plus the confirmations),
+    so a page whose bytes exceed it can never commit.  The default leaves room
+    for a large multi-page work (8 GiB) while still refusing a runaway page;
+    max_files/max_slices remain the burst limits.
     """
 
     max_files: int = 32
-    max_bytes: int = 512 * 1024 * 1024
+    max_bytes: int = 8 * 1024 * 1024 * 1024
     max_seconds: float = 300.0
     max_slices: int = 8
 
