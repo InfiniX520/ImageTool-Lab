@@ -543,8 +543,13 @@ class _DatabasePages(_Pages):
 
 
 def _open_readonly(database_path: Any) -> sqlite3.Connection:
-    """One read-only connection; WAL frames are honoured, nothing is written."""
-    path = Path(database_path)
+    """One read-only connection; WAL frames are honoured, nothing is written.
+
+    The path is resolved first: Path.as_uri refuses a relative path, so an
+    operator typing .\\download_logs\\library.sqlite3 must get the same answer
+    as the absolute form instead of a ValueError.
+    """
+    path = Path(database_path).expanduser().resolve()
     if not path.exists():
         raise LibraryAuditError("The library database does not exist")
     try:

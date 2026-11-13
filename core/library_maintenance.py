@@ -1169,8 +1169,9 @@ def main(argv: list[str] | None = None) -> int:
             from core.library_audit import LibraryAuditError, ScanBudget, scan_library_artifacts
             from core.library_paths import PathResolver
 
-            database = Path(arguments.database)
-            root = arguments.root if arguments.root is not None else database.parent.parent
+            database = Path(arguments.database).expanduser().resolve()
+            raw_root = arguments.root if arguments.root is not None else database.parent.parent
+            root = Path(raw_root).expanduser().resolve()
             budget = ScanBudget(
                 **{
                     key: value
