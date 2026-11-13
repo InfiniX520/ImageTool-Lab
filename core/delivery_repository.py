@@ -21,7 +21,7 @@ import sqlite3
 from contextlib import closing
 from typing import Any
 
-from core.delivery_cleanup import cleanup_fact
+from core.delivery_cleanup import cleanup_event_payload, cleanup_fact, cleanup_is_terminal
 from core.delivery_lineage import (
     ACTIVE_FOLLOWUP,
     Successor,
@@ -76,6 +76,36 @@ _SUPPORTED_MEDIA = frozenset(
 )
 _REASON_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_DELIVERY_STATE_RE = re.compile(r"^[a-z][a-z_]{2,31}$")
+
+# The SQL transliteration of delivery_cleanup.cleanup_is_terminal: a terminal
+# fact is either the current boolean shape or the legacy "cleaned" outcome that
+# predates it.  A failed attempt stays retryable on purpose (RFA-03).
+_TERMINAL_CLEANUP_SQL = """
+    SELECT 1 FROM events AS e
+    WHERE e.kind = 'delivery_cleanup'
+      AND e.safe_payload LIKE '%"delivery_id":"' || d.delivery_id || '"%'
+      AND (
+        e.safe_payload LIKE '%"cleanup_completed":true%'
+        OR (
+          e.safe_payload NOT LIKE '%"cleanup_completed":%'
+          AND e.safe_payload LIKE '%"outcome":"cleaned"%'
+        )
+      )
+"""
+
+# Failed attempts stay retryable, but they are paced behind rows nobody has
+# tried yet: this is a repair queue, not a loop on one locked file.  Terminal
+# facts are filtered out before this ordering, so a delivery that already
+# succeeded never reaches it (contract Sec.2.4, fair retry).
+_RETRY_PACING_SQL = """
+    EXISTS (
+      SELECT 1 FROM events AS r
+      WHERE r.kind = 'delivery_cleanup'
+        AND r.safe_payload LIKE '%"delivery_id":"' || d.delivery_id || '"%'
+        AND r.safe_payload LIKE '%"outcome":"failed"%'
+    )
+"""
 
 _CHECKPOINT_KEYS = {
     "schema_version",
@@ -479,13 +509,26 @@ class DeliveryRepositoryMixin:
         *,
         state: str,
         error_code: str,
+        expected_state: str | None = None,
     ) -> None:
+        """Park one delivery on a durable issue fact.
+
+        expected_state is an optional compare-and-set guard: the writer
+        refuses the write when the row already moved, so a recovery
+        compensation can notice a competing winner instead of overwriting it
+        (RFA-07).
+        """
         lib = _lib()
         delivery_id = lib._validate_identifier(delivery_id, "delivery id")
         batch_id = lib._validate_identifier(batch_id, "batch id")
         if state not in {"needs_verification", "recovery_needed"}:
             raise lib.LibraryError("Unsupported delivery issue state")
         error_code = lib._validate_error_code(error_code)
+        if expected_state is not None and (
+            not isinstance(expected_state, str)
+            or _DELIVERY_STATE_RE.fullmatch(expected_state) is None
+        ):
+            raise lib.LibraryError("Unsupported expected delivery state")
         self._enqueue(
             "set_delivery_issue",
             {
@@ -493,9 +536,9 @@ class DeliveryRepositoryMixin:
                 "batch_id": batch_id,
                 "state": state,
                 "error_code": error_code,
+                "expected_state": expected_state,
             },
         )
-
     def list_recoverable(self, *, limit: int = 200) -> tuple[dict, ...]:
         lib = _lib()
         self._ensure_open()
@@ -513,84 +556,153 @@ class DeliveryRepositoryMixin:
             ).fetchall()
         return tuple(self._delivery_dict(row) for row in rows)
 
-    def list_cleanup_candidates(self, *, limit: int = 200) -> tuple[dict, ...]:
+    def list_cleanup_candidates(
+        self,
+        *,
+        limit: int = 200,
+        after_rowid: int = 0,
+        stats: dict[str, int] | None = None,
+    ) -> tuple[dict, ...]:
         """Cancelled deliveries whose staged temp may still need deleting.
 
-        Only rows that still carry parseable prepared evidence qualify; the
-        evidence is what proves the '.part' belongs to this delivery.
+        The window is chosen in SQL and advances past the examined rows, so a
+        terminal fact leaves the queue, a row with unusable evidence cannot
+        starve a newer one, and a permanently failing row is seen again only
+        after the caller's cursor wraps (RFA-03).  Only rows that still carry
+        parseable prepared evidence qualify: that evidence is the only proof
+        that a '.part' belongs to this delivery.
+
+        The optional stats sink reports examined / skipped / returned /
+        next_rowid for diagnostics; it never changes the selection.
         """
         lib = _lib()
         self._ensure_open()
         if not _is_int(limit):
             raise lib.LibraryError("limit must be an integer")
+        if not _is_int(after_rowid) or after_rowid < 0:
+            raise lib.LibraryError("after_rowid must be a non-negative integer")
         limit = max(0, min(limit, 200))
         if limit == 0:
             return ()
-        with closing(self._readonly_connection()) as conn:
-            # A cleaned row keeps its prepared evidence for audit, so without
-            # the EXISTS filter 200 old rows would starve newer candidates.
-            rows = conn.execute(
-                """SELECT * FROM deliveries AS d WHERE d.state = 'cancelled'
-                AND d.prepared_json IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM events AS e
-                    WHERE e.kind = 'delivery_cleanup'
-                    AND e.safe_payload LIKE '%"delivery_id":"' || d.delivery_id || '"%'
-                    AND e.safe_payload LIKE '%"cleanup_completed":true%'
-                )
-                ORDER BY d.rowid LIMIT ?""",
-                (limit,),
-            ).fetchall()
+        examined = 0
+        skipped = 0
         facts: list[dict] = []
-        for row in rows:
-            try:
-                final_ref = self._delivery_final_ref(row)
-                prepared = _parse_prepared_json(
-                    row["prepared_json"], str(row["delivery_id"]), final_ref
-                )
-            except (lib.LibraryError, ContractError):
-                continue
-            fact = cleanup_fact(
+        cursor = int(after_rowid)
+        examine_cap = min(max(limit * 5, limit), 2000)
+        with closing(self._readonly_connection()) as conn:
+            while len(facts) < limit and examined < examine_cap:
+                take = min(limit - len(facts), examine_cap - examined)
+                rows = conn.execute(
+                    "SELECT d.*, d.rowid AS _rowid FROM deliveries AS d "
+                    "WHERE d.state = 'cancelled' AND d.prepared_json IS NOT NULL "
+                    "AND d.rowid > ? AND NOT EXISTS ("
+                    + _TERMINAL_CLEANUP_SQL
+                    + ") ORDER BY ("
+                    + _RETRY_PACING_SQL
+                    + "), d.rowid LIMIT ?",
+                    (cursor, take),
+                ).fetchall()
+                if not rows:
+                    break
+                examined += len(rows)
+                # The pacing tier can return an older row after a newer one, so
+                # the continuation is the highest rowid examined, never the last
+                # row of the page.
+                cursor = max(cursor, *(int(row["_rowid"]) for row in rows))
+                for row in rows:
+                    fact = self._cleanup_candidate_fact(row)
+                    if fact is None:
+                        skipped += 1
+                        continue
+                    facts.append(fact)
+                    if len(facts) >= limit:
+                        break
+        if stats is not None:
+            stats.update(
                 {
-                    "delivery_id": row["delivery_id"],
-                    "current_batch_id": row["current_batch_id"],
-                    "job_id": row["job_id"],
-                    "state": row["state"],
-                    "prepared": prepared,
-                    "generation": row["generation"],
+                    "examined": examined,
+                    "skipped": skipped,
+                    "returned": len(facts),
+                    "next_rowid": cursor,
                 }
             )
-            if fact is not None:
-                facts.append(
-                    {
-                        "delivery_id": fact.delivery_id,
-                        "batch_id": fact.batch_id,
-                        "job_id": fact.job_id,
-                        "prepared": dict(fact.prepared),
-                        "generation": fact.generation,
-                    }
-                )
         return tuple(facts)
 
+    def _cleanup_candidate_fact(self, row) -> dict | None:
+        """Turn one cancelled row into a cleanup fact, or skip it honestly."""
+        lib = _lib()
+        try:
+            final_ref = self._delivery_final_ref(row)
+            prepared = _parse_prepared_json(
+                row["prepared_json"], str(row["delivery_id"]), final_ref
+            )
+        except (lib.LibraryError, ContractError):
+            return None
+        fact = cleanup_fact(
+            {
+                "delivery_id": row["delivery_id"],
+                "current_batch_id": row["current_batch_id"],
+                "job_id": row["job_id"],
+                "state": row["state"],
+                "prepared": prepared,
+                "generation": row["generation"],
+            }
+        )
+        if fact is None:
+            return None
+        return {
+            "delivery_id": fact.delivery_id,
+            "batch_id": fact.batch_id,
+            "job_id": fact.job_id,
+            "prepared": dict(fact.prepared),
+            "generation": fact.generation,
+            "rowid": int(row["_rowid"]),
+        }
+
     def mark_cleanup_completed(
-        self, delivery_id: str, *, outcome: str, error_code: str = ""
+        self,
+        delivery_id: str,
+        *,
+        outcome: str,
+        error_code: str = "",
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
     ) -> bool:
-        """Record the result of one cleanup attempt; never a delivery success."""
+        """Record the result of one cleanup attempt; never a delivery success.
+
+        The expected digest and size are the prepared identity the executor
+        observed.  The writer refuses a row whose evidence moved, so a
+        replaced staged file can no longer be reported as cleaned (RFA-03).
+        """
         lib = _lib()
         delivery_id = lib._validate_identifier(delivery_id, "delivery id")
         if outcome not in {"cleaned", "failed"}:
             raise lib.LibraryError("Unsupported cleanup outcome")
         if error_code:
             error_code = lib._validate_error_code(error_code)
+        if expected_sha256 is not None:
+            if (
+                not isinstance(expected_sha256, str)
+                or _HEX64_RE.fullmatch(expected_sha256) is None
+            ):
+                raise lib.LibraryError(
+                    "expected_sha256 must be a lowercase hex digest"
+                )
+        if expected_size is not None:
+            if not _is_int(expected_size) or expected_size < 0:
+                raise lib.LibraryError(
+                    "expected_size must be a non-negative integer"
+                )
         return self._enqueue(
             "mark_cleanup_completed",
             {
                 "delivery_id": delivery_id,
                 "outcome": outcome,
                 "error_code": error_code,
+                "expected_sha256": expected_sha256,
+                "expected_size": expected_size,
             },
         )
-
     def get_artifact(self, delivery_id: str) -> dict | None:
         lib = _lib()
         delivery_id = lib._validate_identifier(delivery_id, "delivery id")
@@ -1030,12 +1142,21 @@ class DeliveryRepositoryMixin:
         batch_id = str(payload["batch_id"])
         state = str(payload["state"])
         error_code = str(payload["error_code"])
+        expected_state = payload.get("expected_state")
         if state not in {"needs_verification", "recovery_needed"}:
             raise lib.LibraryError("Unsupported delivery issue state")
         with self._transaction(conn):
             delivery, batch = self._owned_delivery_batch(
                 conn, delivery_id, batch_id
             )
+            if expected_state is not None and str(delivery["state"]) != str(
+                expected_state
+            ):
+                # A competing writer already moved the row.  The caller has to
+                # report the winner instead of overwriting it (RFA-07).
+                raise lib.InvalidStateError(
+                    "Delivery state changed before the issue was recorded"
+                )
             if delivery["state"] == "completed":
                 raise lib.InvalidStateError("Completed delivery is immutable")
             allowed = {
@@ -1047,7 +1168,9 @@ class DeliveryRepositoryMixin:
             if delivery["state"] == state:
                 return None
             if delivery["state"] not in allowed:
-                raise lib.InvalidStateError("Delivery issue is not legal in this state")
+                raise lib.InvalidStateError(
+                    "Delivery issue is not legal in this state"
+                )
             now = lib._utcnow()
             conn.execute(
                 "UPDATE deliveries SET state = ?, error_code = ?, retry_at = NULL, "
@@ -1076,6 +1199,75 @@ class DeliveryRepositoryMixin:
                 )
             return None
 
+    def _cleanup_fact(self, delivery: sqlite3.Row):
+        """Rebuild the durable cleanup fact from the row itself.
+
+        The row is the only authority on which staged file this delivery owns,
+        so the writer never trusts a caller-supplied fact.
+        """
+        lib = _lib()
+        delivery_id = str(delivery["delivery_id"])
+        try:
+            final_ref = self._delivery_final_ref(delivery)
+            prepared = _parse_prepared_json(
+                delivery["prepared_json"], delivery_id, final_ref
+            )
+        except (lib.LibraryError, ContractError) as exc:
+            raise lib.CorruptDataError(
+                "Cancelled delivery has unreadable prepared evidence"
+            ) from exc
+        fact = cleanup_fact(
+            {
+                "delivery_id": delivery_id,
+                "current_batch_id": str(delivery["current_batch_id"]),
+                "job_id": str(delivery["job_id"]),
+                "state": str(delivery["state"]),
+                "prepared": prepared,
+                "generation": int(delivery["generation"]),
+            }
+        )
+        if fact is None:
+            raise lib.CorruptDataError(
+                "Cancelled delivery cannot produce a cleanup fact"
+            )
+        return fact
+
+    def _cleanup_fact_recorded(
+        self, conn: sqlite3.Connection, delivery_id: str, body: dict[str, Any]
+    ) -> bool:
+        """Whether this exact cleanup fact is already recorded.
+
+        Scoped to one delivery instead of the last 200 events, so a busy ledger
+        cannot hide an older terminal fact (RFA-03).
+        """
+        rows = conn.execute(
+            "SELECT safe_payload FROM events WHERE kind = 'delivery_cleanup' "
+            "AND safe_payload LIKE ? ORDER BY event_seq DESC LIMIT 8",
+            (f'%"delivery_id":"{delivery_id}"%',),
+        ).fetchall()
+        for row in rows:
+            try:
+                info = json.loads(row["safe_payload"])
+            except (TypeError, ValueError):
+                continue
+            if (
+                not isinstance(info, dict)
+                or str(info.get("delivery_id")) != delivery_id
+            ):
+                continue
+            if cleanup_is_terminal(info) and not cleanup_is_terminal(body):
+                # A terminal fact already ended this queue entry; a later
+                # failure cannot make it retryable again.
+                return True
+            if (
+                info.get("outcome") == body["outcome"]
+                and info.get("error_code") == body["error_code"]
+                and info.get("temp_sha256") == body["temp_sha256"]
+                and info.get("temp_size") == body["temp_size"]
+            ):
+                return True
+        return False
+
     def _mark_cleanup_completed(
         self, conn: sqlite3.Connection, payload: dict[str, Any]
     ) -> bool:
@@ -1083,6 +1275,8 @@ class DeliveryRepositoryMixin:
         delivery_id = str(payload["delivery_id"])
         outcome = str(payload["outcome"])
         error_code = str(payload.get("error_code", ""))
+        expected_sha = payload.get("expected_sha256")
+        expected_size = payload.get("expected_size")
         if outcome not in {"cleaned", "failed"}:
             raise lib.LibraryError("Unsupported cleanup outcome")
         with self._transaction(conn):
@@ -1091,32 +1285,29 @@ class DeliveryRepositoryMixin:
                 raise lib.NotFoundError(f"Unknown delivery: {delivery_id}")
             if str(delivery["state"]) != "cancelled":
                 return False
-            recent = conn.execute(
-                "SELECT safe_payload FROM events WHERE kind = 'delivery_cleanup' "
-                "ORDER BY event_seq DESC LIMIT 200"
-            ).fetchall()
-            for row in recent:
-                try:
-                    info = json.loads(row["safe_payload"])
-                except (TypeError, ValueError):
-                    continue
-                if (
-                    isinstance(info, dict)
-                    and str(info.get("delivery_id")) == delivery_id
-                    and info.get("outcome") == outcome
-                ):
-                    return outcome == "cleaned"
+            fact = self._cleanup_fact(delivery)
+            if expected_sha is not None and fact.sha256 != str(expected_sha):
+                # The caller verified one exact staged object.  A row whose
+                # prepared evidence moved now describes a different file, so a
+                # terminal fact would be a lie about bytes nobody checked.
+                raise lib.InvalidStateError(
+                    "Prepared digest changed before cleanup was recorded"
+                )
+            if expected_size is not None and fact.size != int(expected_size):
+                raise lib.InvalidStateError(
+                    "Prepared size changed before cleanup was recorded"
+                )
+            body = cleanup_event_payload(
+                fact, outcome=outcome, error_code=error_code
+            )
+            if self._cleanup_fact_recorded(conn, delivery_id, body):
+                return outcome == "cleaned"
             self._insert_event(
                 conn,
                 job_id=str(delivery["job_id"]),
                 batch_id=str(delivery["current_batch_id"]),
                 kind="delivery_cleanup",
-                payload={
-                    "delivery_id": delivery_id,
-                    "batch_id": str(delivery["current_batch_id"]),
-                    "outcome": outcome,
-                    "error_code": error_code,
-                },
+                payload=body,
             )
             return outcome == "cleaned"
 
