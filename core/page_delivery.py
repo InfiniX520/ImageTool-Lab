@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 
 import requests
 
+from core.file_presence import Presence, probe_ref
 from core.http_client import request_get
 from core.image_validation import (ImageNeedsVerification, ImageValidationError,
                                    ImageValidationStopped, inspect_image)
@@ -125,6 +126,21 @@ def _file_id(info):
     return {"device": info.st_dev, "inode": info.st_ino}
 
 
+@dataclass(frozen=True, slots=True)
+class _Discard:
+    """Result of one attempt to delete a delivery-owned staged file."""
+
+    deleted: bool
+    code: str
+
+
+def _presence_error(presence, target):
+    """Map an unobservable entry to the fixed diagnostic code it deserves."""
+    if presence.state is Presence.ROOT_UNAVAILABLE:
+        return "root_unavailable"
+    return "final_unreadable" if target == "final" else "temp_unreadable"
+
+
 def _header(response, name):
     for key, value in response.headers.items():
         if key.lower() == name.lower():
@@ -171,6 +187,8 @@ class PageDeliveryExecutor:
         self.clock, self.fault_hook = clock, fault_hook
         self.before_request=before_request
         self._cooldown_lock, self._cooldown_until = threading.Lock(), 0.0
+        # Fair rotation for the bounded cancelled-temp retry queue (RFA-03).
+        self._cleanup_cursor = 0
 
     def _db(self, method, *args, **kwargs):
         try:
@@ -438,8 +456,14 @@ class PageDeliveryExecutor:
         final, temp = self.resolver.resolve(final_ref), self.resolver.resolve(temp_ref)
         if final.parent != temp.parent or final == temp or row["delivery_id"] not in temp.name:
             raise _Fault("invalid_staging_identity", block=True)
+        if self.resolver.root_state(final_ref) is not RootState.AVAILABLE:
+            # The volume that holds the gallery is gone: neither "published"
+            # nor "unpublished" is provable, so the row stays recoverable and
+            # the round stops instead of retrying a dead root.
+            raise _Fault("root_unavailable", block=True)
         self._hook("before_publish", row)
-        if not final.exists():
+        final_presence = probe_ref(self.resolver, final_ref)
+        if final_presence.state is Presence.ABSENT:
             # UA-11: the exclusion linearizes here, immediately before the
             # final name exists.  A denied gate leaves the staged temp owned by
             # this delivery and cancels the row; it never removes a published
@@ -452,6 +476,17 @@ class PageDeliveryExecutor:
                 os.link(temp, final)  # atomic, same-directory, refuses existing names
             except FileExistsError:
                 pass  # race: still must prove the final inode belongs to this delivery
+        elif final_presence.state is Presence.PRESENT:
+            # Published wins: a later exclusion only affects future work, and
+            # the bytes are confirmed through the normal path below.
+            pass
+        elif final_presence.state is Presence.UNREADABLE:
+            # A reachable root whose final entry cannot be read is not proof of
+            # an unpublished delivery.  Keep the staged bytes for a retry.
+            raise _Fault("final_unreadable", block=True)
+        else:
+            # The root itself became unreachable between the gate and the probe.
+            raise _Fault("root_unavailable", block=True)
         self._hook("after_publish", row)
         self.resolver.resolve(final_ref)
         self._verify_owned(final, evidence, hash_content=False)
@@ -471,9 +506,12 @@ class PageDeliveryExecutor:
     def _abort_unpublished(self, row, evidence, decision):
         """Cancel a delivery whose final name was never created.
 
-        The staged file is removed only when it is provably this delivery's
-        own temp (identity, size and digest all verified).  Any doubt keeps
-        the '.part' for local recovery instead of guessing.
+        Presence is four-state on purpose: an unreachable root is not proof
+        that the final name is absent, and a cancelled row is not proof that a
+        staged file was ours.  Only a reachable root with a provably absent
+        final name may lead to cancellation (RFA-02), and the staged file is
+        verified again after the writer round-trip before it is removed
+        (RFA-06).
         """
         # Unknown or malformed authorization is treated as unreadable: keep
         # the staged bytes instead of assuming an exclusion that never existed.
@@ -491,49 +529,30 @@ class PageDeliveryExecutor:
                 error_code=reason,
             )
             return ("recovery_needed", reason)
-        # Only a delivery with no final name and a provably owned temp may be
-        # cancelled.  recovery_needed is not "unpublished" by definition: a
-        # crash between link and confirm leaves prepared + final behind.
-        final = self.resolver.resolve(PathRef(**evidence["final_ref"]))
-        temp = self.resolver.resolve(PathRef(**evidence["temp_ref"]))
-        if final.exists() or final == temp:
-            self._db(
-                "set_delivery_issue",
-                row["delivery_id"],
-                row["current_batch_id"],
-                state="recovery_needed",
-                error_code="published_before_abort",
-            )
-            return ("recovery_needed", "published_before_abort")
-        owned = False
-        if temp.exists():
+        final_presence = probe_ref(self.resolver, PathRef(**evidence["final_ref"]))
+        if final_presence.state is Presence.PRESENT:
+            # A published name belongs to the user's gallery; a later exclusion
+            # only affects future work.
+            return self._refuse_cancel(row, "published_before_abort")
+        if final_presence.state is not Presence.ABSENT:
+            return self._refuse_cancel(row, _presence_error(final_presence, "final"))
+        temp_ref = PathRef(**evidence["temp_ref"])
+        temp_presence = probe_ref(self.resolver, temp_ref)
+        if temp_presence.state is Presence.PRESENT:
             try:
-                self._verify_owned(temp, evidence)
-                owned = True
+                self._verify_owned(self.resolver.resolve(temp_ref), evidence)
             except (OSError, _Fault, ContractError):
                 # Foreign or changed bytes are never deleted; leave the row
                 # for an explicit local review.
-                self._db(
-                    "set_delivery_issue",
-                    row["delivery_id"],
-                    row["current_batch_id"],
-                    state="recovery_needed",
-                    error_code="unowned_staged_temp",
-                )
-                return ("recovery_needed", "unowned_staged_temp")
+                return self._refuse_cancel(row, "unowned_staged_temp")
+        elif temp_presence.state is not Presence.ABSENT:
+            return self._refuse_cancel(row, _presence_error(temp_presence, "temp"))
         current = self._db("get_delivery", row["delivery_id"])
         expected_state = str(current["state"])
         if expected_state == "cancelled":
             return ("cancelled", reason)
         if expected_state not in {"prepared", "recovery_needed"}:
-            self._db(
-                "set_delivery_issue",
-                row["delivery_id"],
-                row["current_batch_id"],
-                state="recovery_needed",
-                error_code="unexpected_unpublished_state",
-            )
-            return ("recovery_needed", "unexpected_unpublished_state")
+            return self._refuse_cancel(row, "unexpected_unpublished_state")
         try:
             self._db(
                 "cancel_unpublished_delivery",
@@ -541,27 +560,111 @@ class PageDeliveryExecutor:
                 row["current_batch_id"],
                 error_code=reason,
                 expected_state=expected_state,
+                expected_prepared_sha256=str(evidence["sha256"]),
+                expected_generation=int(current["generation"]),
             )
         except _StorageFault:
             # The row moved between our read and the CAS (or the writer failed
-            # once).  Keep it for a later local recovery instead of aborting
-            # startup with an unclassified fault.
-            self._db(
-                "set_delivery_issue",
-                row["delivery_id"],
-                row["current_batch_id"],
-                state="recovery_needed",
-                error_code="cancel_state_changed",
-            )
-            return ("recovery_needed", "cancel_state_changed")
-        if owned:
-            try:
-                temp.unlink()
-            except OSError:
-                # The cleanup fact stays queryable; cleanup_cancelled_delivery
-                # retries it later without scanning a directory.
-                pass
+            # once).  Report the winner instead of guessing a cancellation.
+            return self._classify_after_race(row, "cancel_state_changed")
+        if temp_presence.state is Presence.PRESENT:
+            discard = self._discard_owned_temp(temp_ref, evidence, recheck_after_db=True)
+            if not discard.deleted and discard.code != "cleanup_failed":
+                # Identity doubt is a durable diagnosis (Sec.2.5).  A transient
+                # delete failure is not: the row is already queued for retry,
+                # and a durable "failed" fact would only pace it behind fresh
+                # work without adding information.
+                self._mark_cleanup(row["delivery_id"], evidence, "failed", discard.code)
+        else:
+            # Reachable root and a provably absent staged file: record the
+            # terminal fact instead of retrying a deletion that has nothing
+            # left to delete.  This never claims the delivery succeeded.
+            self._mark_cleanup(row["delivery_id"], evidence, "cleaned", "already_absent")
         return ("cancelled", reason)
+
+    def _refuse_cancel(self, row, error_code):
+        """Keep the row recoverable when the evidence denies cancellation."""
+        self._db(
+            "set_delivery_issue",
+            row["delivery_id"],
+            row["current_batch_id"],
+            state="recovery_needed",
+            error_code=error_code,
+        )
+        return ("recovery_needed", error_code)
+
+    def _classify_after_race(self, row, fallback_code):
+        """Report the state a competing writer left, without rewriting it."""
+        try:
+            current = self._db("get_delivery", row["delivery_id"])
+        except _StorageFault:
+            return ("recovery_needed", fallback_code)
+        state = str(current["state"])
+        if state == "completed":
+            return ("completed", "")
+        if state == "cancelled":
+            return ("cancelled", fallback_code)
+        return self._refuse_cancel(row, fallback_code)
+
+    def _mark_cleanup(self, delivery_id, evidence, outcome, error_code):
+        """Record one cleanup attempt bound to the prepared identity.
+
+        A missing fact only means a later sweep retries this delivery; it never
+        turns an unverified situation into a reported success.
+        """
+        try:
+            self._db(
+                "mark_cleanup_completed",
+                delivery_id,
+                outcome=outcome,
+                error_code=error_code,
+                expected_sha256=str(evidence["sha256"]),
+                expected_size=int(evidence["size"]),
+            )
+        except _StorageFault:
+            return
+
+    def _discard_owned_temp(self, temp_ref, evidence, *, recheck_after_db=False):
+        """Delete exactly the staged file this delivery still owns.
+
+        One implementation for cancellation, retry cleanup and post-confirm
+        cleanup.  The file is re-observed and re-verified after any writer
+        round-trip, because the path may name a replacement by then (RFA-06).
+        Nothing is ever deleted from a name, an extension or a directory scan.
+        """
+        presence = probe_ref(self.resolver, temp_ref)
+        if presence.state is Presence.ABSENT:
+            return _Discard(True, "already_absent")
+        if presence.state is not Presence.PRESENT:
+            return _Discard(False, _presence_error(presence, "temp"))
+        temp = self.resolver.resolve(temp_ref)
+        try:
+            self._verify_owned(temp, evidence)
+        except (OSError, _Fault, ContractError):
+            # After a writer round-trip the path is expected to name the very
+            # object that was verified before the CAS; anything else was
+            # replaced in between.
+            code = (
+                "temp_replaced_after_observation"
+                if recheck_after_db
+                else "unowned_staged_temp"
+            )
+            return _Discard(False, code)
+        if recheck_after_db:
+            again = probe_ref(self.resolver, temp_ref)
+            if again.state is Presence.ABSENT:
+                return _Discard(True, "already_absent")
+            if again.state is not Presence.PRESENT:
+                return _Discard(False, _presence_error(again, "temp"))
+            try:
+                self._verify_owned(temp, evidence)
+            except (OSError, _Fault, ContractError):
+                return _Discard(False, "temp_replaced_after_observation")
+        try:
+            temp.unlink()
+        except OSError:
+            return _Discard(False, "cleanup_failed")
+        return _Discard(True, "deleted")
 
     def cleanup_delivery(self, delivery_id):
         """Explicit local cleanup, safe even after a crash just after confirmation."""
@@ -571,21 +674,22 @@ class PageDeliveryExecutor:
         evidence = row.get("prepared")
         if row["state"] != "completed" or not isinstance(evidence, dict):
             return False
-        final = self.resolver.resolve(PathRef(**evidence["final_ref"]))
-        temp = self.resolver.resolve(PathRef(**evidence["temp_ref"]))
-        if temp.parent != final.parent or temp == final or not temp.exists():
+        final_ref = PathRef(**evidence["final_ref"])
+        temp_ref = PathRef(**evidence["temp_ref"])
+        final = self.resolver.resolve(final_ref)
+        temp = self.resolver.resolve(temp_ref)
+        if temp.parent != final.parent or temp == final or temp.suffix != ".part":
             return False
         self._verify_owned(final, evidence)
-        self._verify_owned(temp, evidence)
-        temp.unlink()
-        return True
+        return self._discard_owned_temp(temp_ref, evidence).deleted
 
     def cleanup_cancelled_delivery(self, delivery_id):
         """Retry deleting a cancelled delivery's own staged temp.
 
         The final name is never touched, no directory is scanned, and the file
         is removed only after its identity, size and digest still match the
-        prepared evidence.  A failure leaves a retryable cleanup fact.
+        prepared evidence.  A root that cannot be observed is not "already
+        absent": the delivery stays in the retry queue (RFA-02).
         """
         row = self._db("get_delivery", delivery_id)
         if row.get("state") != "cancelled":
@@ -595,34 +699,34 @@ class PageDeliveryExecutor:
             return False
         final_ref = PathRef(**evidence["final_ref"])
         temp_ref = PathRef(**evidence["temp_ref"])
+        final_presence = probe_ref(self.resolver, final_ref)
+        if final_presence.state is Presence.PRESENT:
+            # A published name belongs to the user's gallery; cleanup never
+            # removes it, even for a cancelled row.
+            return False
+        if final_presence.state is not Presence.ABSENT:
+            self._mark_cleanup(
+                delivery_id, evidence, "failed", _presence_error(final_presence, "final")
+            )
+            return False
+        temp_presence = probe_ref(self.resolver, temp_ref)
+        if temp_presence.state is Presence.ABSENT:
+            self._mark_cleanup(delivery_id, evidence, "cleaned", "already_absent")
+            return True
+        if temp_presence.state is not Presence.PRESENT:
+            self._mark_cleanup(
+                delivery_id, evidence, "failed", _presence_error(temp_presence, "temp")
+            )
+            return False
         final = self.resolver.resolve(final_ref)
         temp = self.resolver.resolve(temp_ref)
         if final == temp or temp.parent != final.parent or temp.suffix != ".part":
             return False
-        if final.exists():
-            # A published name belongs to the user's gallery; cleanup never
-            # removes it, even for a cancelled row.
+        discard = self._discard_owned_temp(temp_ref, evidence)
+        if not discard.deleted:
+            self._mark_cleanup(delivery_id, evidence, "failed", discard.code)
             return False
-        if not temp.exists():
-            self._db(
-                "mark_cleanup_completed",
-                delivery_id,
-                outcome="cleaned",
-                error_code="already_absent",
-            )
-            return True
-        try:
-            self._verify_owned(temp, evidence)
-            temp.unlink()
-        except (OSError, _Fault, ContractError):
-            self._db(
-                "mark_cleanup_completed",
-                delivery_id,
-                outcome="failed",
-                error_code="cleanup_failed",
-            )
-            return False
-        self._db("mark_cleanup_completed", delivery_id, outcome="cleaned")
+        self._mark_cleanup(delivery_id, evidence, "cleaned", "")
         return True
 
     def _finish_issue(self, row, stop, outcome, *, block=False):
@@ -742,32 +846,94 @@ class PageDeliveryExecutor:
         """Reconcile a bounded batch of prepared files, with zero HTTP requests."""
         results = []
         for row in self._db("list_recoverable", limit=limit):
+            delivery_id = row["delivery_id"]
             evidence = row.get("prepared")
             try:
                 if not isinstance(evidence, dict):
                     raise _Fault("prepared_evidence_missing", block=True)
                 published = self._publish(row, evidence)
                 if isinstance(published, tuple):
-                    results.append((row["delivery_id"], published[0]))
+                    results.append((delivery_id, published[0]))
                 else:
-                    results.append((row["delivery_id"], "completed"))
-            except (_Fault, OSError, ContractError):
-                self._db("set_delivery_issue", row["delivery_id"], row["current_batch_id"],
-                         state="recovery_needed", error_code="local_recovery_conflict")
-                results.append((row["delivery_id"], "recovery_needed"))
+                    results.append((delivery_id, "completed"))
             except _StorageFault:
                 # A typed library failure is a local condition, not a reason to
                 # abort startup; the row stays recoverable.
-                results.append((row["delivery_id"], "recovery_needed"))
-        # Bounded retry of cancelled-by-intent temps; never part of a delivery
-        # result and never allowed to fail startup.
-        try:
-            cleanup_rows = self._db("list_cleanup_candidates", limit=limit)
-        except _StorageFault:
-            cleanup_rows = ()
-        for fact in cleanup_rows:
-            try:
-                self.cleanup_cancelled_delivery(fact["delivery_id"])
-            except (_Fault, OSError, ContractError, _StorageFault):
-                continue
+                results.append((delivery_id, "recovery_needed"))
+            except (_Fault, OSError, ContractError):
+                results.append((delivery_id, self._settle_local_failure(row)))
+        self._sweep_cleanup(limit)
         return tuple(results)
+
+    def _settle_local_failure(self, row):
+        """Classify a local recovery failure without letting a race escape.
+
+        A competing recovery may have completed or cancelled the row while this
+        call was working.  Report the winner's state instead of rewriting it,
+        and never let the compensation's own refusal abort the loop (RFA-07).
+        Only an unreadable ledger propagates out of here.
+        """
+        delivery_id = row["delivery_id"]
+        batch_id = row["current_batch_id"]
+        current = self._db("get_delivery", delivery_id)
+        for _ in range(2):
+            state = str(current["state"])
+            if state in {"completed", "cancelled", "recovery_needed"}:
+                return state
+            try:
+                self._db(
+                    "set_delivery_issue",
+                    delivery_id,
+                    batch_id,
+                    state="recovery_needed",
+                    error_code="local_recovery_conflict",
+                    expected_state=state,
+                )
+                return "recovery_needed"
+            except _StorageFault:
+                # Either the row moved (a legal CAS refusal) or the writer is
+                # unavailable.  Re-reading separates the two cases.
+                current = self._db("get_delivery", delivery_id)
+        state = str(current["state"])
+        if state in {"completed", "cancelled", "recovery_needed"}:
+            return state
+        # The row did not move and the compensation could not be written.  It
+        # is still recoverable exactly as it was, so report that instead of
+        # aborting the whole startup pass with a false success.
+        return "recovery_needed"
+
+    def _sweep_cleanup(self, limit):
+        """Bounded retry of cancelled-by-intent temps, with a fair cursor.
+
+        The cursor advances past the examined window so one permanently failing
+        or unreadable row cannot starve newer candidates; reaching the tail
+        wraps once so a single startup pass still cleans the beginning.
+        """
+        rows = ()
+        try:
+            wrapped = False
+            while True:
+                stats: dict[str, int] = {}
+                rows = self._db(
+                    "list_cleanup_candidates",
+                    limit=limit,
+                    after_rowid=self._cleanup_cursor,
+                    stats=stats,
+                )
+                self._cleanup_cursor = max(
+                    self._cleanup_cursor, int(stats.get("next_rowid", 0))
+                )
+                if rows or not self._cleanup_cursor or wrapped:
+                    break
+                # Reached the tail of the queue: wrap once so one startup pass
+                # still cleans the beginning.
+                self._cleanup_cursor = 0
+                wrapped = True
+            for fact in rows:
+                try:
+                    self.cleanup_cancelled_delivery(fact["delivery_id"])
+                except (_Fault, OSError, ContractError, _StorageFault):
+                    continue
+        except _StorageFault:
+            return
+

@@ -112,10 +112,17 @@ def cleanup_fact(row: Any) -> CleanupFact | None:
 
 
 def cleanup_event_payload(fact: CleanupFact, *, outcome: str, error_code: str = "") -> dict[str, Any]:
-    """A stable audit payload; the outcome never claims delivery success."""
+    """A stable audit payload; the outcome never claims delivery success.
+
+    The payload is the only durable cleanup fact, so it carries the prepared
+    identity it refers to (digest and size) and the terminal boolean the
+    candidate query reads.  The producer here and the reader in
+    delivery_repository share this one shape (RFA-03).
+    """
     if outcome not in {"cleaned", "failed"}:
         raise CleanupError("Invalid cleanup outcome")
     return {
+        "schema_version": 1,
         "delivery_id": fact.delivery_id,
         "batch_id": fact.batch_id,
         "outcome": outcome,
@@ -124,3 +131,20 @@ def cleanup_event_payload(fact: CleanupFact, *, outcome: str, error_code: str = 
         "temp_size": fact.size,
         "cleanup_completed": outcome == "cleaned",
     }
+
+
+def cleanup_is_terminal(payload: Mapping[str, Any]) -> bool:
+    """Whether one cleanup fact ends the retry queue for its delivery.
+
+    Two shapes are accepted on purpose.  The current producer always writes
+    ``cleanup_completed``; a record written before RFA-03 has only
+    ``outcome == "cleaned"`` and must still leave the queue.  ``failed`` is
+    never terminal: a retry has to stay possible.  The SQL predicate in
+    ``DeliveryRepositoryMixin.list_cleanup_candidates`` is the transliteration
+    of this rule, and a test asserts the two agree.
+    """
+    if not isinstance(payload, Mapping):
+        return False
+    if "cleanup_completed" in payload:
+        return payload.get("cleanup_completed") is True
+    return payload.get("outcome") == "cleaned"
