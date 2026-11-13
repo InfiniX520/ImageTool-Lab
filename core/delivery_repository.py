@@ -206,6 +206,28 @@ _VALID_ARTIFACT_SQL = (
 )
 
 
+# The W5 verification list may only be asked for these delivery states.  The
+# default pair is "stopped and waiting for a decision"; suspended/retry_wait
+# belong to a paused or backing-off batch, and pending is a page whose bytes
+# were never published yet.  Anything else is a programming error rather than
+# an empty page, so an unknown state is rejected instead of silently ignored.
+_VERIFICATION_LIST_STATES = (
+    "needs_verification",
+    "recovery_needed",
+    "suspended",
+    "pending",
+    "retry_wait",
+)
+_VERIFICATION_DEFAULT_STATES = ("needs_verification", "recovery_needed")
+# SQL transliteration of the two rows of the recovery decision table in
+# core/delivery_recovery.py that own a real decide-and-link step: a held page
+# and a plain pending page.  That module cannot be imported at load time
+# (delivery mixin -> recovery -> repository), so the pair is restated here and
+# tests pin it against decide_page_recovery.
+_RECOVERABLE_PAGE_STATES = ("needs_verification", "pending")
+_VERIFICATION_MAX_LIMIT = 200
+
+
 def _lib():
     # Runtime import avoids the delivery mixin -> repository import cycle.
     from core import library_repository as module
@@ -215,6 +237,44 @@ def _lib():
 
 def _is_int(value: object) -> bool:
     return type(value) is int
+
+
+def _verification_states(states: object) -> tuple[str, ...]:
+    """Validate the requested delivery states, preserving caller order.
+
+    A bare string is rejected on purpose: iterating it would silently turn
+    "suspended" into seven single-letter states and match nothing.
+    """
+    lib = _lib()
+    if states is None:
+        return _VERIFICATION_DEFAULT_STATES
+    if isinstance(states, str) or not isinstance(states, (tuple, list)):
+        raise lib.LibraryError("Verification states must be a sequence")
+    if not states:
+        raise lib.LibraryError("Verification states must not be empty")
+    ordered: list[str] = []
+    for state in states:
+        if not isinstance(state, str) or state not in _VERIFICATION_LIST_STATES:
+            raise lib.LibraryError("Unsupported verification page state")
+        if state not in ordered:
+            ordered.append(state)
+    return tuple(ordered)
+
+
+def _verification_cursor(after: object) -> tuple[str, str, int, str] | None:
+    """Validate the (batch, illust, page, delivery) cursor of one page row."""
+    lib = _lib()
+    if after is None:
+        return None
+    if not isinstance(after, tuple) or len(after) != 4:
+        raise lib.LibraryError("Invalid verification page cursor")
+    batch_id, illust_id, page_index, delivery_id = after
+    for value in (batch_id, illust_id, delivery_id):
+        if not isinstance(value, str) or not value or len(value) > 512:
+            raise lib.LibraryError("Invalid verification page cursor")
+    if not _is_int(page_index) or not 0 <= page_index <= 9999:
+        raise lib.LibraryError("Invalid verification page cursor")
+    return (batch_id, illust_id, page_index, delivery_id)
 
 
 def _require_library_error(message: str) -> None:
@@ -593,6 +653,215 @@ class DeliveryRepositoryMixin:
                 (limit,),
             ).fetchall()
         return tuple(self._delivery_dict(row) for row in rows)
+
+    # ------------------------------------------------------------------
+    # W5: bounded read-only view of the pages a user has to decide about
+    # ------------------------------------------------------------------
+
+    def list_verification_pages(
+        self,
+        *,
+        batch_id: str | None = None,
+        states: object = None,
+        after: object = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return one stable page of delivery rows the user may need to resolve.
+
+        This is the read half of the W5 entry: it never opens a file, never
+        hashes, never touches the network and never writes.  A row is one
+        selected page (batch_item_pages) whose delivery is in one of the
+        requested states, so a page carried into a later batch is listed under
+        that batch instead of disappearing.
+
+        recoverable and actions say whether recover_verification_page can act
+        on the row at all.  Only a held page or a plain pending page owns a
+        decide-and-link step, and the batch has to be running: the command
+        refuses a paused batch with batch_not_running, so offering the button
+        there would be a dead end.  Every other row is reported for the
+        operator and left untouched.
+
+        The cursor is the row primary key plus its delivery id, ordered the
+        same way, so an accept that inserts an earlier row cannot make a later
+        page appear twice or be skipped.  limit=0 returns no rows and no
+        cursor on purpose: the caller asked for counts only.
+        """
+        lib = _lib()
+        self._ensure_open()
+        if batch_id is not None:
+            batch_id = lib._validate_identifier(batch_id, "batch id")
+        selected = _verification_states(states)
+        cursor = _verification_cursor(after)
+        if not _is_int(limit):
+            raise lib.LibraryError("limit must be an integer")
+        if not 0 <= limit <= _VERIFICATION_MAX_LIMIT:
+            raise lib.LibraryError(
+                f"limit must be between 0 and {_VERIFICATION_MAX_LIMIT}"
+            )
+        base = (
+            " FROM batch_item_pages AS bip"
+            " JOIN deliveries AS d ON d.delivery_id = bip.delivery_id"
+            " LEFT JOIN batches AS b ON b.batch_id = bip.batch_id"
+        )
+        condition = ["d.state IN (" + ",".join("?" * len(selected)) + ")"]
+        params: list[Any] = list(selected)
+        if batch_id is not None:
+            condition.append("bip.batch_id = ?")
+            params.append(batch_id)
+        # The scope (states plus batch) and the continuation are separate
+        # conditions: the total counts the whole scope, while the page starts
+        # after the cursor.  Mixing the two would make every later page
+        # report a smaller total than the one before it.
+        scope_where = " WHERE " + " AND ".join(condition)
+        row_condition = list(condition)
+        row_params = list(params)
+        if cursor is not None:
+            row_condition.append(
+                "(bip.batch_id, bip.illust_id, bip.page_index, d.delivery_id)"
+                " > (?, ?, ?, ?)"
+            )
+            row_params.extend(cursor)
+        row_where = " WHERE " + " AND ".join(row_condition)
+        select = (
+            "SELECT bip.batch_id, d.job_id, bip.illust_id, bip.page_index,"
+            " d.delivery_id, d.state, d.error_code, d.generation, d.updated_at,"
+            " d.output_key, b.phase AS batch_phase"
+        )
+        with closing(self._readonly_connection()) as conn:
+            # One short read transaction: the total and the page come from the
+            # same snapshot, so "truncated" describes the rows it ships.
+            total = int(
+                conn.execute("SELECT COUNT(*)" + base + scope_where, params).fetchone()[0]
+            )
+            if limit == 0:
+                fetched: list[sqlite3.Row] = []
+            else:
+                fetched = conn.execute(
+                    select
+                    + base
+                    + row_where
+                    + " ORDER BY bip.batch_id, bip.illust_id, bip.page_index,"
+                    " d.delivery_id LIMIT ?",
+                    (*row_params, limit + 1),
+                ).fetchall()
+        truncated = len(fetched) > limit
+        rows = [self._verification_row(row) for row in fetched[:limit]]
+        next_cursor = (
+            (
+                rows[-1]["batch_id"],
+                rows[-1]["illust_id"],
+                rows[-1]["page_index"],
+                rows[-1]["delivery_id"],
+            )
+            if truncated and rows
+            else None
+        )
+        return {
+            "rows": rows,
+            "next_cursor": next_cursor,
+            "truncated": truncated,
+            "stats": {
+                "batch_id": batch_id,
+                "states": list(selected),
+                "limit": limit,
+                "total": total,
+                "returned": len(rows),
+                "truncated": truncated,
+            },
+        }
+
+    def _verification_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Project one joined row; payloads and the filesystem stay untouched."""
+        state = str(row["state"])
+        phase = row["batch_phase"]
+        # A held page in a paused batch is a real fact the operator must see,
+        # but recovery cannot act on it: report the reason instead of a button.
+        running = phase is not None and str(phase) == "running"
+        recoverable = state in _RECOVERABLE_PAGE_STATES and running
+        return {
+            "batch_id": str(row["batch_id"]),
+            "job_id": str(row["job_id"]),
+            "illust_id": str(row["illust_id"]),
+            "page_index": int(row["page_index"]),
+            "delivery_id": str(row["delivery_id"]),
+            "state": state,
+            "error_code": row["error_code"],
+            "generation": int(row["generation"]),
+            "updated_at": row["updated_at"],
+            "output_key": str(row["output_key"]),
+            "batch_phase": None if phase is None else str(phase),
+            "recoverable": recoverable,
+            "actions": ["verify"] if recoverable else [],
+            "blocked_reason": (
+                "batch_not_running"
+                if state in _RECOVERABLE_PAGE_STATES and not running
+                else None
+            ),
+        }
+
+    def verification_summary(self, *, batch_id: str | None = None) -> dict[str, Any]:
+        """Count the page rows by delivery state for one batch or the library.
+
+        Read-only and bounded: three statements per call and no per-row loop in
+        Python.  counts always carries the five listable states (zero when
+        absent) plus any other state actually present, so a caller can render a
+        stable set of chips.  total_pages counts every selected page link,
+        including pages that have no delivery yet, while linked_pages counts
+        the pages the state counts describe; the two differ exactly by the
+        pages this batch has not started.
+
+        A batch id that does not exist is not an error: the counts are empty,
+        known is false and a caller can say so without catching anything.
+
+        truncated is always false: a GROUP BY aggregate cannot be cut.  The key
+        exists so a future capped implementation reports the same shape.
+        """
+        lib = _lib()
+        self._ensure_open()
+        if batch_id is not None:
+            batch_id = lib._validate_identifier(batch_id, "batch id")
+        with closing(self._readonly_connection()) as conn:
+            if batch_id is None:
+                batch = conn.execute(
+                    "SELECT batch_id, phase FROM batches"
+                    " ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                ).fetchone()
+            else:
+                batch = conn.execute(
+                    "SELECT batch_id, phase FROM batches WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()
+            scope = "" if batch_id is None else " WHERE bip.batch_id = ?"
+            params: tuple[Any, ...] = () if batch_id is None else (batch_id,)
+            counts = {state: 0 for state in _VERIFICATION_LIST_STATES}
+            for state, number in conn.execute(
+                "SELECT d.state, COUNT(*) FROM batch_item_pages AS bip"
+                " JOIN deliveries AS d ON d.delivery_id = bip.delivery_id"
+                + scope
+                + " GROUP BY d.state",
+                params,
+            ):
+                counts[str(state)] = int(number)
+            total, recoverable = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN d.state IN"
+                " ('needs_verification','pending') AND b.phase = 'running'"
+                " THEN 1 ELSE 0 END), 0) FROM batch_item_pages AS bip"
+                " LEFT JOIN deliveries AS d ON d.delivery_id = bip.delivery_id"
+                " LEFT JOIN batches AS b ON b.batch_id = bip.batch_id"
+                + scope,
+                params,
+            ).fetchone()
+        return {
+            "batch_id": batch_id,
+            "latest_batch_id": None if batch is None else str(batch["batch_id"]),
+            "phase": None if batch is None else str(batch["phase"]),
+            "known": batch is not None,
+            "counts": counts,
+            "recoverable": int(recoverable),
+            "total_pages": int(total),
+            "linked_pages": sum(counts.values()),
+            "truncated": False,
+        }
 
     def list_cleanup_candidates(
         self,
