@@ -39,10 +39,10 @@
 | 入口 | 规则 |
 | --- | --- |
 | `record_removal_intent(EXCLUDED)` | 追加事件后，对**所有 job** 的该键 `CANCELLABLE_STATES` 置 `cancelled/intent_excluded`；已发布态一律不动 |
-| `claim_delivery` | 转移前查投影；`blocks_claim` → 取消该行并返回 `None` |
+| `claim_delivery` | 转移前查投影；EXCLUDED → 取消该行并返回 `None`；投影损坏 → 事务内把批次置 `pausing/blocked(intent_unreadable)` 并写诊断事件，再向调用方抛 `CorruptDataError`（不得用 `None` 静默空转） |
 | `recover_verification_page` | `blocks_repair` → `refused/intent_excluded`；坏事件 → `refused/intent_unreadable` |
-| `_publish`（链路前） | 调 `publish_authorized(delivery_id)`；假 → 不落盘，保留/清理自有 `.part`，`cancelled/intent_excluded` |
-| `_confirm_delivery`（事务内） | 权威复查；假 → 抛 `PublishBlocked`，不写 artifact |
+| `_publish`（链路前，`final` 不存在时） | 调 `publish_authorized(delivery_id)`；`intent_excluded` → 不落盘，`cancel_unpublished_delivery` 置 `cancelled/intent_excluded`，只删自己校验过的 `.part`；`intent_unreadable` → 不落盘，置 `recovery_needed` 并保留 `.part`（不知道意图就不丢弃字节） |
+| `_confirm_delivery` | **不复查意图**：发布线性化点是 `os.link` 之前；confirmation 只完成已经落盘的文件（崩溃后 `final` 已存在时按“本次已完成，仅约束后续”处理，不删已发布文件） |
 
 ## 3. 恢复证据（C3 / UA-04、UA-06）
 
@@ -65,7 +65,7 @@
 ## 4. 所有权与根（C4、C5 / UA-05、UA-03）
 
 - carry 仍链外任务 NV；恢复获得受控取代权：`hash_match` → 外任务 NV 置 `cancelled/superseded_by_recovery_reuse`，本批页链 artifact（跨 job 时 `delivery_id=NULL`）；`missing` → 先取代外任务 NV，再建本批 pending。`transferring/validating/prepared` 不抢，仍返回 `output_blocked_by_other_task`。事件 `recovery_owner_transfer`。
-- `PathResolver.root_state(ref) -> available | missing_bound | unbound`；`_new_stage` 仅在 `unbound` 时建目录，`missing_bound` 抛 `_StorageFault("root_unavailable", block=True)`。
+- `PathResolver.root_state(ref) -> available | missing_bound | unbound`；`_new_stage` 只在 `available` 时允许创建 `.part`，`missing_bound` 抛 `_Fault("root_unavailable", block=True)`，`unbound` 仍由 `resolve()` 报 `ContractError`（不把未映射路径当成可创建目录）。
 
 ## 5. 并行分工（Phase 2）
 
@@ -73,8 +73,8 @@
 | --- | --- | --- |
 | A accept | `core/library_repository.py` | `tests/test_u1a_accept_race.py` |
 | B recovery | `core/delivery_recovery.py` | `tests/test_u1a_recovery_ownership.py` |
-| C publish/root | `core/page_delivery.py`、`core/library_paths.py` | `tests/test_u1a_publish_root.py` |
-| D delivery/intent | `core/delivery_repository.py` | `tests/test_u1a_intent_scope.py` |
+| C root guard | `core/page_delivery.py`、`core/library_paths.py` | `tests/test_u1a_root_guard.py` |
+| D 跨路反例 | 仅测试（不改产品） | `tests/test_u1a_cross_lane_boundaries.py` |
 | E carry 效率 | `core/follow_repository.py`、`core/query_repository.py` | `tests/test_u1a_carry_parse_once.py` |
 
 合并顺序 A → B → D → C → E；UA-07（观察执行器 + 控制通道）在 Phase 3 串行。

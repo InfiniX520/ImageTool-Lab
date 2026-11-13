@@ -215,7 +215,7 @@ def read_projection(conn: Any) -> IntentProjection:
         try:
             seq = int(row["event_seq"])
         except (TypeError, ValueError):
-            corrupt.append(-1)
+            corrupt.append(0)
             continue
         max_seq = max(max_seq, seq)
         try:

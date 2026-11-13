@@ -478,6 +478,17 @@ class PageDeliveryExecutor:
         reason = "intent_excluded"
         if isinstance(decision, dict) and decision.get("reason") == "intent_unreadable":
             reason = "intent_unreadable"
+        if reason == "intent_unreadable":
+            # An unreadable intent is not permission to discard staged bytes:
+            # keep prepared/.part and park the delivery for an explicit review.
+            self._db(
+                "set_delivery_issue",
+                row["delivery_id"],
+                row["current_batch_id"],
+                state="recovery_needed",
+                error_code=reason,
+            )
+            return ("recovery_needed", reason)
         self._db(
             "cancel_unpublished_delivery",
             row["delivery_id"],

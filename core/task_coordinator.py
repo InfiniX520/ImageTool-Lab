@@ -99,10 +99,7 @@ class TaskCoordinator:
         if name in {"snapshot", "request_stop"}:
             return self._run_control_command(name, args, kwargs)
         result = Future()
-        with self._guard:
-            if not self._started or self._closing or self._shutdown.is_set():
-                result.set_exception(CoordinatorClosed("Coordinator is not accepting commands"))
-                return result
+        admitted_running = False
         if name == "accept_source_page":
             # Admission happens here, while the batch is known to be running.
             # An observation that was admitted before a pause may still commit
@@ -112,13 +109,22 @@ class TaskCoordinator:
             except BaseException as exc:
                 result.set_exception(exc)
                 return result
-            try:
-                self._observations.put_nowait((args[0], args[1], admitted_running, result))
-            except queue.Full:
-                result.set_exception(CommandQueueFull("Observation capacity reached; try again"))
-                return result
-            return result
         with self._guard:
+            if not self._started or self._closing or self._shutdown.is_set():
+                result.set_exception(CoordinatorClosed("Coordinator is not accepting commands"))
+                return result
+            if name == "accept_source_page":
+                # The put happens under the same guard as the closed check, so
+                # close() can never strand an accepted Future.
+                try:
+                    self._observations.put_nowait(
+                        (args[0], args[1], admitted_running, result)
+                    )
+                except queue.Full:
+                    result.set_exception(
+                        CommandQueueFull("Observation capacity reached; try again")
+                    )
+                return result
             try:
                 (self._control if priority else self._commands).put_nowait((name, args, kwargs, result))
             except queue.Full:
@@ -366,7 +372,11 @@ class TaskCoordinator:
                         self._stop.set()
                         self._drain_pages()
                         with self._guard:
-                            busy = bool(self._inflight) or bool(self._observing)
+                            busy = (
+                                bool(self._inflight)
+                                or bool(self._observing)
+                                or bool(self._observations.qsize())
+                            )
                         if not busy:
                             self.repository.settle_stop(batch["batch_id"])
                             batch = self.repository.get_batch(batch["batch_id"])
@@ -381,6 +391,7 @@ class TaskCoordinator:
                                 not self._queued
                                 and not self._inflight
                                 and not self._observing
+                                and not self._observations.qsize()
                             )
                         if idle:
                             budget = self.repository.budget_status(batch["batch_id"])
@@ -427,14 +438,24 @@ class TaskCoordinator:
             self._stop.set()
             self._wake.set()
         if self._started:
-            try:
-                self._observations.put_nowait(None)
-                self._control_commands.put_nowait(None)
-            except queue.Full:
-                pass
+            for channel in (self._observations, self._control_commands):
+                try:
+                    channel.put_nowait(None)
+                except queue.Full:
+                    pass
             threads = (self._owner, *self._workers, self._observer, self._control_thread)
             for thread in threads:
                 thread.join(max(0, deadline - time.monotonic()))
+            for channel in (self._observations, self._control_commands):
+                while True:
+                    try:
+                        item = channel.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is not None and not item[3].done():
+                        item[3].set_exception(
+                            CoordinatorClosed("Coordinator stopped before this command ran")
+                        )
             if any(thread.is_alive() for thread in threads):
                 raise TimeoutError("Collection workers are still settling; repository remains open")
         self.repository.close(timeout=max(0, deadline - time.monotonic()))

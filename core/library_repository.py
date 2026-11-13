@@ -1591,7 +1591,15 @@ class LibraryRepository(
         payload: dict[str, Any] = {"delivery_id": delivery_id, "batch_id": batch_id}
         if health is not None:
             payload["health"] = [record.to_payload() for record in health]
-        return self._enqueue("claim_delivery", payload)
+        result = self._enqueue("claim_delivery", payload)
+        if isinstance(result, dict) and "corrupt_intent" in result:
+            # The writer already blocked the batch (durably) and appended a
+            # diagnostic event; surface the corruption to the caller.
+            raise CorruptDataError(
+                f"removal intent event {result['corrupt_intent']} is unreadable; "
+                "the batch is blocked"
+            )
+        return result
 
     def _preflight_claim_health(
         self, delivery_id: str, batch_id: str
@@ -2903,10 +2911,18 @@ class LibraryRepository(
                                 )
                             artifact_id = str(artifact["artifact_id"])
                             if snapshot is None or snapshot.degraded:
-                                # The preflight could not observe this page at
-                                # all.  Say so honestly and hold, instead of
-                                # inventing "artifact_unknown" for a delivery
-                                # that may be perfectly intact (UA-01).
+                                # A transient observation failure is retried
+                                # outside this transaction; a permanent one
+                                # (no resolver, invalid snapshot) holds
+                                # honestly instead of inventing a verdict.
+                                degraded_reason = (
+                                    "no_resolver" if snapshot is None else snapshot.reason
+                                )
+                                if degraded_reason in {
+                                    "preflight_failed",
+                                    "observation_failed",
+                                }:
+                                    raise RetryPreflight(degraded_reason)
                                 degraded_hold = True
                             else:
                                 if page_snapshot is None or page_snapshot.stale_for(
@@ -2986,7 +3002,15 @@ class LibraryRepository(
                             continue
                         if candidates and blocked_state is None:
                             if page_snapshot is None:
-                                if snapshot is not None and snapshot.degraded:
+                                degraded_reason = (
+                                    "no_resolver" if snapshot is None else snapshot.reason
+                                )
+                                if (
+                                    snapshot is not None
+                                    and snapshot.degraded
+                                    and degraded_reason
+                                    not in {"preflight_failed", "observation_failed"}
+                                ):
                                     # Nothing could be observed; hold honestly.
                                     degraded_hold = True
                                 else:
@@ -2999,12 +3023,12 @@ class LibraryRepository(
                                         str(item["artifact_id"])
                                     )
                                     is not None
-                                    or str(item["artifact_id"]) in page_snapshot.unobserved
                                 ]
                                 if not covered:
                                     # A candidate appeared after the candidate
-                                    # read; never turn that into "unknown".
-                                    raise RetryPreflight("trusted_candidate_uncovered")
+                                    # read, or it could not be observed at all.
+                                    # Neither is evidence of a bad file.
+                                    raise RetryPreflight("trusted_candidate_unobserved")
                                 observed = None
                                 for record in page_snapshot.observed:
                                     if record.state in {
@@ -3014,11 +3038,13 @@ class LibraryRepository(
                                         continue
                                     observed = record.state
                                     break
-                                if observed is None and page_snapshot.observed:
-                                    observed = page_snapshot.observed[0].state
-                                blocked_state = (
-                                    observed if observed is not None else LocalState.UNKNOWN
-                                )
+                                if observed is None:
+                                    # Only usable matches were observed, yet no
+                                    # reuse verdict was reached: hold honestly
+                                    # instead of reporting "unknown".
+                                    degraded_hold = True
+                                else:
+                                    blocked_state = observed
                     max_generation_row = conn.execute(
                         "SELECT COALESCE(MAX(generation), 0) AS generation FROM deliveries "
                         "WHERE job_id = ? AND illust_id = ? AND page_index = ? "
@@ -3394,9 +3420,10 @@ class LibraryRepository(
             if delivery is None or delivery["job_id"] != batch["job_id"]:
                 return None
             if delivery["state"] == "completed":
-                # Claiming a finished delivery is a no-op success.  A retried
-                # accept that raced a completion must be able to report the
-                # same completed page, not "unavailable".
+                # Idempotent re-claim: a retried acceptance that raced a real
+                # completion must be able to report the same finished page
+                # instead of inventing "unavailable".  Coordinators never
+                # dispatch a completed row (list_dispatchable excludes it).
                 return self._delivery_dict(delivery)
             if delivery["state"] not in _DISPATCHABLE_STATES:
                 return None
@@ -3404,8 +3431,37 @@ class LibraryRepository(
                 return None
             projection = read_projection(conn)
             if projection.corrupt_events:
-                # Unreadable intent is not permission to download.
-                return None
+                # UA-10: an unreadable intent is not permission to download and
+                # not a silent "nothing to do" either.  Block the batch so the
+                # coordinator stops dispatching, and surface the corruption.
+                now = _utcnow()
+                conn.execute(
+                    "UPDATE batches SET phase = 'pausing', active_slot = 1, "
+                    "stop_target = 'blocked', stop_reason = 'intent_unreadable' "
+                    "WHERE batch_id = ? AND phase IN "
+                    "('running','cooling','settling','pausing')",
+                    (batch_id,),
+                )
+                conn.execute(
+                    "UPDATE jobs SET state = 'pausing', updated_at = ? WHERE job_id = ?",
+                    (now, str(batch["job_id"])),
+                )
+                self._insert_event(
+                    conn,
+                    job_id=str(batch["job_id"]),
+                    batch_id=batch_id,
+                    kind="batch_block_requested",
+                    payload={
+                        "batch_id": batch_id,
+                        "phase": "pausing",
+                        "stop_target": "blocked",
+                        "reason_code": "intent_unreadable",
+                        "corrupt_event_seq": projection.corrupt_events[0],
+                    },
+                )
+                # The block must commit, so report it as a result and let the
+                # public wrapper raise outside the transaction.
+                return {"corrupt_intent": projection.corrupt_events[0]}
             try:
                 delivery_ref = path_ref_from_object(
                     _parse_json_object(

@@ -965,6 +965,11 @@ class DeliveryRecoveryMixin:
         ):
             return "stale_preflight"
         now = lib._utcnow()
+        previous_state = str(delivery["state"])
+        if previous_state not in {"pending", "needs_verification"}:
+            # Only a hold or a queued repair may be retired here; a prepared or
+            # transferring row is never rewritten by a recovery reuse.
+            return "state_changed"
         retired = conn.execute(
             "UPDATE deliveries SET state = 'cancelled', error_code = ?, "
             "retry_at = NULL, updated_at = ? WHERE delivery_id = ? AND state = ?",
@@ -972,7 +977,7 @@ class DeliveryRecoveryMixin:
                 "superseded_by_recovery_reuse" if foreign else "recovered_hash_match",
                 now,
                 str(delivery["delivery_id"]),
-                str(delivery["state"]),
+                previous_state,
             ),
         ).rowcount
         if retired != 1:
