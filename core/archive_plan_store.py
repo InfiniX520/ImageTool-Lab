@@ -1135,27 +1135,34 @@ def save_prepared_plan_in_transaction(
             (asset.path_key,),
         ).fetchone()
         if current_binding is None:
+            # Accepted evidence without a binding is a low-level anomaly.  Creating an
+            # index-only binding here would silently drop which object was accepted,
+            # so the path has to be re-observed and accepted first.
+            if conn.execute(
+                "SELECT 1 FROM archive_path_acceptances WHERE path_key=?",
+                (asset.path_key,),
+            ).fetchone() is not None:
+                raise ArchivePlanConflictError(
+                    "Path has accepted evidence but no binding; apply the observation first")
             bind_archive_path(conn, content, asset.path, bound_at=created_at)
         else:
             current_content = conn.execute(
-                """SELECT content_key,asset_id,revision FROM archive_assets
+                """SELECT content_key FROM archive_assets
                    WHERE asset_id=? AND revision=? AND path_key=?""",
                 (current_binding[0], current_binding[1], asset.path_key),
             ).fetchone()
             if current_content is None:
                 raise ArchivePlanConflictError("Current path binding has no exact asset")
-            new_key = _content_key(content)
-            if current_content[0] != new_key:
-                if (
-                    current_content[1] != content.asset_id
-                    or current_content[2] >= content.revision
-                ):
-                    raise ArchivePlanConflictError(
-                        "Path binding cannot move to a different asset or an older revision"
-                    )
-                bind_archive_path(
-                    conn, content, asset.path, bound_at=created_at,
-                    expected_content_key=current_content[0],
+            if current_content[0] == _content_key(content):
+                # The plan names exactly what the path already accepts: keep the
+                # accepted evidence, its root generation and its binding row.
+                pass
+            else:
+                # A plan may not advance or replace a current binding.  Every such
+                # move is an observation decision that belongs to
+                # apply_observed_plan, where the expected token is rechecked.
+                raise ArchivePlanConflictError(
+                    "Plan cannot advance an existing path binding; apply the observation first"
                 )
         source_row = conn.execute(
             """SELECT source_kind FROM archive_assets

@@ -564,11 +564,20 @@ def test_cross_batch_reuses_observed_asset_without_relabelling(migrated_copy):
     assert load_archive_plan(conn, "cross-batch").inventory == inventory
 
 
-def test_plan_revision_advances_binding_but_old_plan_still_reloads(migrated_copy):
+def test_plan_cannot_advance_a_binding_and_the_old_plan_still_reloads(migrated_copy):
+    """A saved plan never moves a current binding; the observation command owns that.
+
+    AR4-02: the plan path used to advance a binding whenever the same asset had a
+    larger revision, and it cleared the accepted evidence while doing so.  A plan is
+    now pure index history unless the path is unbound.
+    """
     conn, _ = migrated_copy
     old, old_capacity = make_plan("generation-one")
     save_plan(conn, old, old_capacity)
     old_asset = old.assets[0]
+    binding_before = conn.execute(
+        "SELECT asset_id,revision,bound_at,acceptance_id FROM archive_path_bindings "
+        "WHERE path_key=?", (old_asset.path_key,)).fetchone()
     newer_content = ContentVersion(
         old_asset.content.asset_id, old_asset.content.revision + 1,
         old_asset.content.size_bytes + 1, "b" * 64,
@@ -581,14 +590,17 @@ def test_plan_revision_advances_binding_but_old_plan_still_reloads(migrated_copy
         policy=InventoryPolicy(target_package_bytes=1024),
     )
     newer_capacity = plan_archive_capacity(newer, available_additional_bytes=1_000_000)
-    save_plan(conn, newer, newer_capacity)
-    assert load_archive_plan(conn, "generation-one").inventory == old
-    assert load_archive_plan(conn, "generation-two").inventory == newer
+    counts_before = conn.execute(
+        "SELECT COUNT(*) FROM archive_batches").fetchone()[0]
+    with pytest.raises(ArchivePlanConflictError, match="cannot advance"):
+        save_plan(conn, newer, newer_capacity)
+    assert conn.execute("SELECT COUNT(*) FROM archive_batches").fetchone()[0] == (
+        counts_before)
     assert conn.execute(
-        "SELECT asset_id,revision FROM archive_path_bindings WHERE path_key=?",
-        (old_asset.path_key,),
-    ).fetchone() == (newer_content.asset_id, newer_content.revision)
-    assert conn.execute("SELECT COUNT(*) FROM archive_assets").fetchone()[0] == 2
+        "SELECT asset_id,revision,bound_at,acceptance_id FROM archive_path_bindings "
+        "WHERE path_key=?", (old_asset.path_key,)).fetchone() == binding_before
+    assert conn.execute("SELECT COUNT(*) FROM archive_assets").fetchone()[0] == 1
+    assert load_archive_plan(conn, "generation-one").inventory == old
 
 
 def test_ten_thousand_one_entries_rejected_by_explicit_count_budget():
