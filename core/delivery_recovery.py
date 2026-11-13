@@ -68,7 +68,10 @@ from enum import StrEnum
 from typing import Any
 
 from core.artifact_health import ArtifactHealth
-from core.delivery_lineage import is_supersede_code, resolve_successor
+from core.delivery_lineage import (
+    is_supersede_code,
+    resolve_successor_ex,
+)
 from core.preservation_policy import LocalState
 from core.task_contracts import ContractError
 
@@ -279,6 +282,10 @@ class _RecoveryPage:
     artifacts: tuple[dict[str, Any], ...]
     cross_task_receipt: bool
     successor: dict[str, Any] | None = None
+    # Why the resolver returned (or refused) a successor.  A refused handover
+    # target must stay visible in the diagnosis instead of looking like "no
+    # record at all" (RFA-04).
+    successor_reason: str | None = None
 
 
 def _unavailable_reason(page: _RecoveryPage) -> str:
@@ -493,6 +500,7 @@ class DeliveryRecoveryMixin:
                 "successor_artifact_id": (
                     None if successor is None else successor.get("artifact_id")
                 ),
+                "successor_reason": page.successor_reason,
                 "draft": draft,
             },
         )
@@ -616,13 +624,16 @@ class DeliveryRecoveryMixin:
                         request=request,
                     )
             successor = None
+            successor_reason: str | None = None
             if (
                 delivery is not None
                 and state != "completed"
                 and str(delivery["state"]) == "cancelled"
                 and is_supersede_code(error_code)
             ):
-                resolved = resolve_successor(conn, delivery)
+                lineage = resolve_successor_ex(conn, delivery)
+                resolved = lineage.successor
+                successor_reason = lineage.reason
                 if resolved is not None:
                     successor = {
                         "delivery_id": resolved.delivery_id,
@@ -658,6 +669,7 @@ class DeliveryRecoveryMixin:
             artifacts=artifacts,
             cross_task_receipt=cross_task_receipt,
             successor=successor,
+            successor_reason=successor_reason,
         )
 
     def _read_recovery_candidates(
@@ -1156,8 +1168,13 @@ class DeliveryRecoveryMixin:
         batch keep their original facts.
         """
         lib = _lib()
-        resolved = resolve_successor(conn, delivery)
+        lineage = resolve_successor_ex(conn, delivery)
+        resolved = lineage.successor
         if resolved is None:
+            if lineage.reason == "event_target_unusable":
+                # The recorded handover names a target this page can no longer
+                # use.  Refuse instead of guessing from the rowid window.
+                return "successor_unusable"
             return "superseded_unresolved"
         if str(resolved.delivery_id) != str(payload.get("successor_delivery_id")):
             return "successor_changed"
