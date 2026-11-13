@@ -14,6 +14,12 @@ projection is read inside a short transaction that is closed *before* the first
 file is opened, so a long audit cannot pin the WAL or block a concurrent
 writer's checkpoint.
 
+One measured caveat, the same one core.library_maintenance documents: opening a
+WAL database read-only makes SQLite create its own bookkeeping beside it (an
+empty -wal and the -shm shared-memory index) and refreshes the -shm mtime.  The
+database bytes, and every delivered file, stay untouched; both sides are
+rebuilt on the next open.
+
 "missing" only means "the entry was absent during this observation": it is not
 an accident report and it never authorizes a repair.  A recorded EXCLUDED
 removal intent is the user's own decision, so an absent file is reported as

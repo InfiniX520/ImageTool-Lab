@@ -154,6 +154,40 @@ def test_a_malformed_cursor_is_refused_instead_of_ignored(tmp_path, capsys):
     assert payload["code"] == "scan_cursor_invalid"
 
 
+def test_an_out_of_range_limit_is_refused_not_a_crash(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+
+    assert main(["scan", str(database), "--limit", "0", "--json"]) == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["code"] == "invalid_argument"
+
+    assert main(["scan", str(database), "--limit", "500", "--json"]) == 4
+    assert json.loads(capsys.readouterr().out)["code"] == "invalid_argument"
+
+
+def test_a_negative_budget_is_refused_not_a_crash(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+
+    code = main(["scan", str(database), "--max-bytes", "-1", "--json"])
+
+    assert code == 4
+    assert json.loads(capsys.readouterr().out)["code"] == "invalid_argument"
+
+
+def test_unverifiable_rows_are_counted_out_loud(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+    data = b"\xff\xd8too big for the budget\xff\xd9"
+    _write_file(tmp_path, "downl_Pixiv/artist/6_p0.jpg", data)
+    _insert_artifact(database, "downl_Pixiv/artist/6_p0.jpg", data)
+
+    code = main(["scan", str(database), "--max-bytes", "1"])
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "无法核验 1" in printed
+    assert "另有 1 行没有可核验的记录" in printed
+
+
 def test_an_unreadable_ledger_exits_three(tmp_path, capsys):
     database = _empty_library(tmp_path)
     database.write_bytes(b"not a database at all")

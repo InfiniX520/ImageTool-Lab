@@ -42,7 +42,8 @@ python maintain.py scan   <备份目录>\library.sqlite3 --root E:\Zero9\JuiLiu\
 ```
 
 通过标准：`verify` 输出 `ok=True`；`scan` 输出 `核验: N 行（匹配 N，无法核验 0）` 且 `结论: 本次核验的每一行都与记录一致。`
-`scan` 的退出码：0 = 全部一致；2 = 有 missing/changed/unreadable/root_unavailable/changed_during_check；3 = 账本读不出来；4 = 参数被拒。
+`scan` 的退出码：0 = 全部一致（`unknown` 只统计不报错，会单独打印"另有 N 行没有可核验的记录"）；2 = 有 missing/changed/unreadable/root_unavailable/changed_during_check；3 = 账本读不出来；4 = 参数被拒。
+`scan` 只读：它不写库、不动图库文件，唯一副作用是 SQLite 打开 WAL 库时刷新 `-shm` 的 mtime（主库字节与 sha256 不变）。耗时与机器相关（本机 11 个文件 / 95 MB 约 0.1–0.3 秒），不要当验收阈值。
 
 ## 4. 切换（一行）
 

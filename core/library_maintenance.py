@@ -54,6 +54,7 @@ from core.library_repository import (
     _SCHEMA_VERSION,
     _validate_database_path,
 )
+from core.task_contracts import ContractError
 
 MANIFEST_VERSION = 1
 MANIFEST_NAME = "manifest.json"
@@ -1002,7 +1003,7 @@ def _parser() -> argparse.ArgumentParser:
         "--root", type=Path, default=None, help="输出图库根目录；默认取库文件所在项目的根"
     )
     scan.add_argument(
-        "--limit", type=int, default=200, help="本次最多核验多少行（1-2000，默认 200）"
+        "--limit", type=int, default=200, help="本次最多核验多少行（1-200，默认 200）"
     )
     scan.add_argument(
         "--after", default=None, help="续跑游标：上一次输出的 next_cursor（completed_at,artifact_id）"
@@ -1072,6 +1073,10 @@ def _scan_lines(report: dict[str, object]) -> list[str]:
         % (stats["examined"], stats["matched"], stats["unknown"]),
         "字节: 读取 %s，用时 %.2f 秒" % (stats["bytes_hashed"], float(stats["seconds"])),
     ]
+    if stats["unknown"]:
+        lines.append(
+            "另有 %s 行没有可核验的记录（旧行或缺摘要），未计入结论。" % stats["unknown"]
+        )
     findings = [row for row in rows if row["verdict"] in _SCAN_FINDINGS]
     if findings:
         lines.append("需要你知道的 %d 行:" % len(findings))
@@ -1153,6 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
                         result["declared_ok"],
                         result["main_sha256_match"],
                     ),
+                    "健康: healthy=%s" % result["healthy"],
                     "结论: ok=%s" % result["ok"],
                 ]
                 + (["原因: " + ", ".join(result["reasons"])] if result["reasons"] else []),
@@ -1220,6 +1226,20 @@ def main(argv: list[str] | None = None) -> int:
             + ["%d. %s" % (index + 1, step) for index, step in enumerate(plan["steps"])],
         )
         return 0 if plan["compatible"] else 2
+    except ContractError as error:
+        # A rejected argument (bad limit, bad budget) is not a crash: the
+        # documented exit codes are 0/2/3/4 and a traceback would break them.
+        if as_json:
+            print(
+                json.dumps(
+                    {"status": "error", "code": "invalid_argument", "detail": str(error)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            print("参数被拒: %s" % error, file=sys.stderr)
+        return _EXIT_REFUSED
     except LibraryMaintenanceError as error:
         if as_json:
             print(
