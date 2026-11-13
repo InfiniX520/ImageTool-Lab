@@ -16,6 +16,9 @@ Mapping (contract section -> test):
 * R-A  Sec.1.3          only fresh progress may replace a real observation
 * R-A  Sec.1.1          a pause between slices keeps the finished slice
 * R-A  Sec.1.3.1        a moved artifact row invalidates its progress record
+* R-A  Sec.1.3.6        a moved disk identity invalidates the progress record
+* R-A  Sec.1.3.6        a record without an object identity is not evidence
+* R-A  Sec.1.3.6/1.1    a matching identity is reused and its stat costs no slot
 * R-B  Sec.2.2          an unreachable root never cancels a delivery
 * R-B  Sec.2.3/2.4      cleanup claims nothing while offline, retries after
 * R-B  Sec.2.4          legacy "cleaned" facts and bad rows do not hold the window
@@ -29,14 +32,15 @@ Mapping (contract section -> test):
 * R-C  Sec.3.1          the read path follows the recorded handover
 * R-C  Sec.3.1          the write path (recovery) follows the same handover
 
-Measured red baseline at 336541b: 18 tests, 18 failed, 0 errors, 35.4 s
-(`lanes/tests/run06.xml`), none for a fixture or syntax reason:
+Measured red baseline at 336541b: 21 tests, 21 failed, 0 errors, 42.9 s
+(`lanes/tests/run09.xml`), none for a fixture or syntax reason:
 
 * missing interface x3: `PageBudget(max_slices=...)` (two cases) and
   `LineageResult`/`queries` from `core.delivery_lineage`
-* no resumable progress x4: the resumed / paused / expired / moved-row attempts
-  hit `page_file_budget` again instead of reusing a persisted slice, and a
-  36 file page fails instead of taking two slices
+* no resumable progress x7: the resumed / paused / expired / moved-row /
+  moved-identity / anonymous-identity attempts hit `page_file_budget` again
+  instead of reusing a persisted slice, a 36 file page fails instead of taking
+  two slices, and 32 matching stat rechecks still consume `max_files=1`
 * R-B x5: an unreachable root cancels the row, cleanup claims "already absent",
   a legacy `outcome=cleaned` fact stays in the window, an unparsable row
   starves `limit=1`, and a losing compensation raises `_StorageFault`
@@ -49,6 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from dataclasses import asdict
@@ -133,6 +138,63 @@ def observe(repo, monkeypatch, *, cancel=None, cancel_after=None):
 
     monkeypatch.setattr(repo, "_observe_artifact", counted)
     return seen
+
+
+def instrument_observations(repo, monkeypatch, ids, records=None):
+    """Wrap _observe_artifact once; the wrapper keeps the real bound method."""
+    original = repo._observe_artifact
+
+    def counted(artifact, **kwargs):
+        ids.append(str(artifact["artifact_id"]))
+        record = original(artifact, **kwargs)
+        if records is not None:
+            records.append(record)
+        return record
+
+    monkeypatch.setattr(repo, "_observe_artifact", counted)
+    return counted
+
+
+def prepared_reuse_page(repo, root, monkeypatch, *, request_id, pages=33):
+    """Seed one page, then capture a real 32 file slice of the reuse job.
+
+    The captured records are the product's own observations, so their
+    ArtifactHealth.identity is the true (st_dev, st_ino) of the synthetic file
+    -- never a hard coded value (contract 1.3 item 6).
+    """
+    from core.observation_snapshot import PageBudget, PreflightCancelled
+
+    seed(repo, root, pages=tuple(range(pages)), request_id="seed-" + request_id)
+    job = h.submit(repo, request_id=request_id)
+    page = h.source((g.candidate(pages=tuple(range(pages))),))
+    seen, captured = [], []
+    instrument_observations(repo, monkeypatch, seen, captured)
+    repo._accept_context.budget = PageBudget(max_files=32)
+    repo._accept_context.cancel = None
+    try:
+        with pytest.raises(PreflightCancelled) as caught:
+            repo._preflight_page_health(job["batch_id"], page)
+    finally:
+        repo._accept_context.budget = None
+    assert caught.value.reason == "page_file_budget"
+    assert len(captured) == pages - 1
+    seen.clear()
+    return job, page, captured, seen
+
+
+def resolved_path(root, ref):
+    from core.app_paths import AppPaths
+    from core.library_paths import PathResolver
+
+    return PathResolver(AppPaths(root)).resolve(ref)
+
+
+def all_artifacts(repo):
+    with sqlite3.connect(repo.database_path) as conn:
+        return [
+            str(row[0])
+            for row in conn.execute("SELECT artifact_id FROM artifacts ORDER BY rowid")
+        ]
 
 
 def resume_job(repo, job, command_id):
@@ -636,6 +698,118 @@ def test_a_newer_artifact_row_invalidates_its_stale_progress_record(tmp_path, mo
             "Sec.1.3.1: only the artifact whose row identity moved and the file "
             "that was never observed may be opened again; got " + repr(sorted(seen))
         )
+
+
+def test_a_disk_identity_change_invalidates_the_progress_record(tmp_path, monkeypatch):
+    """Sec.1.3.6: the recorded object identity must still be the one on disk."""
+    root = tmp_path / "library"
+    root.mkdir()
+    from core.observation_snapshot import PageBudget, PreflightCancelled
+
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, page, captured, seen = prepared_reuse_page(
+            repo, root, monkeypatch, request_id="reuse-33-identity-drift"
+        )
+        records = progress_records(captured)
+        moved = records[0]["artifact_id"]
+        info = os.stat(resolved_path(root, captured[0].expectation.path))
+        assert (info.st_dev, info.st_ino) == (
+            captured[0].identity.device,
+            captured[0].identity.file_index,
+        ), "precondition: the captured record carries the real disk identity"
+        assert info.st_size == captured[0].observed_size
+        records[0]["health"]["file_index"] = int(captured[0].identity.file_index) + 1
+        write_progress_event(repo, job, page, records)
+        unobserved = set(all_artifacts(repo)) - {
+            record["artifact_id"] for record in records
+        }
+        assert len(unobserved) == 1
+
+        try:
+            repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        except PreflightCancelled as exc:
+            pytest.fail(
+                "Sec.1.3.6: a record whose disk identity moved must be re-observed "
+                f"and the page must still commit, but it raised {exc.reason!r}"
+            )
+        assert set(seen) == {moved} | unobserved, (
+            "Sec.1.3.6: only the drifted record and the never-observed file may be "
+            f"opened again; got {sorted(seen)}"
+        )
+        assert len(page_links(repo, job["batch_id"])) == 33
+
+
+def test_a_progress_record_without_an_identity_is_not_reused(tmp_path, monkeypatch):
+    """Sec.1.3.6: a record without an object identity is not current evidence."""
+    root = tmp_path / "library"
+    root.mkdir()
+    from core.observation_snapshot import PageBudget, PreflightCancelled
+
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, page, captured, seen = prepared_reuse_page(
+            repo, root, monkeypatch, request_id="reuse-33-identity-absent"
+        )
+        records = progress_records(captured)
+        anonymous = records[0]["artifact_id"]
+        records[0]["health"]["device"] = None
+        records[0]["health"]["file_index"] = None
+        write_progress_event(repo, job, page, records)
+        unobserved = set(all_artifacts(repo)) - {
+            record["artifact_id"] for record in records
+        }
+        assert len(unobserved) == 1
+
+        try:
+            repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        except PreflightCancelled as exc:
+            pytest.fail(
+                "Sec.1.3.6: an anonymous record must be re-observed and the page "
+                f"must still commit, but it raised {exc.reason!r}"
+            )
+        assert set(seen) == {anonymous} | unobserved, (
+            "Sec.1.3.6: only the anonymous record and the never-observed file may "
+            f"be opened again; got {sorted(seen)}"
+        )
+        assert len(page_links(repo, job["batch_id"])) == 33
+
+
+def test_a_progress_record_is_still_reused_when_the_disk_identity_matches(tmp_path, monkeypatch):
+    """Sec.1.3.6/1.1: a matching stat recheck keeps the record and costs no slot."""
+    root = tmp_path / "library"
+    root.mkdir()
+    from core.observation_snapshot import PageBudget, PreflightCancelled
+
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, page, captured, seen = prepared_reuse_page(
+            repo, root, monkeypatch, request_id="reuse-33-identity-match"
+        )
+        records = progress_records(captured)
+        info = os.stat(resolved_path(root, captured[0].expectation.path))
+        assert (info.st_dev, info.st_ino) == (
+            captured[0].identity.device,
+            captured[0].identity.file_index,
+        ), "precondition: the captured record carries the real disk identity"
+        assert info.st_size == captured[0].observed_size
+        write_progress_event(repo, job, page, records)
+        unobserved = set(all_artifacts(repo)) - {
+            record["artifact_id"] for record in records
+        }
+        assert len(unobserved) == 1
+
+        try:
+            repo.accept_source_page(
+                job["batch_id"], page, page_budget=PageBudget(max_files=1)
+            )
+        except PreflightCancelled as exc:
+            pytest.fail(
+                "Sec.1.1/1.3.6: 32 matching stat rechecks must not consume "
+                f"max_files=1, but the acceptance raised {exc.reason!r}"
+            )
+        assert set(seen) == unobserved and len(seen) == 1, (
+            "Sec.1.3.6: every matching record must be reused without opening the "
+            f"file again; observed {sorted(seen)}"
+        )
+        assert len(page_links(repo, job["batch_id"])) == 33
 
 
 # ---------------------------------------------------------------------------
