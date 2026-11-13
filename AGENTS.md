@@ -46,7 +46,12 @@ This project is indexed by GitNexus as **ImageTool-Lab** (6236 symbols, 15032 re
 
 - 当前版本留档方法见 `docs/VERSION_CONTROL.md`。先读 `git status`、当前分支、`TASK_PLAN.json` 和最新审计，再修改代码；已知失败不得说成已通过。
 - 2026-11-12 的审计后、修复前基线标签为 `checkpoint-2026-11-12-a1-audit`；之后已存在但未验收的 schema 3 草稿另存 `checkpoint-2026-11-12-a1-wip`；2026-11-13 AR4 关闭/schema 5 的离线验收点为 `checkpoint-2026-11-13-a1-ar4`；U1-A/J-01 评审点为 `checkpoint-2026-11-13-u1a-review`。旧审计统计不能套到后一个版本。检查点标签保留不移动，不作为稳定发布声明。
-- 后续功能/修复从已保存基线建立独立工作分支。每个有意义的工作包完成后核对差异、运行相应测试、更新进度并提交；用户已要求版本留档，相关提交可继续保存到现有私有远端，不改变可见性。
+- 后续功能/修复从已保存基线建立独立工作分支。每个有意义的工作包完成后核对差异、运行相应测试、更新进度并提交；用户已要求版本留档，相关提交可继续保存到现有 origin。用户于 2026-11-13 已将仓库公开，并授权更名为 PixivKeep；保持该可见性，公开推送前继续排除账号与业务资料。
 - 不用 `reset --hard`、`clean -fd`、强制推送、重写已发布历史或删除检查点来整理现场。恢复旧版先用新的 detached worktree 或导出目录，不覆盖当前工作树或业务资料。
 - 提交前检查新增文件与暂存区；账号、Cookie、Token、本机配置、下载名单、数据库、图库、organizer_data、archive_store、runtime 和备份不入库。`config/default_config.yaml` 只作为无凭据默认模板保留。忽略规则不能代替对已跟踪文件的检查。
 - Git 负责源码、测试、设计和版本记录；业务数据的备份与 schema 迁移回退独立处理，不能以源码标签代替数据备份。
+
+## 仓库名称与本地路径
+
+- GitHub 仓库为 `InfiniX520/PixivKeep`，origin 为 `https://github.com/InfiniX520/PixivKeep.git`。本地目录及启动入口继续沿用 JpgPng，不批量替换内部标识。
+- 上方 GitNexus 生成区中的 `ImageTool-Lab` 是已有索引登记名；使用工具时按实际注册的仓库路径/名称定位，不因 GitHub 改名就手改索引 URI。

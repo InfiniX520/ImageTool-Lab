@@ -1,0 +1,88 @@
+{
+  "full01": {
+    "tests": 1585,
+    "failures": 1,
+    "errors": 0,
+    "skipped": 4,
+    "passed": 1580,
+    "seconds": 260.082,
+    "failed_tests": [
+      "tests.test_query_collection::test_ranking_range_deduplicates_works_and_records_dates"
+    ],
+    "skipped_tests": [
+      {
+        "name": "test_real_symlink_file_is_rejected_when_platform_supports_it",
+        "reason": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+        "reason": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_root_is_rejected",
+        "reason": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_w_phase_local_boundaries_are_not_wired_into_reuse_yet",
+        "reason": "W 阶段剩余边界（本轮只登记，不强行通过）：根不可用/重解析点/读取中变化已能进入 needs_verification（见 test_u1a_reuse_gate 与 artifact_health 契约），但仍缺：①根不可用/外置卷的 UI 与恢复动作，不把整库当成丢失；②链接/重解析点指向根外时的端到端拒绝断言；③同一批次同一 artifact 只观察一次的缓存；④跨会话不复用旧缓存；⑤快速核验不得升级为严格复用的端到端用例。"
+      }
+    ]
+  },
+  "tk01": {
+    "tests": 9,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 9,
+    "seconds": 4.406,
+    "failed_tests": [],
+    "skipped_tests": []
+  },
+  "ranking_recheck01": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 1,
+    "seconds": 0.986,
+    "failed_tests": [],
+    "skipped_tests": []
+  },
+  "independent03": {
+    "tests": 14,
+    "failures": 12,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 2,
+    "seconds": 5.132,
+    "failed_tests": [
+      "test_independent_u1a::test_excluded_from_historical_task_stops_other_task_pending_repair",
+      "test_independent_u1a::test_excluded_from_historical_task_prevents_recovery_repair",
+      "test_independent_u1a::test_recovery_uses_matching_older_artifact_when_latest_version_differs",
+      "test_independent_u1a::test_recovery_rejects_stale_missing_evidence",
+      "test_independent_u1a::test_carried_foreign_hold_can_be_recovered_by_its_current_batch",
+      "test_independent_u1a::test_pending_recovery_with_root_offline_is_really_held",
+      "test_independent_u1a::test_same_page_receipt_replay_does_not_hash_again",
+      "test_independent_u1a::test_corrupt_intent_does_not_silently_allow_automatic_repair",
+      "test_independent_u1a::test_exclusion_during_transfer_prevents_publication",
+      "test_independent_u1a::test_hash_preflight_does_not_block_coordinator_control_commands",
+      "test_independent_u1a::test_completion_between_preflight_and_accept_does_not_create_a_false_hold",
+      "test_independent_u1a::test_carry_parses_the_batch_health_map_once"
+    ],
+    "skipped_tests": []
+  },
+  "existing_suite_combined": {
+    "tests": 1594,
+    "passed": 1589,
+    "failures": 1,
+    "errors": 0,
+    "skipped": 4
+  },
+  "independent_source_sha256": "9870a55e02c32ea0a8edff7cdeaf9c80a9ddacbcc70e7e0f4040f05c033b9877",
+  "notes": [
+    "Tk: collection_presentation and source_presentation excluded from full01 and run separately; counts do not overlap.",
+    "ranking_recheck01 passing does not erase full01 failure; deterministic completion-race probe reproduces the database state.",
+    "Independent failed tests express desired behavior; none marked xfail or skipped.",
+    "Raw XML, logs, temporary SQLite databases remain in the local runtime batch, not the public repository."
+  ]
+}

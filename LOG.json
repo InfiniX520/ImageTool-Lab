@@ -1,6 +1,6 @@
 {
-  "project": "PiDL/ImageTool-Lab",
-  "description": "Python+Tkinter Pixiv 原图下载器",
+  "project": "PixivKeep",
+  "description": "Pixiv 原图收藏与整理工具；长期归档与恢复开发中",
   "last_updated": "2026-11-13",
   "sessions": [
     {
@@ -1325,8 +1325,16 @@
           "note": "tests/test_collection_presentation.py ignored (Tk environment); that file separately 4/4 passed"
         },
         "independent": {
-          "ar4_acceptance": {"total": 23, "passed": 23, "failed": 0},
-          "ar4_atomic_plan": {"total": 6, "passed": 6, "failed": 0}
+          "ar4_acceptance": {
+            "total": 23,
+            "passed": 23,
+            "failed": 0
+          },
+          "ar4_atomic_plan": {
+            "total": 6,
+            "passed": 6,
+            "failed": 0
+          }
         }
       },
       "scale": {
@@ -1373,6 +1381,68 @@
       "next_step": "W0 freeze red tests; W1 artifact health contract; W2 preflight I/O; W3 integrate three reuse paths; W4 intent-aware repair; W5 UI/recovery; W6 acceptance.",
       "product_source_changed": false,
       "business_data_changed": false
+    },
+    {
+      "session_date": "2026-11-13",
+      "id": "JPGPNG-REPOSITORY-IDENTITY-20261113-01",
+      "summary": "按用户要求将 GitHub 仓库命名为 PixivKeep，更新实际用途介绍；用户已自行公开仓库。同步 README、当前远端和版本约定，本地目录/产品源码/业务资料不变。",
+      "repository": "https://github.com/InfiniX520/PixivKeep",
+      "visibility": "public",
+      "scope": "documentation_and_repository_metadata",
+      "functional_change": false
+    },
+    {
+      "session_date": "2026-11-13",
+      "id": "JPGPNG-U1A-INDEPENDENT-AUDIT-20261113-01",
+      "date": "2026-11-13",
+      "status": "completed_findings_open_not_production_ready",
+      "audited_commit": "8b1c7515d5c91ff49d20eddfe3fefcefbd4f322e",
+      "product_commit": "d3c5cf897d71e422cf25d223c4c24c29cc21c27b",
+      "report": "docs/audits/2026-11-13-u1a-independent/README.md",
+      "findings": "docs/audits/2026-11-13-u1a-independent/FINDINGS.md",
+      "guide": "docs/audits/2026-11-13-u1a-independent/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-13-u1a-independent/evidence/results.json",
+      "full": {
+        "tests": 1594,
+        "passed": 1589,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 4
+      },
+      "independent": {
+        "tests": 14,
+        "failures": 12,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 2,
+        "seconds": 5.132,
+        "failed_tests": [
+          "test_independent_u1a::test_excluded_from_historical_task_stops_other_task_pending_repair",
+          "test_independent_u1a::test_excluded_from_historical_task_prevents_recovery_repair",
+          "test_independent_u1a::test_recovery_uses_matching_older_artifact_when_latest_version_differs",
+          "test_independent_u1a::test_recovery_rejects_stale_missing_evidence",
+          "test_independent_u1a::test_carried_foreign_hold_can_be_recovered_by_its_current_batch",
+          "test_independent_u1a::test_pending_recovery_with_root_offline_is_really_held",
+          "test_independent_u1a::test_same_page_receipt_replay_does_not_hash_again",
+          "test_independent_u1a::test_corrupt_intent_does_not_silently_allow_automatic_repair",
+          "test_independent_u1a::test_exclusion_during_transfer_prevents_publication",
+          "test_independent_u1a::test_hash_preflight_does_not_block_coordinator_control_commands",
+          "test_independent_u1a::test_completion_between_preflight_and_accept_does_not_create_a_false_hold",
+          "test_independent_u1a::test_carry_parses_the_batch_health_map_once"
+        ],
+        "skipped_tests": []
+      },
+      "product_findings_open": {
+        "P1": 3,
+        "P2": 8,
+        "total": 11
+      },
+      "documentation_finding": "UA-12 current entry points consolidated in audit branch",
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "product_ready": false,
+      "next_step": "D0 pin regressions; D1 close completion/intent/root-state blockers; D2 unify recovery evidence/ownership; D3 intent durability and publication; D4 bounded cancellable I/O and linear carry; D5 UI/migration/final acceptance.",
+      "summary": "独立复审固定 8b1c751；现有全量出现真实竞争失败，新增 14 项反例 12 红/2 绿。形成 UA-01..12 与 D0-D5，未改产品或部署。"
     }
   ]
 }

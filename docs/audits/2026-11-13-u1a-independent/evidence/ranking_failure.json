@@ -1,0 +1,171 @@
+{
+  "batches": [
+    {
+      "batch_id": "66c016bbf4ea4c2c8f6b15521cbe9733",
+      "phase": "partial",
+      "stop_reason": "source_exhausted"
+    }
+  ],
+  "batch_items": [
+    {
+      "illust_id": "100",
+      "result_state": "needs_verification",
+      "counts_work": 1,
+      "required_pages_json": "[0]"
+    },
+    {
+      "illust_id": "101",
+      "result_state": "completed",
+      "counts_work": 1,
+      "required_pages_json": "[0]"
+    }
+  ],
+  "batch_item_pages": [
+    {
+      "illust_id": "100",
+      "page_index": 0,
+      "delivery_id": "423755a9c8444f57a6f5b5325defbd7a",
+      "artifact_id": null
+    },
+    {
+      "illust_id": "101",
+      "page_index": 0,
+      "delivery_id": "e5664bfb835e48c9bd866d28a998c1dd",
+      "artifact_id": "64e79ef089a04d92998b197222609493"
+    }
+  ],
+  "deliveries": [
+    {
+      "delivery_id": "25858499ab194fb19a91cc58e18aee95",
+      "illust_id": "100",
+      "state": "completed",
+      "generation": 1,
+      "error_code": null
+    },
+    {
+      "delivery_id": "423755a9c8444f57a6f5b5325defbd7a",
+      "illust_id": "100",
+      "state": "needs_verification",
+      "generation": 2,
+      "error_code": "artifact_unknown"
+    },
+    {
+      "delivery_id": "e5664bfb835e48c9bd866d28a998c1dd",
+      "illust_id": "101",
+      "state": "completed",
+      "generation": 1,
+      "error_code": null
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "b76d6083194b4ed8a64c7118da0ac218",
+      "delivery_id": "25858499ab194fb19a91cc58e18aee95",
+      "illust_id": "100"
+    },
+    {
+      "artifact_id": "64e79ef089a04d92998b197222609493",
+      "delivery_id": "e5664bfb835e48c9bd866d28a998c1dd",
+      "illust_id": "101"
+    }
+  ],
+  "events": [
+    {
+      "event_seq": 1,
+      "kind": "command_submit"
+    },
+    {
+      "event_seq": 2,
+      "kind": "batch_activated"
+    },
+    {
+      "event_seq": 3,
+      "kind": "source_request_reserved"
+    },
+    {
+      "event_seq": 4,
+      "kind": "source_page_accepted"
+    },
+    {
+      "event_seq": 5,
+      "kind": "delivery_claimed"
+    },
+    {
+      "event_seq": 6,
+      "kind": "source_request_reserved"
+    },
+    {
+      "event_seq": 7,
+      "kind": "delivery_http_attempt"
+    },
+    {
+      "event_seq": 8,
+      "kind": "delivery_checkpoint_saved"
+    },
+    {
+      "event_seq": 9,
+      "kind": "delivery_checkpoint_saved"
+    },
+    {
+      "event_seq": 10,
+      "kind": "delivery_validation_started"
+    },
+    {
+      "event_seq": 11,
+      "kind": "delivery_prepared"
+    },
+    {
+      "event_seq": 12,
+      "kind": "delivery_completed"
+    },
+    {
+      "event_seq": 13,
+      "kind": "source_page_accepted"
+    },
+    {
+      "event_seq": 14,
+      "kind": "source_page_accepted"
+    },
+    {
+      "event_seq": 15,
+      "kind": "source_page_accepted"
+    },
+    {
+      "event_seq": 16,
+      "kind": "delivery_claimed"
+    },
+    {
+      "event_seq": 17,
+      "kind": "delivery_http_attempt"
+    },
+    {
+      "event_seq": 18,
+      "kind": "delivery_checkpoint_saved"
+    },
+    {
+      "event_seq": 19,
+      "kind": "delivery_checkpoint_saved"
+    },
+    {
+      "event_seq": 20,
+      "kind": "delivery_validation_started"
+    },
+    {
+      "event_seq": 21,
+      "kind": "delivery_prepared"
+    },
+    {
+      "event_seq": 22,
+      "kind": "delivery_completed"
+    },
+    {
+      "event_seq": 23,
+      "kind": "source_finished"
+    },
+    {
+      "event_seq": 24,
+      "kind": "batch_settled"
+    }
+  ],
+  "integrity_check": "ok"
+}
