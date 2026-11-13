@@ -40,7 +40,8 @@
 
 旧的无 acceptance 索引绑定因此不需要新列：`expected_binding_absent=False`、
 `expected_acceptance_id=None`、`expected_root_revision=None` 就是它的完整令牌。本包
-**不改 DDL、不升 schema**（仍为 4），避免与 R4 的索引迁移叠加。
+R1 **不改 DDL、不升 schema**（当时为 4），避免与 R4 的索引迁移叠加；R4 之后 schema 为
+**5**（只多两条热查询覆盖索引，没有新的绑定列），本文其余协议与 4 时点相同，v4 草案被显式拒绝。
 
 ## 3. 写入次序（全部在任何 INSERT/UPDATE 之前）
 
