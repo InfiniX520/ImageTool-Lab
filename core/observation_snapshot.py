@@ -324,3 +324,36 @@ class PreflightSnapshot:
 def empty_snapshot(run_id: str) -> PreflightSnapshot:
     """A snapshot that claims nothing; the writer must retry on any candidate."""
     return PreflightSnapshot(run_id=run_id, pages={}, degraded=True, reason="no_candidates")
+
+@dataclass(frozen=True, slots=True)
+class PageBudget:
+    """Whole-page observation budget, independent of the per-file budget."""
+
+    max_files: int = 32
+    max_bytes: int = 512 * 1024 * 1024
+    max_seconds: float = 30.0
+
+    def __post_init__(self):
+        if type(self.max_files) is not int or not 1 <= self.max_files <= 4096:
+            raise SnapshotError("Invalid page file budget")
+        if type(self.max_bytes) is not int or not 1 <= self.max_bytes <= 64 * 1024**3:
+            raise SnapshotError("Invalid page byte budget")
+        if (
+            type(self.max_seconds) is not float
+            and type(self.max_seconds) is not int
+        ) or not 0.1 <= float(self.max_seconds) <= 3600:
+            raise SnapshotError("Invalid page time budget")
+
+
+class PreflightCancelled(Exception):
+    """The caller cancelled or exhausted the whole-page observation.
+
+    This is a control result, never a file-health verdict: it must not create a
+    delivery, advance a cursor or be translated into MISSING/CHANGED.
+    """
+
+    def __init__(self, reason: str = "cancelled"):
+        if _REASON_RE.fullmatch(reason) is None:
+            raise SnapshotError("Invalid preflight cancellation reason")
+        self.reason = reason
+        super().__init__(reason)

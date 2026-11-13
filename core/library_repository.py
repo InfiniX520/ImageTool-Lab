@@ -47,8 +47,10 @@ from core.delivery_repository import (
 from core.follow_repository import FOLLOW_DDL, FOLLOW_TABLES, FOLLOW_COMMANDS, FollowRepositoryMixin
 from core.local_observation import LocalObserver, ObservationBudget, ObservationRequest
 from core.observation_snapshot import (
+    PageBudget,
     PageKey,
     PageSnapshot,
+    PreflightCancelled,
     PreflightSnapshot,
     PreflightUnavailable,
     RetryPreflight,
@@ -692,6 +694,10 @@ class LibraryRepository(
         self._lock_acquired = False
         self._path_resolver: PathResolver | None = None
         self._path_resolver_lock = threading.RLock()
+        # Cancellation and the whole-page budget belong to the acceptance that
+        # is currently observing files on this thread.  Thread-local keeps one
+        # observer's context from leaking into another repository call.
+        self._accept_context = threading.local()
 
         self._lock = InstanceLock(self._path.parent / ".writer.lock")
         try:
@@ -755,6 +761,12 @@ class LibraryRepository(
                 if replacement.get(key) != root:
                     raise LibraryError("A library cannot remove or move an external root")
             self._path_resolver = resolver
+
+    def _accept_cancel(self):
+        return getattr(self._accept_context, "cancel", None)
+
+    def _accept_budget(self) -> PageBudget | None:
+        return getattr(self._accept_context, "budget", None)
 
     def _path_resolver_snapshot(self) -> PathResolver | None:
         with self._path_resolver_lock:
@@ -1255,55 +1267,76 @@ class LibraryRepository(
         return self.admit_query_artist(batch_id, artist_id)
 
     def accept_source_page(
-        self, batch_id: str, page: SourcePage, *, admitted_running: bool = False
+        self,
+        batch_id: str,
+        page: SourcePage,
+        *,
+        admitted_running: bool = False,
+        cancel=None,
+        page_budget: PageBudget | None = None,
     ) -> tuple[str, ...]:
         batch_id = _validate_identifier(batch_id, "batch id")
         if not isinstance(page, SourcePage):
             raise LibraryError("accept_source_page requires SourcePage")
         if type(admitted_running) is not bool:
             raise LibraryError("admitted_running must be a boolean")
+        if cancel is not None and not callable(getattr(cancel, "is_set", None)):
+            raise LibraryError("cancel must expose is_set()")
+        if page_budget is not None and not isinstance(page_budget, PageBudget):
+            raise LibraryError("Invalid page observation budget")
         page_json = canonical_json(asdict(page))
         digest = _sha256_text(page_json)
         deadline = time.monotonic() + _ACCEPT_PREFLIGHT_SECONDS
         attempts = 0
         last_reason = "preflight_incomplete"
-        while True:
-            attempts += 1
-            replay = self._accepted_page_receipt(batch_id, page, digest)
-            snapshot_payload = None
-            if replay is None:
-                snapshot = self._preflight_page_health(batch_id, page)
-                snapshot_payload = snapshot.to_payload()
-            payload = {
-                "batch_id": batch_id,
-                "page": page,
-                "page_json": page_json,
-                "page_digest": digest,
-                "snapshot": snapshot_payload,
-                "replay": replay is not None,
-                "admitted_running": admitted_running,
-            }
-            try:
-                return self._enqueue(
-                    "accept_source_page",
-                    payload,
-                    size_payload={
-                        "kind": "accept_source_page",
-                        "batch_id": batch_id,
-                        "page": asdict(page),
-                        "snapshot": snapshot_payload,
-                        "replay": replay is not None,
-                    },
-                )
-            except RetryPreflight as exc:
-                # The writer saw a completion the snapshot never covered; the
-                # transaction rolled back and wrote nothing.  Preflight again
-                # outside it and let the writer make the decision on evidence.
-                last_reason = exc.reason
-            except SnapshotError as exc:
-                raise LibraryError("Corrupt preflight snapshot") from exc
-            if attempts >= _ACCEPT_PREFLIGHT_ATTEMPTS or time.monotonic() >= deadline:
-                raise PreflightUnavailable(last_reason)
+        self._accept_context.cancel = cancel
+        self._accept_context.budget = page_budget
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise PreflightCancelled("cancelled")
+                attempts += 1
+                replay = self._accepted_page_receipt(batch_id, page, digest)
+                snapshot_payload = None
+                if replay is None:
+                    snapshot = self._preflight_page_health(batch_id, page)
+                    snapshot_payload = snapshot.to_payload()
+                payload = {
+                    "batch_id": batch_id,
+                    "page": page,
+                    "page_json": page_json,
+                    "page_digest": digest,
+                    "snapshot": snapshot_payload,
+                    "replay": replay is not None,
+                    "admitted_running": admitted_running,
+                }
+                try:
+                    return self._enqueue(
+                        "accept_source_page",
+                        payload,
+                        size_payload={
+                            "kind": "accept_source_page",
+                            "batch_id": batch_id,
+                            "page": asdict(page),
+                            "snapshot": snapshot_payload,
+                            "replay": replay is not None,
+                        },
+                    )
+                except RetryPreflight as exc:
+                    # The writer saw a completion the snapshot never covered;
+                    # the transaction rolled back and wrote nothing.  Preflight
+                    # again outside it and let the writer decide on evidence.
+                    last_reason = exc.reason
+                except SnapshotError as exc:
+                    raise LibraryError("Corrupt preflight snapshot") from exc
+                if (
+                    attempts >= _ACCEPT_PREFLIGHT_ATTEMPTS
+                    or time.monotonic() >= deadline
+                ):
+                    raise PreflightUnavailable(last_reason)
+        finally:
+            self._accept_context.cancel = None
+            self._accept_context.budget = None
 
     def record_removal_intent(
         self,
@@ -1791,7 +1824,12 @@ class LibraryRepository(
         )
 
     def cancel_unpublished_delivery(
-        self, delivery_id: str, batch_id: str, *, error_code: str
+        self,
+        delivery_id: str,
+        batch_id: str,
+        *,
+        error_code: str,
+        expected_state: str = "prepared",
     ) -> None:
         """Cancel a prepared delivery whose final name was never created.
 
@@ -1802,12 +1840,17 @@ class LibraryRepository(
         delivery_id = _validate_identifier(delivery_id, "delivery id")
         batch_id = _validate_identifier(batch_id, "batch id")
         error_code = _validate_error_code(error_code)
+        if expected_state not in {"prepared", "recovery_needed"}:
+            raise LibraryError(
+                "cancel_unpublished_delivery supports prepared/recovery_needed"
+            )
         self._enqueue(
             "cancel_unpublished_delivery",
             {
                 "delivery_id": delivery_id,
                 "batch_id": batch_id,
                 "error_code": error_code,
+                "expected_state": expected_state,
             },
         )
 
@@ -2279,8 +2322,18 @@ class LibraryRepository(
 
         # The read snapshot is closed before any file is opened.
         records: dict[str, ArtifactHealth | None] = {}
+        cancel = self._accept_cancel()
+        budget = self._accept_budget()
+        started = time.monotonic()
+        observed_files = 0
+        observed_bytes = 0
         for _, _, _, artifacts in selected.values():
             for artifact in artifacts:
+                if cancel is not None and cancel.is_set():
+                    # A pause/close stops the remaining candidates instead of
+                    # hashing the whole page; this is a control result, not a
+                    # file-health verdict.
+                    raise PreflightCancelled("cancelled")
                 artifact_id = str(artifact["artifact_id"])
                 if artifact_id in records:
                     continue
@@ -2295,7 +2348,7 @@ class LibraryRepository(
                     records[artifact_id] = None
                     continue
                 try:
-                    records[artifact_id] = self._observe_artifact(
+                    record = self._observe_artifact(
                         artifact,
                         resolver=resolver,
                         run_id=run_id,
@@ -2305,6 +2358,17 @@ class LibraryRepository(
                     return PreflightSnapshot(
                         run_id=run_id, pages={}, degraded=True, reason="observation_failed"
                     )
+                records[artifact_id] = record
+                observed_files += 1
+                if record is not None:
+                    observed_bytes += int(record.bytes_read or 0)
+                if budget is not None:
+                    if observed_files > budget.max_files:
+                        raise PreflightCancelled("page_file_budget")
+                    if observed_bytes > budget.max_bytes:
+                        raise PreflightCancelled("page_byte_budget")
+                    if time.monotonic() - started > float(budget.max_seconds):
+                        raise PreflightCancelled("page_time_budget")
         try:
             pages: dict[tuple[str, int, str, str], PageSnapshot] = {}
             for key, generation, delivery_id, artifacts in selected.values():
@@ -3592,6 +3656,9 @@ class LibraryRepository(
         delivery_id = str(payload["delivery_id"])
         batch_id = str(payload["batch_id"])
         error_code = str(payload["error_code"])
+        expected_state = str(payload.get("expected_state", "prepared"))
+        if expected_state not in {"prepared", "recovery_needed"}:
+            raise InvalidStateError("Unsupported unpublished state")
         with self._transaction(conn):
             batch = self._get_batch_row(conn, batch_id)
             if batch is None:
@@ -3605,16 +3672,16 @@ class LibraryRepository(
                 raise InvalidStateError("Only the owning batch can cancel the delivery")
             if delivery["state"] == "cancelled":
                 return None
-            if delivery["state"] != "prepared":
+            if delivery["state"] != expected_state:
                 raise InvalidStateError(
-                    "Only an unpublished prepared delivery can be cancelled"
+                    "Only the expected unpublished state can be cancelled"
                 )
             now = _utcnow()
             updated = conn.execute(
                 "UPDATE deliveries SET state = 'cancelled', error_code = ?, "
                 "retry_at = NULL, updated_at = ? "
-                "WHERE delivery_id = ? AND state = 'prepared'",
-                (error_code, now, delivery_id),
+                "WHERE delivery_id = ? AND state = ?",
+                (error_code, now, delivery_id, expected_state),
             ).rowcount
             if updated != 1:
                 raise InvalidStateError("Delivery state changed before cancellation")
@@ -3628,6 +3695,7 @@ class LibraryRepository(
                     "batch_id": batch_id,
                     "error_code": error_code,
                     "reason": "unpublished_intent",
+                    "expected_state": expected_state,
                 },
             )
             self._refresh_items_for_delivery(conn, delivery_id, now)
