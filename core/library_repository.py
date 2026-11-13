@@ -36,6 +36,7 @@ from core.artifact_health import (
     unobserved_health,
 )
 from core.collection_scope import scope_fingerprint
+from core.delivery_recovery import RECOVERY_COMMANDS, DeliveryRecoveryMixin
 from core.delivery_repository import (
     DELIVERY_DDL,
     DELIVERY_REQUIRED_TABLES,
@@ -640,7 +641,12 @@ _DDL = (
 )
 
 
-class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRepositoryMixin):
+class LibraryRepository(
+    DeliveryRecoveryMixin,
+    DeliveryRepositoryMixin,
+    FollowRepositoryMixin,
+    QueryRepositoryMixin,
+):
     """Own one library database through a dedicated non-daemon writer thread."""
 
     def __init__(self, database_path: str | Path, *, queue_capacity: int = 128):
@@ -1097,6 +1103,8 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
             return self._settle_stop(conn, command.payload["batch_id"])
         if command.kind == "recover_interrupted":
             return self._recover_interrupted(conn)
+        if command.kind in RECOVERY_COMMANDS:
+            return self._dispatch_recovery(conn, command)
         if command.kind in self._DELIVERY_COMMAND_KINDS:
             return self._dispatch_delivery(conn, command)
         if command.kind in FOLLOW_COMMANDS:
