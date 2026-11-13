@@ -323,6 +323,11 @@ def test_the_state_filter_accepts_every_listable_state(repo):
     assert recovered["recovery_needed"] is False
     assert recovered["suspended"] is False
     assert recovered["retry_wait"] is False
+    by_state = {row["state"]: row for row in page["rows"]}
+    assert by_state["retry_wait"]["retry_at"] is not None
+    assert by_state["pending"]["retry_at"] is None
+    assert by_state["pending"]["attempts"] == 0
+    assert by_state["suspended"]["attempts"] == 1
 
 
 def test_an_unsupported_state_is_refused(repo):
@@ -651,7 +656,8 @@ def test_the_rows_never_carry_a_plaintext_path(repo):
         assert set(row) == {
             "batch_id", "job_id", "illust_id", "page_index", "delivery_id",
             "state", "error_code", "generation", "updated_at", "output_key",
-            "batch_phase", "recoverable", "actions", "blocked_reason",
+            "attempts", "retry_at", "batch_phase", "recoverable", "actions",
+            "blocked_reason",
         }
 
 

@@ -725,7 +725,7 @@ class DeliveryRepositoryMixin:
         select = (
             "SELECT bip.batch_id, d.job_id, bip.illust_id, bip.page_index,"
             " d.delivery_id, d.state, d.error_code, d.generation, d.updated_at,"
-            " d.output_key, b.phase AS batch_phase"
+            " d.output_key, d.attempts, d.retry_at, b.phase AS batch_phase"
         )
         with closing(self._readonly_connection()) as conn:
             # One short read transaction: the total and the page come from the
@@ -789,6 +789,10 @@ class DeliveryRepositoryMixin:
             "generation": int(row["generation"]),
             "updated_at": row["updated_at"],
             "output_key": str(row["output_key"]),
+            # attempts and retry_at are stored facts, not guesses: a waiting
+            # page can say how often it failed and when it is due again.
+            "attempts": int(row["attempts"]),
+            "retry_at": row["retry_at"],
             "batch_phase": None if phase is None else str(phase),
             "recoverable": recoverable,
             "actions": ["verify"] if recoverable else [],
