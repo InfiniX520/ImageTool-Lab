@@ -74,46 +74,72 @@ def _candidate(conn: Any, row: Any) -> Successor:
     )
 
 
-def resolve_successor(conn: Any, delivery: Any, *, hops: int = 0) -> Successor | None:
-    """Find the newest delivery that owns the same page, or None.
+def resolve_successor(
+    conn: Any, delivery: Any, *, hops: int = 0, _seen: frozenset[str] | None = None
+) -> Successor | None:
+    """Find the delivery that now owns the same page, or None.
 
-    Candidates are newer generations with the same illust/page/output_key and
-    quality key.  A completed candidate wins; otherwise the newest active
-    follow-up is returned so the caller can decide whether to hold or repair.
-    A superseded candidate is followed, bounded by MAX_SUPERSEDE_HOPS.
+    v2.1 order (the RF review showed a cross-job, older completed winner):
+
+    1. the newest completed delivery for the same page and quality, in any
+       job, whose artifact row still exists;
+    2. a follow-up row created after the current one (rowid greater) that is
+       still active;
+    3. a newer cancelled row that carries a supersede code, followed with a
+       bounded depth.
+
+    History is never rewritten: the caller links only the current active batch.
     """
     if hops > MAX_SUPERSEDE_HOPS:
         raise LineageError("successor chain is too deep")
-    rows = conn.execute(
-        "SELECT * FROM deliveries WHERE job_id = ? AND illust_id = ? "
-        "AND page_index = ? AND output_key = ? AND quality_key = ? "
-        "AND generation > ? ORDER BY generation DESC LIMIT 32",
-        (
-            str(delivery["job_id"]),
-            str(delivery["illust_id"]),
-            int(delivery["page_index"]),
-            str(delivery["output_key"]),
-            str(delivery["quality_key"]),
-            int(delivery["generation"]),
-        ),
+    current_id = str(delivery["delivery_id"])
+    seen = set() if _seen is None else set(_seen)
+    if current_id in seen:
+        raise LineageError("successor chain is cyclic")
+    seen.add(current_id)
+    key = (
+        str(delivery["illust_id"]),
+        int(delivery["page_index"]),
+        str(delivery["output_key"]),
+        str(delivery["quality_key"]),
+    )
+
+    completed_rows = conn.execute(
+        "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
+        "AND output_key = ? AND quality_key = ? AND delivery_id != ? "
+        "AND state = 'completed' ORDER BY completed_at DESC, rowid DESC LIMIT 8",
+        (*key, current_id),
     ).fetchall()
-    completed: Successor | None = None
-    followup: Successor | None = None
+    for row in completed_rows:
+        artifact_id = _row_artifact(conn, str(row["delivery_id"]))
+        if artifact_id is not None:
+            return _candidate(conn, row)
+
+    current_rowid = conn.execute(
+        "SELECT rowid FROM deliveries WHERE delivery_id = ?", (current_id,)
+    ).fetchone()
+    if current_rowid is not None:
+        placeholders = ",".join("?" for _ in ACTIVE_FOLLOWUP)
+        rows = conn.execute(
+            "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
+            "AND output_key = ? AND quality_key = ? AND rowid > ? "
+            f"AND state IN ({placeholders}) ORDER BY rowid DESC LIMIT 8",
+            (*key, int(current_rowid[0]), *ACTIVE_FOLLOWUP),
+        ).fetchall()
+        for row in rows:
+            if str(row["delivery_id"]) != current_id:
+                return _candidate(conn, row)
+
+    placeholders = ",".join("?" for _ in SUPERSEDE_CODES)
+    rows = conn.execute(
+        "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
+        "AND output_key = ? AND quality_key = ? AND delivery_id != ? "
+        f"AND state = 'cancelled' AND error_code IN ({placeholders}) "
+        "ORDER BY rowid DESC LIMIT 8",
+        (*key, current_id, *SUPERSEDE_CODES),
+    ).fetchall()
     for row in rows:
-        state = str(row["state"])
-        code = row["error_code"]
-        if state == "cancelled" and is_supersede_code(code):
-            nested = resolve_successor(conn, row, hops=hops + 1)
-            if nested is not None and completed is None:
-                if nested.is_completed:
-                    completed = nested
-                elif followup is None:
-                    followup = nested
-            continue
-        if state in TERMINAL_SUCCESS:
-            candidate = _candidate(conn, row)
-            if candidate.is_completed and completed is None:
-                completed = candidate
-        elif state in ACTIVE_FOLLOWUP and followup is None:
-            followup = _candidate(conn, row)
-    return completed if completed is not None else followup
+        nested = resolve_successor(conn, row, hops=hops + 1, _seen=frozenset(seen))
+        if nested is not None:
+            return nested
+    return None

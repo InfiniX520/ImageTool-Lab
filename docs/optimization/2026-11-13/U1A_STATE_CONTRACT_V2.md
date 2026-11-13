@@ -55,8 +55,8 @@ Successor{ delivery_id, job_id, batch_id, state, generation, artifact_id }
 resolve_successor(conn, delivery) -> Successor | None   # core/delivery_lineage.py
 ```
 
-- 同 `illust/page/output_key/quality_key` 且 `generation >` 当前；优先最新 completed，其次 NV/pending；
-- 只跟随 `cancelled + superseded_by_recovery_*`，最多 4 跳；环/过深 → 视为无后继；
+- 顺序：① 同页同质量、**任意 job** 的最新 completed（按 `completed_at`，artifact 行存在）；② rowid 更晚的活动后继；③ 更晚的 `cancelled + superseded_by_recovery_*`（≤4 跳，环即停）；
+- 旧任务的 completed 可能比 hold **更早创建**，因此不能用 `generation > 当前` 或同 job 过滤（v2.1 由复审反例修正）；
 - carry（`_copy_batch_item_page_links`）遇到 superseded 引用：能解析且字节可核验 → 当前活动批次链 artifact；否则建本批 NV（`carried_superseded_unresolved`）；**不复制 cancelled 引用**；
 - 历史 `batch_item_pages` 不改写。
 
