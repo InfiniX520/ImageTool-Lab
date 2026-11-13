@@ -14,7 +14,9 @@ the named lane lands):
 * 3  prepared is not cancelled by the recorder .. D / UA-11  (green guard)
 * 4  carried foreign hold + recovery consistency  B+D / UA-05 (green guard)
 * 5  two tasks, one output slot ................. A+D / UA-01 (green guard)
-* 6  changed file between identical replays ..... A / UA-09   (red)
+* 6a identical replay: same ids, zero hashes ... A / UA-09   (red)
+* 6b same page identity, different digest ...... A / UA-09   (green guard)
+* 6c changed completed page re-checked ......... B+A / UA-09 (red)
 * 7a corrupt intent blocks claim ................ D+A / UA-10 (red)
 * 7b corrupt intent blocks publication .......... C+D / UA-10 (red)
 * 7c corrupt intent blocks repair ............... B+D / UA-10 (red)
@@ -35,6 +37,7 @@ import pytest
 
 from core.library_repository import (
     CorruptDataError,
+    CursorConflict,
     LibraryError,
     LibraryRepository,
     OutputConflict,
@@ -174,10 +177,19 @@ def test_carried_foreign_hold_is_not_dispatchable_and_recovery_agrees(repo, tmp_
     assert repo.list_dispatchable(job["job_id"]) == ()
 
     result = repo.recover_verification_page(resumed["batch_id"], h.ARTWORK, 0)
+    link = h.query(
+        repo.database_path,
+        "SELECT delivery_id, artifact_id FROM batch_item_pages "
+        "WHERE batch_id = ? AND illust_id = ? AND page_index = 0",
+        (resumed["batch_id"], h.ARTWORK),
+    )[0]
     state = repo.get_delivery(foreign_hold)["state"]
-    assert result["state"] == state
-    assert state not in {"pending", "transferring", "completed"}
-    assert result["outcome"] != "repair_queued"
+    assert state not in {"pending", "transferring"}
+    if link["artifact_id"] is not None:
+        assert result["outcome"] == "reused"
+        assert result["artifact_id"] == link["artifact_id"]
+    else:
+        assert result["outcome"] != "repair_queued"
     assert repo.list_dispatchable(job["job_id"]) == ()
 
 
@@ -223,12 +235,51 @@ def test_a_second_task_never_opens_a_second_active_slot(repo, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 6. Idempotent replay must not skip a changed file
+# 6. Receipt replay: identical commands are free, changed bytes are re-checked
 # ---------------------------------------------------------------------------
 
 
-def test_a_changed_file_between_identical_replays_is_observed_again(repo, tmp_path, monkeypatch):
-    """A / UA-09: the receipt fast path may skip hashing only while bytes match."""
+def test_an_identical_replay_returns_the_same_ids_without_hashing(repo, tmp_path, monkeypatch):
+    """A / UA-09: an accepted identical page is replayed without file I/O."""
+    h.first_delivery(repo, tmp_path)
+    job = h.submit(repo, request_id="replay-identical")
+    page = h.source((h.candidate(),), page_identity="replay-identical")
+    first = h.accept(repo, job["batch_id"], page)
+    assert h.pages(repo, job)["completed"] == 1
+
+    observe = repo._observe_artifact
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(str(args[0]["artifact_id"]))
+        return observe(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "_observe_artifact", counting)
+    second = h.accept(repo, job["batch_id"], page)
+    assert second == first
+    assert calls == [], "an identical page replay hashed the file again"
+    assert h.pages(repo, job)["completed"] == 1
+
+
+def test_the_same_page_identity_with_a_different_digest_is_rejected(repo, tmp_path):
+    """A / UA-09 guard: a receipt replay still proves the same content digest."""
+    h.first_delivery(repo, tmp_path)
+    job = h.submit(repo, request_id="replay-digest")
+    page = h.source((h.candidate(),), page_identity="replay-digest")
+    h.accept(repo, job["batch_id"], page)
+    assert h.pages(repo, job)["completed"] == 1
+
+    altered = h.source(
+        (h.candidate(),), page_identity="replay-digest",
+        before="null", after='"cursor-different"',
+    )
+    with pytest.raises(CursorConflict):
+        h.accept(repo, job["batch_id"], altered)
+    assert h.pages(repo, job)["completed"] == 1
+
+
+def test_a_changed_completed_page_is_observed_by_recovery(repo, tmp_path, monkeypatch):
+    """B+A / UA-09: a completed link is not proof; recovery must look at bytes."""
     h.first_delivery(repo, tmp_path)
     job = h.submit(repo, request_id="replay-changed")
     page = h.source((h.candidate(),), page_identity="replay-changed")
@@ -244,17 +295,13 @@ def test_a_changed_file_between_identical_replays_is_observed_again(repo, tmp_pa
 
     monkeypatch.setattr(repo, "_observe_artifact", counting)
     h.target(tmp_path).write_bytes(h.SAME_SIZE_PNG)
-    failed = False
-    try:
-        h.accept(repo, job["batch_id"], page)
-    except LibraryError:
-        failed = True
+    result = repo.recover_verification_page(job["batch_id"], h.ARTWORK, 0)
 
-    assert calls, "the replayed page reused a receipt without observing the file"
-    if not failed:
-        result = h.pages(repo, job)
-        assert result["needs_verification"] == 1
-        assert result["completed"] == 0
+    assert calls, "recovery reported on a completed page without observing the file"
+    assert result["outcome"] in {"held", "reused"}
+    if result["outcome"] == "reused":
+        assert result["artifact_id"]
+        assert h.target(tmp_path).read_bytes() == h.PNG_BYTES
 
 
 # ---------------------------------------------------------------------------
