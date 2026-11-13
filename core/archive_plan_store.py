@@ -855,7 +855,12 @@ def _check_assets(
                WHERE asset_id=? AND revision=? AND path_key=?""",
             (content.asset_id, content.revision, asset.path_key),
         ).fetchone()
-        if row is None or tuple(row[:7]) != expected:
+        stored = None if row is None else tuple(row[:7])
+        # Index 4 is path_json: the display spelling recorded when the row was first
+        # indexed.  One directory entry reached through another case spelling is the
+        # same asset, so that column is not compared here and is never rewritten;
+        # the identity key, content and byte facts still must match exactly.
+        if stored is None or stored[:4] != expected[:4] or stored[5:] != expected[5:]:
             raise ArchivePlanStoreError("Content/path facts differ from the immutable plan JSON")
         source_facts.append([asset.path_key, row[7]])
         content_row = conn.execute(
@@ -1070,16 +1075,16 @@ def save_prepared_plan_in_transaction(
     source_facts: list[list[str]] = []
     for asset in prepared.inventory.assets:
         content = asset.content
+        # The stored row keeps the spelling it was first indexed with.  An ASCII
+        # case alias of one directory entry shares the path identity key, so the
+        # display spelling must not decide whether the asset already exists -
+        # otherwise a second selection of the same entry inserts a conflicting row.
         existing_asset = conn.execute(
             """SELECT 1 FROM archive_assets
                WHERE asset_id=? AND revision=? AND path_key=? AND content_key=?
-                 AND path_json=? AND size_bytes=? AND sha256 IS ?""",
+                 AND size_bytes=? AND sha256 IS ?""",
             (
                 content.asset_id, content.revision, asset.path_key, _content_key(content),
-                canonical_json({
-                    "kind": asset.path.kind, "root_id": asset.path.root_id,
-                    "relative_path": asset.path.relative_path,
-                }),
                 content.size_bytes, content.sha256,
             ),
         ).fetchone()

@@ -1655,6 +1655,22 @@ def content_digest_is_known(
     return find_known_content(conn, sha256, size_bytes) is not None
 
 
+def _asset_max_revision(
+    conn: sqlite3.Connection, asset_id: str,
+) -> int | None:
+    """Highest generation already stored for one logical asset, or None.
+
+    The scope asset id follows the physical object, so a rename keeps it.  This is
+    the floor a new generation must clear; identical bytes owned by another asset
+    are never consulted here.
+    """
+    row = conn.execute(
+        "SELECT MAX(revision) FROM archive_contents WHERE asset_id=?", (asset_id,),
+    ).fetchone()
+    value = None if row is None else row[0]
+    return None if value is None else int(value)
+
+
 def resolve_observed_content(
     conn: sqlite3.Connection, observed: ObservedFile, *,
     replacement_confirmed: bool = False,
@@ -1677,6 +1693,9 @@ def resolve_observed_content(
         observed.candidate, observed, existing=existing,
         digest_known=known_content is not None, known_content=known_content,
         replacement_confirmed=replacement_confirmed,
+        asset_max_revision=(
+            None if content is None else _asset_max_revision(conn, content.asset_id)
+        ),
     )
 
 
@@ -1858,6 +1877,25 @@ def apply_content_resolution(
                 path.identity_key, expected_key, current.content_key,
                 "expected_revision_changed")
 
+    # The asset's generations are allocated by the resolver from its own history.
+    # Another path of the same asset may have committed since; a revision that is
+    # no longer free must be refused here with a re-observe decision instead of
+    # failing deep inside ensure_archive_asset on an immutable-key collision.
+    stored = conn.execute(
+        "SELECT asset_id,revision,size_bytes,sha256 FROM archive_contents WHERE content_key=?",
+        (new_key,),
+    ).fetchone()
+    if stored is None or tuple(stored) != _content_values(content):
+        # The key is derived from (asset, revision) alone, so an existing row with
+        # other bytes means another path of this asset already took that
+        # generation.  Refuse with a re-observe decision instead of letting
+        # ensure_archive_asset report an immutable-key collision.
+        allocated = _asset_max_revision(conn, content.asset_id)
+        if allocated is not None and content.revision <= allocated:
+            raise ArchiveBindingConflictError(
+                path.identity_key, expected_key, new_key,
+                "asset_revision_allocated_concurrently")
+
     # The stored diagnostic references the generation it was rebound to, so both
     # that generation and the resolved one must be indexed before the observation
     # row.  The raw probe is a read contract (it may carry the new size), never a
@@ -1865,13 +1903,12 @@ def apply_content_resolution(
     for referenced in (expected, rebound.evidence.content):
         if referenced is None or _content_key(referenced) == new_key:
             continue
-        referenced_key = _content_key(referenced)
-        if conn.execute(
-            "SELECT 1 FROM archive_contents WHERE content_key=?", (referenced_key,),
-        ).fetchone() is None:
-            ensure_archive_asset(conn, referenced, path, source_kind=source_kind)
-        else:
-            _require_content(conn, referenced)
+        # The row must exist for *this* path, not only somewhere in the library:
+        # a renamed object carries its unknown-history generation with it, so the
+        # content row may already be indexed under the old path.
+        if _asset_row_is_exact(conn, referenced, path):
+            continue
+        ensure_archive_asset(conn, referenced, path, source_kind=source_kind)
     if not _asset_row_is_exact(conn, content, path):
         ensure_archive_asset(conn, content, path, source_kind=source_kind)
     record_local_observation(conn, rebound.evidence, result=rebound)

@@ -900,6 +900,7 @@ def resolve_content_version(
     existing: ContentBinding | None = None, digest_known: bool = False,
     known_content: ContentVersion | None = None,
     replacement_confirmed: bool = False,
+    asset_max_revision: int | None = None,
 ) -> ContentResolution:
     """Central, pure candidate/observation to content-generation resolver.
 
@@ -923,6 +924,13 @@ def resolve_content_version(
     physical replacement is refused instead of silently overwriting the newer
     evidence.  "No binding" is its own value (``expected_binding_absent``), never a
     None that also means "do not check".
+
+    Revisions are allocated from the asset's own history: ``asset_max_revision`` is
+    the highest generation already stored for this logical asset, so a renamed
+    object or a hardlink name that lagged behind continues that chain instead of
+    re-deriving a revision another path already occupies.  Identical bytes in a
+    different asset never take part in that floor, and the writer rechecks it
+    inside its transaction before inserting anything.
     """
     if not isinstance(candidate, CandidateSnapshot) or not isinstance(observed, ObservedFile):
         raise ContractError("Expected a candidate and its observation")
@@ -932,6 +940,14 @@ def resolve_content_version(
 
     def refusal(*arguments: object, **keywords: object) -> ContentResolution:
         return _unresolved(*arguments, binding=existing, **keywords)
+
+    # The asset's own history, not just this path's binding, decides the next free
+    # generation.  A renamed object and a lagging hardlink name keep the same scope
+    # asset id, so their new bytes must continue that asset's chain instead of
+    # re-deriving a revision another path already holds.
+    if asset_max_revision is not None:
+        _integer(asset_max_revision, "asset maximum revision", 0, 2**63 - 1)
+    history_floor = 0 if asset_max_revision is None else asset_max_revision
 
     if observed.candidate != candidate:
         return refusal(
@@ -978,7 +994,9 @@ def resolve_content_version(
                 ResolutionKind.REUSE, candidate, known_content, None,
                 "known_content_first_binding")
         baseline_revision = max(
-            observed.expected_content.revision, observed_content.revision) + 1
+            observed.expected_content.revision, observed_content.revision,
+            history_floor,
+        ) + 1
         baseline = ContentVersion(
             observed_content.asset_id, baseline_revision,
             observed_content.size_bytes, observed_content.sha256,
@@ -1019,7 +1037,7 @@ def resolve_content_version(
                 "confirmed_replacement_same_content")
         revision = max(
             previous.revision, observed.expected_content.revision,
-            observed_content.revision,
+            observed_content.revision, history_floor,
         ) + 1
         replacement = ContentVersion(
             previous.asset_id, revision, observed_content.size_bytes,
@@ -1031,7 +1049,7 @@ def resolve_content_version(
     if previous.sha256 is None:
         revision = max(
             previous.revision, observed.expected_content.revision,
-            observed_content.revision,
+            observed_content.revision, history_floor,
         ) + 1
         baseline = ContentVersion(
             previous.asset_id, revision, observed_content.size_bytes,
@@ -1046,7 +1064,8 @@ def resolve_content_version(
             "same_physical_object_same_content")
     if same_object is None:
         if replacement_confirmed:
-            revision = max(previous.revision, observed_content.revision) + 1
+            revision = max(
+                previous.revision, observed_content.revision, history_floor) + 1
             replacement = ContentVersion(
                 previous.asset_id, revision, observed_content.size_bytes,
                 observed_content.sha256,
@@ -1059,7 +1078,7 @@ def resolve_content_version(
             "root_generation_changed" if root_generation_differs
             else "previous_physical_identity_unknown",
             "reobserve_or_confirm")
-    revision = max(previous.revision, observed_content.revision) + 1
+    revision = max(previous.revision, observed_content.revision, history_floor) + 1
     newer = ContentVersion(
         previous.asset_id, revision, observed_content.size_bytes,
         observed_content.sha256,
@@ -2391,13 +2410,21 @@ class ScopeEnumerator:
             files_seen: set[str] = set()
             prefix_candidates: list[str] = []
             file_candidates: list[str] = []
+            validated: list[tuple[bool, str]] = []
             for index, (is_prefix, raw) in enumerate(
                     [(True, value) for value in self._request.prefixes]
                     + [(False, value) for value in self._request.files]):
                 guard.checkpoint()
                 relative = selection_relative(raw, index)
-                if relative is None:
-                    continue
+                if relative is not None:
+                    validated.append((is_prefix, relative))
+            # An explicit selection names a real directory entry: normalise every
+            # spelling before dedup, eligibility and identity are computed, so
+            # "gallery/a.bin", "gallery/A.bin" and "gallery/画a.bin" cannot become
+            # different assets.  All selections share one listing per parent.
+            resolved_spellings = self._resolve_spellings(
+                [relative for _is_prefix, relative in validated], name_index)
+            for (is_prefix, _raw_relative), relative in zip(validated, resolved_spellings):
                 if relative == "." and not is_prefix:
                     add_issue(ScopeIssueCode.INVALID_PATH, relative)
                     continue
@@ -2706,6 +2733,58 @@ class ScopeEnumerator:
         if not self._ancestor_eligibility(relative).accepted:
             return False
         return self._directory_eligibility(relative, relative.rsplit("/", 1)[-1]).accepted
+
+    def _resolve_spellings(
+        self, relatives: list[str], name_index: _RawNameIndex,
+    ) -> list[str]:
+        """Resolve many selected spellings with one listing per distinct parent."""
+        needed: set[str] = set()
+        for relative in relatives:
+            if relative == ".":
+                continue
+            typed = "."
+            for piece in relative.split("/"):
+                needed.add(typed)
+                typed = piece if typed == "." else typed + "/" + piece
+        listings = {directory: name_index.index(directory) for directory in needed}
+        return [self._spell(listings, relative) for relative in relatives]
+
+    def _spell(self, listings: dict[str, frozenset[str] | None], relative: str) -> str:
+        """Rewrite one selection to the real child names its parents list."""
+        if relative == ".":
+            return relative
+        resolved: list[str] = []
+        typed = "."
+        for piece in relative.split("/"):
+            names = listings.get(typed)
+            if names is None:
+                return relative
+            folded = os.path.normcase(piece)
+            matches = [name for name in names if os.path.normcase(name) == folded]
+            if len(matches) != 1:
+                return relative
+            resolved.append(matches[0])
+            typed = piece if typed == "." else typed + "/" + piece
+        return "/".join(resolved)
+
+    def _real_entry_spelling(self, relative: str, name_index: _RawNameIndex) -> str:
+        """Resolve one selected path to the spelling its directory entries have.
+
+        Windows matches names case-insensitively, so ``gallery/a.bin`` and
+        ``gallery/A.bin`` can name one entry, and a mixed-script name such as
+        ``画A.bin`` has no case-free ASCII spelling at all.  The archive identity is
+        that entry, not what the caller typed: each segment is matched against the
+        parent's real child names with ``os.path.normcase``, which folds case on
+        Windows and stays exact on POSIX.  ``normcase`` is not a casefold, so NFC/NFD
+        and ``straße`` versus ``strasse`` remain different entries.
+
+        Anything the index cannot answer - a missing name, an unreadable or
+        policy-excluded directory, an exhausted name budget - keeps the requested
+        spelling, so this never invents a name the enumerator did not read.  The
+        listing itself is shared per enumeration, so selecting many files in one
+        directory reads that directory once, never once per file.
+        """
+        return self._resolve_spellings([relative], name_index)[0]
 
     def _raw_entry_presence(self, relatives: list[str],
                             name_index: _RawNameIndex) -> dict[str, bool]:
