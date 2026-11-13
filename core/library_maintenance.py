@@ -994,6 +994,21 @@ def _parser() -> argparse.ArgumentParser:
         "plan", parents=[_COMMON], help="输出切换与回退顺序，不做任何写操作"
     )
     plan.add_argument("database", type=Path)
+    scan = commands.add_parser(
+        "scan", parents=[_COMMON], help="只读巡检已交付的文件是否还和记录一致"
+    )
+    scan.add_argument("database", type=Path)
+    scan.add_argument(
+        "--root", type=Path, default=None, help="输出图库根目录；默认取库文件所在项目的根"
+    )
+    scan.add_argument(
+        "--limit", type=int, default=200, help="本次最多核验多少行（1-2000，默认 200）"
+    )
+    scan.add_argument(
+        "--after", default=None, help="续跑游标：上一次输出的 next_cursor（completed_at,artifact_id）"
+    )
+    scan.add_argument("--max-bytes", type=int, default=None, help="本轮最多读多少字节")
+    scan.add_argument("--max-seconds", type=float, default=None, help="本轮最多用多少秒")
     return parser
 
 
@@ -1037,6 +1052,45 @@ def _inspect_lines(report: dict[str, object]) -> list[str]:
         lines.append("原因: " + ", ".join(str(item) for item in report["reasons"]))
     if report["warnings"]:
         lines.append("提示: " + ", ".join(str(item) for item in report["warnings"]))
+    return lines
+
+
+_SCAN_FINDINGS = (
+    "missing",
+    "changed",
+    "unreadable",
+    "root_unavailable",
+    "changed_during_check",
+)
+
+
+def _scan_lines(report: dict[str, object]) -> list[str]:
+    stats = report["stats"]
+    rows = report["rows"]
+    lines = [
+        "核验: %s 行（匹配 %s，无法核验 %s）"
+        % (stats["examined"], stats["matched"], stats["unknown"]),
+        "字节: 读取 %s，用时 %.2f 秒" % (stats["bytes_hashed"], float(stats["seconds"])),
+    ]
+    findings = [row for row in rows if row["verdict"] in _SCAN_FINDINGS]
+    if findings:
+        lines.append("需要你知道的 %d 行:" % len(findings))
+        for row in findings[:20]:
+            lines.append(
+                "  %s p%s  %s  %s"
+                % (row["illust_id"], row["page_index"], row["verdict"], row["reason"])
+            )
+        if len(findings) > 20:
+            lines.append("  … 还有 %d 行未列出" % (len(findings) - 20))
+    else:
+        lines.append("结论: 本次核验的每一行都与记录一致。")
+    if report["truncated"]:
+        reason = stats["budget_exhausted_reason"]
+        cursor = report["next_cursor"]
+        lines.append(
+            "提示: 本次没有覆盖整库（%s），续跑游标 %s"
+            % (reason or "还有更多行", "%s,%s" % (cursor[0], cursor[1]) if cursor else "-")
+        )
     return lines
 
 
@@ -1104,6 +1158,58 @@ def main(argv: list[str] | None = None) -> int:
                 + (["原因: " + ", ".join(result["reasons"])] if result["reasons"] else []),
             )
             return 0 if result["ok"] else 2
+        if arguments.command == "scan":
+            from core.app_paths import AppPaths
+            from core.library_audit import LibraryAuditError, ScanBudget, scan_library_artifacts
+            from core.library_paths import PathResolver
+
+            database = Path(arguments.database)
+            root = arguments.root if arguments.root is not None else database.parent.parent
+            budget = ScanBudget(
+                **{
+                    key: value
+                    for key, value in (
+                        ("max_bytes", arguments.max_bytes),
+                        ("max_seconds", arguments.max_seconds),
+                    )
+                    if value is not None
+                }
+            )
+            cursor = None
+            if arguments.after:
+                parts = str(arguments.after).split(",", 1)
+                if len(parts) != 2 or not all(parts):
+                    raise LibraryMaintenanceError(
+                        "scan_cursor_invalid", "游标格式应为 completed_at,artifact_id"
+                    )
+                cursor = (parts[0].strip(), parts[1].strip())
+            try:
+                report = scan_library_artifacts(
+                    (database, PathResolver(AppPaths(root))),
+                    after=cursor,
+                    limit=arguments.limit,
+                    budget=budget,
+                )
+            except LibraryAuditError as error:
+                if as_json:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "error",
+                                "code": "scan_ledger_unreadable",
+                                "detail": str(error),
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    print("巡检失败: 账本读不出来（%s）" % error, file=sys.stderr)
+                return 3
+            _emit(report, as_json, _scan_lines(report))
+            if any(row["verdict"] in _SCAN_FINDINGS for row in report["rows"]):
+                return 2
+            return 0
         plan = switch_plan(arguments.database)
         _emit(
             plan,
