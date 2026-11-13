@@ -24,6 +24,12 @@ cost here is at most MAX_LINEAGE_QUERIES statements and one visit per node.
 Nothing in this module touches the file system.  It is safe to call inside a
 writer transaction, and both the read-only preflight and the write-time check
 must call it so they can never disagree about the authority order.
+
+Both paths use one quality scope: the window statement selects rows whose
+quality_key equals the resolved delivery's quality_key, and a handover target
+is usable only when its owning delivery shares that same quality_key.  A
+handover into another quality scope is therefore refused instead of silently
+accepted where the window could never reach it.
 """
 from __future__ import annotations
 
@@ -84,7 +90,7 @@ _EVENT_TARGET_SQL = (
     "a.media_type AS media_type, a.quality_json AS artifact_quality_json, "
     "d.delivery_id AS owner_delivery_id, d.job_id AS owner_job_id, "
     "d.current_batch_id AS owner_batch_id, d.generation AS owner_generation, "
-    "d.state AS owner_state "
+    "d.quality_key AS owner_quality_key, d.state AS owner_state "
     "FROM artifacts AS a JOIN deliveries AS d ON d.delivery_id = a.delivery_id "
     "WHERE a.artifact_id = ?"
 )
@@ -268,7 +274,14 @@ class _Probe:
     def event_target(
         self, artifact_id: str, page: _PageIdentity
     ) -> tuple[Successor | None, str | None]:
-        """Validate one handover target against the page it must own."""
+        """Validate one handover target against the page it must own.
+
+        The target must live in the same quality scope as the delivery being
+        resolved.  The window path can only ever offer rows with this exact
+        quality_key, so accepting a handover into another quality scope would
+        let the event path answer a question the window path never could: the
+        two paths would not be the same authority order any more.
+        """
         rows = self.execute(_EVENT_TARGET_SQL, (artifact_id,))
         if not rows:
             return None, "artifact_missing"
@@ -279,6 +292,10 @@ class _Probe:
             or str(row["output_key"]) != page.output_key
         ):
             return None, "page_mismatch"
+        if str(row["owner_quality_key"]) != page.quality_key:
+            # Only the delivery row carries quality_key; an artifact row never
+            # does, so this compares the target delivery, never the bytes.
+            return None, "quality_key_mismatch"
         if not _artifact_is_usable(row):
             return None, "artifact_invalid"
         if page.quality is None:
