@@ -180,10 +180,18 @@ def test_stale_preflight_cannot_reuse_an_intact_file(tmp_path, monkeypatch):
         original = repo._preflight_page_health
 
         def stale(batch_id, page):
-            return tuple(
-                replace(record, checked_at="2020-01-01T00:00:00+00:00")
-                for record in original(batch_id, page)
-            )
+            # Plumbing only: the hook now returns a frozen PreflightSnapshot,
+            # so age every observed record inside it instead of iterating a
+            # bare health tuple.  The assertions below are unchanged.
+            snapshot = original(batch_id, page)
+            pages = {}
+            for storage_key, page_snapshot in snapshot.pages.items():
+                observed = tuple(
+                    replace(record, checked_at="2020-01-01T00:00:00+00:00")
+                    for record in page_snapshot.observed
+                )
+                pages[storage_key] = replace(page_snapshot, observed=observed)
+            return replace(snapshot, pages=pages)
 
         monkeypatch.setattr(repo, "_preflight_page_health", stale)
         job, accepted = second(repo)
