@@ -1345,6 +1345,34 @@
       "next_step": "A1 offline interface may enter production wiring review (U1-A/J-01); real gallery, cloud readback, release and production migration remain separate gates.",
       "product_source_changed": true,
       "business_data_changed": false
+    },
+    {
+      "session_date": "2026-11-13",
+      "id": "JPGPNG-U1A-WIRING-20261113-01",
+      "summary": "评审 U1-A/J-01 生产复用：7 项独立测试在 4023fca 上红，确认删除/等长替换/同尺寸换摘要后新任务仍按旧 artifact 计为完成且可结算；产出 W0–W6 接口、事务/IO 边界、用户意图与验收矩阵。未修改产品，未接真实图库/网络。",
+      "base_commit": "4023fcac4c7f88ffc87696578755a83358e2a2f5",
+      "product_commit": "dda6fc1596583d060bbec004665c2be851ec94b6",
+      "tests": {
+        "independent_red": {
+          "total": 17,
+          "failed_expected": 7,
+          "skipped": 2,
+          "report": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_baseline.xml"
+        },
+        "full_with_red": {
+          "total": 1515,
+          "failed_expected": 7,
+          "errors": 0,
+          "skipped": 5,
+          "report": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_full_suite.xml"
+        }
+      },
+      "report": "docs/audits/2026-11-13-u1a-wiring/README.md",
+      "findings": "docs/audits/2026-11-13-u1a-wiring/FINDINGS.md",
+      "guide": "docs/audits/2026-11-13-u1a-wiring/DEVELOPMENT_GUIDE.md",
+      "next_step": "W0 freeze red tests; W1 artifact health contract; W2 preflight I/O; W3 integrate three reuse paths; W4 intent-aware repair; W5 UI/recovery; W6 acceptance.",
+      "product_source_changed": false,
+      "business_data_changed": false
     }
   ]
 }

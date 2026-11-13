@@ -346,20 +346,20 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-13",
-      "phase": "A1 AR4-01..08 closed at dda6fc1; schema 5; offline acceptance complete",
-      "status": "offline_ar4_findings_closed_not_production_wired",
+      "phase": "U1-A/J-01 production reuse reviewed; J-01 confirmed open; W0-W6 pending",
+      "status": "u1a_review_complete_j01_open_not_production_wired",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "R5/R6 complete: AR4-01..08 closed at dda6fc1; A1 offline interface ready for production wiring review (U1-A/J-01). Real gallery, cloud readback, release and production migration remain separate gates.",
+      "next_step": "W0 freeze the 7 red J-01 tests; W1 artifact health contract; W2 preflight I/O outside the writer; W3 integrate cross-task, same-job and follow reuse; W4 user-intent repair; W5 UI/recovery; W6 acceptance. No production/real-gallery/network.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-A1-AR4-20261113-01",
+      "latest_batch": "JPGPNG-U1A-WIRING-20261113-01",
       "foundation": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
-      "evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
+      "evidence": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_baseline.xml",
       "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
-      "unfinished_draft": "AR4-01..08 closed; AR3-07/08 remain closed; production J-01/U1-A not wired",
+      "unfinished_draft": "J-01 open; W0-W6 pending; AR4-01..08 and AR3-07/08 remain closed",
       "latest_repair_evidence": ".runtime/jpgpng_a1_repair_20261112_01/validation.json",
-      "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml"
+      "latest_overview": "docs/audits/2026-11-13-u1a-wiring/README.md",
+      "latest_evidence": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_baseline.xml"
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -662,6 +662,35 @@
       "report": "docs/maintenance/2026-11-13_jpgpng_a1_ar4_fix.md",
       "product_ready": false,
       "next_step": "A1 offline interface may enter production wiring review (U1-A/J-01); real gallery, cloud readback, release and production migration remain separate gates."
+    },
+    "u1a_wiring_review": {
+      "id": "JPGPNG-U1A-WIRING-20261113-01",
+      "date": "2026-11-13",
+      "status": "review_complete_j01_confirmed_open_not_fixed",
+      "base_commit": "4023fcac4c7f88ffc87696578755a83358e2a2f5",
+      "product_commit": "dda6fc1596583d060bbec004665c2be851ec94b6",
+      "findings": ["J-01"],
+      "report": "docs/audits/2026-11-13-u1a-wiring/README.md",
+      "findings_file": "docs/audits/2026-11-13-u1a-wiring/FINDINGS.md",
+      "guide": "docs/audits/2026-11-13-u1a-wiring/DEVELOPMENT_GUIDE.md",
+      "independent_tests": {
+        "branch": "audit/u1a-j01-tests-20261113",
+        "commit": "4606dd4",
+        "total": 17,
+        "failed_expected": 7,
+        "skipped": 2,
+        "report": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_baseline.xml"
+      },
+      "full_with_red_tests": {
+        "total": 1515,
+        "failed_expected": 7,
+        "errors": 0,
+        "skipped": 5,
+        "report": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_full_suite.xml"
+      },
+      "product_source_changed": false,
+      "product_ready": false,
+      "next_step": "W0 freeze red tests; W1 artifact health contract; W2 preflight I/O; W3 integrate three reuse paths; W4 intent-aware repair; W5 UI/recovery; W6 acceptance."
     }
   }
 }

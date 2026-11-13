@@ -6,11 +6,12 @@
 
 ## 当前检查点
 
-当前保留三个标签：
+当前保留四个标签：
 
 - `checkpoint-2026-11-12-a1-audit`：与审计基线一致的 173 个 Python 文件，archive_schema 为 schema 2。
 - `checkpoint-2026-11-12-a1-wip`：开始留档时实际工作树，保留 archive_schema 已有的 schema 3 未验收草稿。
 - `checkpoint-2026-11-13-a1-ar4`：AR4-01..08 关闭、schema 5、独立测试与 2,000 文件/进程退出证据齐全的离线验收点；仍未生产接线。可用 `git rev-parse checkpoint-2026-11-13-a1-ar4^{}` 复核确切提交。
+- `checkpoint-2026-11-13-u1a-review`：U1-A/J-01 生产复用评审完成，7 项独立红测试与 W0–W6 已留档；J-01 未修复，产品未改。
 
 这些标签都包含下载器重构、整理 CLI、优化/归档设计和审计文档。只在 Git 索引中取回已核验的旧 schema 文件形成前一个版本，当前工作树不被回退；随后保存现有草稿。版本边界见[本次说明](maintenance/2026-11-12_version_checkpoint.md)。
 
