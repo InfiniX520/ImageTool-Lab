@@ -358,6 +358,23 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _known_artifact_size(artifact: Any) -> int:
+    """The size the artifact row recorded, or 0 when it cannot be read.
+
+    The observation planner uses it to refuse a file the page budget cannot pay
+    for *before* opening it (contract v4 §6).  A missing or malformed value is
+    not a reason to fail the page; the observation itself still enforces the
+    remaining allowance.
+    """
+    try:
+        size = artifact["size"]
+    except (KeyError, IndexError, TypeError):
+        return 0
+    if type(size) is not int or size < 0:
+        return 0
+    return size
+
+
 def _validate_command_id(command_id: object) -> str:
     if not isinstance(command_id, str) or _COMMAND_ID_RE.fullmatch(command_id) is None:
         raise LibraryError("Invalid command id")
@@ -2491,7 +2508,23 @@ class LibraryRepository(
     def _observe_page_plan(
         self, plan: _PagePlan, page: SourcePage
     ) -> PreflightSnapshot:
-        """Observe one planned page in slices, reusing usable observations."""
+        """Observe one planned page under the contract v4 observation protocol.
+
+        Three layers stay separate: a persisted progress record is only a hint,
+        the observations this call makes are the attempt evidence, and an
+        accepted receipt is the historical commit the caller replays without
+        opening a file.  A positive hint is therefore observed once more before
+        the writer command, because a trusted reuse only writes a page link and
+        never passes the publication or confirmation gates (RFB-01).
+
+        A page the durable progress cannot cover -- the log cannot be written,
+        the retained capacity is smaller than the page, or the hint was
+        truncated -- finishes in this call instead of returning a retryable
+        slice budget that could only repeat the same prefix (RFB-02).  Byte and
+        time limits are per page, not per slice, and the remaining allowance is
+        clipped into every observation so a single file cannot silently
+        overrun it (RFB-06).
+        """
         cancel = self._accept_cancel()
         budget = self._accept_budget()
         digest = self._accept_page_digest()
@@ -2509,7 +2542,6 @@ class LibraryRepository(
             except SnapshotError:
                 key = None
         progress = None if key is None else self._load_observation_progress(key)
-        slices_enabled = progress is not None and budget is not None
         records: dict[str, ArtifactHealth | None] = {}
         ordered: list[tuple[Any, str]] = []
         seen: set[str] = set()
@@ -2520,51 +2552,98 @@ class LibraryRepository(
                     continue
                 seen.add(artifact_id)
                 ordered.append((artifact, artifact_id))
-        new_records: list[ProgressRecord] = []
-        fresh_files = 0
-        fresh_bytes = 0
+        index = 0
+        truncated = progress is None or progress.truncated
+        # Slicing only helps a page the durable progress can cover.  Without
+        # that guarantee a slice budget is an endless retry (RFB-02).
+        slices_enabled = bool(
+            budget is not None
+            and key is not None
+            and not truncated
+            and len(ordered) <= MAX_PROGRESS_RECORDS
+        )
+        # A caller that is not accepting a page (no page digest) has no durable
+        # progress to continue from, so the old hard slice limit still applies
+        # and reports the budget it ran out of instead of finishing silently.
+        hard_slice_limit = budget is not None and key is None
+        page_started = time.monotonic()
+        page_bytes = 0
+        slice_started = page_started
+        slice_files = 0
+        slice_bytes = 0
+        slice_new = 0
         slices = 0
-        slice_started = time.monotonic()
+        cached_positive: list[tuple[Any, str]] = []
+        new_records: list[ProgressRecord] = []
 
-        def flush() -> None:
-            """Hand this slice's new observations to the progress log."""
-            nonlocal new_records, fresh_files, fresh_bytes
+        def remaining_bytes() -> int | None:
+            if budget is None:
+                return None
+            return int(budget.max_bytes) - page_bytes
+
+        def remaining_seconds() -> float | None:
+            if budget is None:
+                return None
+            return float(budget.max_seconds) - (time.monotonic() - page_started)
+
+        def flush() -> int:
+            """Persist this slice observations; 0 when nothing landed."""
+            nonlocal new_records, slice_files, slice_bytes
             pending = new_records
             new_records = []
+            files, observed = slice_files, slice_bytes
+            slice_files, slice_bytes = 0, 0
             if not pending or key is None:
-                fresh_files, fresh_bytes = 0, 0
-                return
-            self._persist_progress(
+                return 0
+            persisted = self._persist_progress(
                 key,
                 tuple(pending),
                 batch_id=plan.batch_id,
-                observed_files=fresh_files,
-                observed_bytes=fresh_bytes,
+                observed_files=files,
+                observed_bytes=observed,
                 slice_seq=slices + 1,
             )
-            fresh_files, fresh_bytes = 0, 0
+            return len(pending) if persisted else 0
 
         def close_slice() -> None:
-            """Persist the finished slice, then open the next one or stop.
-
-            A call may take at most `max_slices` slices, so a page that fills the
-            last allowed slice returns a budget result even when nothing is left
-            to observe; the following call then commits without opening a file.
-            """
-            nonlocal slices, slice_started
-            flush()
+            """Persist the finished slice, then open the next one or stop."""
+            nonlocal slices, slice_started, slice_new, slices_enabled
+            made = slice_new
+            slice_new = 0
+            persisted = flush()
             slices += 1
             slice_started = time.monotonic()
-            if budget is not None and slices >= budget.max_slices:
-                raise PreflightCancelled("page_slice_limit")
+            if not slices_enabled or budget is None:
+                return
+            if made and not persisted:
+                # The observations exist but the hint did not: another attempt
+                # could not skip them, so this call finishes the page.
+                slices_enabled = False
+                return
+            if slices < budget.max_slices:
+                return
+            remaining = len(ordered) - index
+            if remaining <= 0:
+                # The last slice ends exactly on the cap; the page is covered,
+                # so it commits instead of asking for one more call.
+                return
+            if made <= 0:
+                slices_enabled = False
+                return
+            raise PreflightCancelled(
+                "page_slice_limit",
+                details={
+                    "new": made,
+                    "persisted": persisted,
+                    "remaining": remaining,
+                },
+            )
 
-        index = 0
         while index < len(ordered):
             artifact, artifact_id = ordered[index]
             if cancel is not None and cancel.is_set():
-                # A pause/close stops the remaining candidates instead of
-                # hashing the whole page; this is a control result, not a
-                # file-health verdict.
+                # A pause or close stops the remaining candidates instead of
+                # hashing the whole page: a control result, never a verdict.
                 flush()
                 raise PreflightCancelled("cancelled")
             reused = None
@@ -2576,20 +2655,30 @@ class LibraryRepository(
                     resolver=plan.resolver,
                 )
             if reused is not None:
-                # An earlier slice already observed these exact bytes within
-                # the freshness window; do not open the file again.
+                # The hint only saves the slice slot here; a positive verdict
+                # is confirmed once before the page commits (RFB-01).
                 records[artifact_id] = reused
+                if reused.state in {LocalState.HASH_MATCH, LocalState.QUICK_MATCH}:
+                    cached_positive.append((artifact, artifact_id))
                 index += 1
                 continue
+            size = _known_artifact_size(artifact)
             if budget is not None:
-                exhausted = self._slice_exhausted(
-                    budget, fresh_files, fresh_bytes, slice_started
-                )
-                if exhausted is not None:
-                    if not slices_enabled:
-                        raise PreflightCancelled(exhausted)
-                    # The slice is full (or over its byte/time budget): the
-                    # next file starts a fresh slice, never an N+1 in this one.
+                if size > remaining_bytes():
+                    # Never open a file the page budget cannot pay for.
+                    flush()
+                    raise PreflightCancelled("page_byte_budget")
+                if remaining_seconds() <= 0:
+                    flush()
+                    raise PreflightCancelled("page_time_budget")
+                if (slices_enabled or hard_slice_limit) and self._slice_is_full(
+                    budget, slice_files
+                ):
+                    if hard_slice_limit:
+                        flush()
+                        raise PreflightCancelled("page_file_budget")
+                    # A full slice ends as soon as it is full; the next file
+                    # starts a fresh slice instead of an N+1 in this one.
                     close_slice()
                     continue
             try:
@@ -2609,6 +2698,10 @@ class LibraryRepository(
                     resolver=plan.resolver,
                     run_id=plan.run_id,
                     quality_key=plan.quality_key,
+                    budget=self._artifact_observation_budget(
+                        budget, remaining_bytes(), remaining_seconds()
+                    ),
+                    cancel=cancel,
                 )
             except (ContractError, OSError, ValueError):
                 flush()
@@ -2619,9 +2712,12 @@ class LibraryRepository(
                     reason="observation_failed",
                 )
             records[artifact_id] = record
-            fresh_files += 1
+            slice_files += 1
+            slice_new += 1
             if record is not None:
-                fresh_bytes += int(record.bytes_read or 0)
+                read = int(record.bytes_read or 0)
+                page_bytes += read
+                slice_bytes += read
                 if key is not None:
                     new_records.append(
                         ProgressRecord(
@@ -2634,16 +2730,50 @@ class LibraryRepository(
             if (
                 slices_enabled
                 and budget is not None
-                and fresh_files >= budget.max_files
+                and slice_files >= budget.max_files
             ):
-                # A full slice ends as soon as it is full: one call may take at
-                # most max_slices slices, and the next call continues from the
-                # durable progress instead of re-reading these files.
                 close_slice()
-        # Every slice, including the last one, leaves its observations behind:
-        # a crash between the last observation and the atomic commit must not
-        # force the same files to be hashed again.
+        # The slice phase ends here: persist its tail before the confirmation
+        # pass re-reads the candidates the hint covered, so the frozen boundary
+        # is the last slice write and the confirmations follow it.
         flush()
+        if cached_positive:
+            # Strict confirmation pass (contract v4 §2.2): a positive hint is
+            # not current evidence, and a trusted reuse never reaches the
+            # publication or confirmation gates.
+            for artifact, artifact_id in cached_positive:
+                if cancel is not None and cancel.is_set():
+                    flush()
+                    raise PreflightCancelled("cancelled")
+                if budget is not None:
+                    if _known_artifact_size(artifact) > remaining_bytes():
+                        flush()
+                        raise PreflightCancelled("page_byte_budget")
+                    if remaining_seconds() <= 0:
+                        flush()
+                        raise PreflightCancelled("page_time_budget")
+                confirmed = self._observe_artifact(
+                    artifact,
+                    resolver=plan.resolver,
+                    run_id=plan.run_id,
+                    quality_key=plan.quality_key,
+                    budget=self._artifact_observation_budget(
+                        budget, remaining_bytes(), remaining_seconds()
+                    ),
+                    cancel=cancel,
+                )
+                records[artifact_id] = confirmed
+                if confirmed is None:
+                    continue
+                # The confirmation re-reads an artifact the hint already names;
+                # it spends page bytes but adds nothing to the next attempt's
+                # hint, so it is not logged again.
+                page_bytes += int(confirmed.bytes_read or 0)
+        if budget is not None:
+            if page_bytes > int(budget.max_bytes):
+                raise PreflightCancelled("page_byte_budget")
+            if (time.monotonic() - page_started) > float(budget.max_seconds):
+                raise PreflightCancelled("page_time_budget")
         try:
             pages: dict[tuple[str, int, str, str], PageSnapshot] = {}
             for page_key, generation, delivery_id, artifacts in plan.selected.values():
@@ -2675,18 +2805,28 @@ class LibraryRepository(
             )
 
     @staticmethod
-    def _slice_exhausted(
-        budget: PageBudget, fresh_files: int, fresh_bytes: int, started: float
-    ) -> str | None:
-        """Name the budget a slice has used up, or None while it still fits."""
-        if fresh_files >= budget.max_files:
-            return "page_file_budget"
-        if fresh_bytes > budget.max_bytes:
-            return "page_byte_budget"
-        if time.monotonic() - started > float(budget.max_seconds):
-            return "page_time_budget"
-        return None
+    def _slice_is_full(budget: PageBudget, slice_files: int) -> bool:
+        """True when this slice may not open another file."""
+        return slice_files >= budget.max_files
 
+    @staticmethod
+    def _artifact_observation_budget(
+        page_budget: PageBudget | None,
+        remaining_bytes: int | None,
+        remaining_seconds: float | None,
+    ) -> ObservationBudget:
+        """Per-file limits clipped to what the page attempt can still pay."""
+        if page_budget is None or remaining_bytes is None or remaining_seconds is None:
+            return _ARTIFACT_OBSERVATION_BUDGET
+        return ObservationBudget(
+            max_bytes=min(
+                _ARTIFACT_OBSERVATION_BUDGET.max_bytes, max(0, remaining_bytes)
+            ),
+            max_seconds=min(
+                _ARTIFACT_OBSERVATION_BUDGET.max_seconds,
+                max(0.05, float(remaining_seconds)),
+            ),
+        )
     def _load_observation_progress(
         self, key: ObservationKey
     ) -> PageObservationProgress | None:
@@ -2733,12 +2873,13 @@ class LibraryRepository(
         observed_files: int,
         observed_bytes: int,
         slice_seq: int,
-    ) -> None:
-        """Persist one slice of observations; never fail the acceptance.
+    ) -> bool:
+        """Persist one slice of observations; True when the hint was stored.
 
-        A progress fact is an accelerator, not a precondition.  If the writer
-        rejects it, this page is still observed and accepted; the only cost is
-        that a later slice hashes the same files again.
+        A progress fact is an accelerator, not a precondition: a rejected write
+        never fails the acceptance.  It does mean this page is no longer
+        resumable, so the caller must stop handing back a retryable slice budget
+        and finish the page in the same call (contract v4 §3.2).
         """
         try:
             self.record_page_observation(
@@ -2752,6 +2893,8 @@ class LibraryRepository(
             )
         except (LibraryError, ContractError, OSError, sqlite3.Error) as exc:
             self._progress_write_error = type(exc).__name__
+            return False
+        return True
 
     def _progress_health(
         self,
@@ -2875,7 +3018,16 @@ class LibraryRepository(
         resolver: PathResolver,
         run_id: str,
         quality_key: str,
+        budget: ObservationBudget | None = None,
+        cancel: Any = None,
     ) -> ArtifactHealth | None:
+        """Observe one candidate under the remaining page allowance.
+
+        The page budget is clipped into the observer's own per-file limits so a
+        file the page cannot pay for halts instead of being read silently past
+        the declared limit (RFB-06).  The cancellation flag reaches the observer
+        for the same reason: a pause must stop mid-file, not after it.
+        """
         if not _artifact_is_valid(artifact):
             return None
         artifact_id = str(artifact["artifact_id"])
@@ -2908,7 +3060,9 @@ class LibraryRepository(
                     path=path,
                     run_id=run_id,
                     check_id=f"artifact-{artifact_id}",
-                    budget=_ARTIFACT_OBSERVATION_BUDGET,
+                    budget=(
+                        _ARTIFACT_OBSERVATION_BUDGET if budget is None else budget
+                    ),
                 )
             )
             return assess_observation(
