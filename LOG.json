@@ -1465,10 +1465,28 @@
         "UA-11 发布门在 os.link 前判定；排除取消未发布行，坏意图保留 .part"
       ],
       "verification": {
-        "non_tk": { "tests": 1673, "passed": 1669, "failed": 0, "errors": 0, "skipped": 4 },
-        "tk": { "tests": 9, "passed": 9, "failed": 0 },
-        "combined": { "tests": 1682, "passed": 1678, "failed": 0, "skipped": 4 },
-        "independent_regressions": { "tests": 14, "passed": 14 },
+        "non_tk": {
+          "tests": 1673,
+          "passed": 1669,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "tk": {
+          "tests": 9,
+          "passed": 9,
+          "failed": 0
+        },
+        "combined": {
+          "tests": 1682,
+          "passed": 1678,
+          "failed": 0,
+          "skipped": 4
+        },
+        "independent_regressions": {
+          "tests": 14,
+          "passed": 14
+        },
         "evidence": "../.runtime/jpgpng_u1a_indep_fix_20261113_01/full03/full.xml"
       },
       "review": "只读 fork 逐行审 diff：1 P1 + 6 P2 + 11 P3；bff7c61 修复 P1-1、P2-1..6、P3-2/P3-10，19b809b 修复复审尾巴（停派发、关闭轮询、暂停不造 NV、未知授权保留字节、stop_reason 保留）",
@@ -1487,6 +1505,66 @@
         "W5 UI/CLI 未接"
       ],
       "next_step": "意图投影/迁移门禁；carry 可续窗口与规模实测；W5 UI/CLI；真实迁移与备份演练"
+    },
+    {
+      "session_date": "2026-11-13",
+      "batch": "JPGPNG-U1A-FIX-REAUDIT-20261113-01",
+      "branch": "audit/u1a-fix-recheck-20261113",
+      "summary": "3ee638f 修复后独立复审：原 14 条反例仍通过；新增 9 项产品问题（3 P1、6 P2），15 项独立检查为 13 失败/2 通过。非 Tk 1,669 通过/4 跳过；Tk 首轮 8 通过/1 初始化错误，单项及完整复跑分别 1/1、9/9。未改产品或替换日常版本。",
+      "audit": {
+        "id": "JPGPNG-U1A-FIX-REAUDIT-20261113-01",
+        "date": "2026-11-13",
+        "status": "completed_findings_open_not_production_ready",
+        "audited_commit": "3ee638f065c6fb18f73ad7dcaf273a86afc77f12",
+        "product_commit": "19b809b",
+        "branch": "audit/u1a-fix-recheck-20261113",
+        "report": "docs/audits/2026-11-13-u1a-fix-recheck/README.md",
+        "findings": "docs/audits/2026-11-13-u1a-fix-recheck/FINDINGS.md",
+        "guide": "docs/audits/2026-11-13-u1a-fix-recheck/DEVELOPMENT_GUIDE.md",
+        "evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
+        "findings_open": {
+          "P1": 3,
+          "P2": 6,
+          "total": 9
+        },
+        "non_tk": {
+          "tests": 1673,
+          "passed": 1669,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "tk_first": {
+          "tests": 9,
+          "passed": 8,
+          "errors": 1
+        },
+        "tk_rechecks": {
+          "single": {
+            "tests": 1,
+            "passed": 1
+          },
+          "all": {
+            "tests": 9,
+            "passed": 9
+          }
+        },
+        "independent": {
+          "tests": 15,
+          "passed": 2,
+          "failures": 13,
+          "errors": 0,
+          "skipped": 0
+        },
+        "previous_14_regressions": "14 passed in this full suite",
+        "product_source_changed": false,
+        "business_data_changed": false,
+        "product_ready": false,
+        "next_step": "S0 pin regressions/contracts; S1 exclusion/recovery/cleanup; S2 handover/evidence; S3 control/admission/shutdown/cancellation; S4 measured performance and gated UI/migration."
+      },
+      "organization": "One new audit worktree/report directory; current navigation consolidated; historical reports/worktrees retained.",
+      "known_limitations": "No real account/gallery/network/migration; symlink skips retained; first Tk error retained.",
+      "history_errata": "Previous fix LOG summary said 1680 while its structured total was 1682; full03/tk04 references differ from final full04/tk05. Original session preserved."
     }
   ]
 }

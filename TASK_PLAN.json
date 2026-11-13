@@ -346,21 +346,21 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-13",
-      "phase": "U1-A independent-audit findings fixed on fix/a1-u1a-indep-20261113; not merged or deployed",
-      "status": "u1a_indep_fix_verified_not_production_ready",
+      "phase": "U1-A fix re-audit completed; RF-01..09 open; no production deployment",
+      "status": "completed_findings_open_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "Intent projection/index behind a migration gate; continuable carry windows; W5 UI/CLI; real migration/backup rehearsal; legacy record_manager wiring.",
+      "next_step": "S0 pin regressions/contracts; S1 exclusion/recovery/cleanup; S2 handover/evidence; S3 control/admission/shutdown/cancellation; S4 measured performance and gated UI/migration.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-INDEP-FIX-20261113-01",
-      "foundation": "docs/audits/2026-11-13-u1a-independent/DEVELOPMENT_GUIDE.md",
-      "evidence": "docs/audits/2026-11-13-u1a-independent/evidence/results.json",
+      "latest_batch": "JPGPNG-U1A-FIX-REAUDIT-20261113-01",
+      "foundation": "docs/audits/2026-11-13-u1a-fix-recheck/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
       "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
-      "unfinished_draft": "UA-01..11 closed on the fix branch; W5 UI/CLI, root mapping revisions, intent projection migration and real archival remain gated.",
+      "unfinished_draft": "Original 14 regressions pass; new RF-01..09 require repair before UI/production gates.",
       "latest_repair_evidence": "docs/maintenance/2026-11-13_jpgpng_u1a_indep_fix.md",
-      "latest_overview": "docs/maintenance/2026-11-13_jpgpng_u1a_indep_fix.md",
-      "latest_evidence": "docs/audits/2026-11-13-u1a-independent/evidence/results.json",
-      "audited_commit": "8b1c7515d5c91ff49d20eddfe3fefcefbd4f322e",
+      "latest_overview": "docs/audits/2026-11-13-u1a-fix-recheck/README.md",
+      "latest_evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
+      "audited_commit": "3ee638f065c6fb18f73ad7dcaf273a86afc77f12",
       "fixed_commit": "19b809b",
       "runtime_checkout_note": "Daily JpgPng checkout remains 5465e0c; the fix branch is not deployed."
     },
@@ -423,7 +423,7 @@
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
       "date": "2026-11-11",
-      "status": "u1a_independent_findings_open_not_production_ready",
+      "status": "completed_findings_open_not_production_ready",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
       "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
@@ -443,7 +443,7 @@
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
-        "U1-A_A1": "AR4-01..08 retained closed; U1-A basic J-01 cases fixed on 8b1c751, UA-01..11 open. Not deployed.",
+        "U1-A_A1": "AR4 retained closed; old 14 U1-A regressions pass on 3ee638f; new RF-01..09 open. Not deployed.",
         "U1-B": "Shared dependency maintenance pending; separate governed environment change",
         "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
         "U2-A": "Coverage and pending-reason summaries pending",
@@ -456,12 +456,12 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-A1-AR4-20261113-01",
-      "latest_overview": "docs/audits/2026-11-13-u1a-independent/README.md",
-      "latest_evidence": "docs/audits/2026-11-13-u1a-independent/evidence/results.json",
+      "latest_batch": "JPGPNG-U1A-FIX-REAUDIT-20261113-01",
+      "latest_overview": "docs/audits/2026-11-13-u1a-fix-recheck/README.md",
+      "latest_evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
       "historical_tests_note": "tests and implemented above describe the first pure-policy batch; current results and open findings are in u1a_independent_audit.",
-      "next_step": "D0 pin regressions; D1 close completion/intent/root-state blockers; D2 unify recovery evidence/ownership; D3 intent durability and publication; D4 bounded cancellable I/O and linear carry; D5 UI/migration/final acceptance.",
-      "latest_audit": "docs/audits/2026-11-13-u1a-independent/README.md"
+      "next_step": "S0 pin regressions/contracts; S1 exclusion/recovery/cleanup; S2 handover/evidence; S3 control/admission/shutdown/cancellation; S4 measured performance and gated UI/migration.",
+      "latest_audit": "docs/audits/2026-11-13-u1a-fix-recheck/README.md"
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
@@ -774,6 +774,57 @@
       "business_data_changed": false,
       "product_ready": false,
       "next_step": "D0 pin regressions; D1 close completion/intent/root-state blockers; D2 unify recovery evidence/ownership; D3 intent durability and publication; D4 bounded cancellable I/O and linear carry; D5 UI/migration/final acceptance."
+    },
+    "u1a_fix_reaudit": {
+      "id": "JPGPNG-U1A-FIX-REAUDIT-20261113-01",
+      "date": "2026-11-13",
+      "status": "completed_findings_open_not_production_ready",
+      "audited_commit": "3ee638f065c6fb18f73ad7dcaf273a86afc77f12",
+      "product_commit": "19b809b",
+      "branch": "audit/u1a-fix-recheck-20261113",
+      "report": "docs/audits/2026-11-13-u1a-fix-recheck/README.md",
+      "findings": "docs/audits/2026-11-13-u1a-fix-recheck/FINDINGS.md",
+      "guide": "docs/audits/2026-11-13-u1a-fix-recheck/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-13-u1a-fix-recheck/evidence/results.json",
+      "findings_open": {
+        "P1": 3,
+        "P2": 6,
+        "total": 9
+      },
+      "non_tk": {
+        "tests": 1673,
+        "passed": 1669,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 4
+      },
+      "tk_first": {
+        "tests": 9,
+        "passed": 8,
+        "errors": 1
+      },
+      "tk_rechecks": {
+        "single": {
+          "tests": 1,
+          "passed": 1
+        },
+        "all": {
+          "tests": 9,
+          "passed": 9
+        }
+      },
+      "independent": {
+        "tests": 15,
+        "passed": 2,
+        "failures": 13,
+        "errors": 0,
+        "skipped": 0
+      },
+      "previous_14_regressions": "14 passed in this full suite",
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "product_ready": false,
+      "next_step": "S0 pin regressions/contracts; S1 exclusion/recovery/cleanup; S2 handover/evidence; S3 control/admission/shutdown/cancellation; S4 measured performance and gated UI/migration."
     }
   }
 }

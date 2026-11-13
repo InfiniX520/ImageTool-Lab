@@ -1,0 +1,181 @@
+{
+  "full01.xml": {
+    "tests": 1673,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 4,
+    "passed": 1669,
+    "seconds": 259.913,
+    "xml_sha256": "6f0c6dbeaa2d9d2057f58b7a3d2fa84713702dc4ba243e6f452028542dd1119a",
+    "cases": [
+      {
+        "name": "test_real_symlink_file_is_rejected_when_platform_supports_it",
+        "class": "tests.test_local_observation",
+        "status": "skipped",
+        "message": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+        "class": "tests.test_local_observation",
+        "status": "skipped",
+        "message": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_real_symlink_root_is_rejected",
+        "class": "tests.test_local_observation",
+        "status": "skipped",
+        "message": "real reparse point unavailable in isolated test directory: OSError"
+      },
+      {
+        "name": "test_w_phase_local_boundaries_are_not_wired_into_reuse_yet",
+        "class": "tests.test_u1a_j01_health",
+        "status": "skipped",
+        "message": "W 阶段剩余边界（本轮只登记，不强行通过）：根不可用/重解析点/读取中变化已能进入 needs_verification（见 test_u1a_reuse_gate 与 artifact_health 契约），但仍缺：①根不可用/外置卷的 UI 与恢复动作，不把整库当成丢失；②链接/重解析点指向根外时的端到端拒绝断言；③同一批次同一 artifact 只观察一次的缓存；④跨会话不复用旧缓存；⑤快速核验不得升级为严格复用的端到端用例。"
+      }
+    ]
+  },
+  "tk01.xml": {
+    "tests": 9,
+    "failures": 0,
+    "errors": 1,
+    "skipped": 0,
+    "passed": 8,
+    "seconds": 4.376,
+    "xml_sha256": "be1f0e2394a204f72095c711c9f12e7c7da5e6c253850b67cd62361d04f80513",
+    "cases": [
+      {
+        "name": "test_task_details_are_bound_to_the_selected_task_and_never_replace_record_details",
+        "class": "tests.test_collection_presentation",
+        "status": "error",
+        "message": "failed on setup with \"_tkinter.TclError: invalid command name \"tcl_findLibrary\"\""
+      }
+    ]
+  },
+  "tk_recheck01.xml": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 1,
+    "seconds": 1.678,
+    "xml_sha256": "3517242fa80e2279315b1337e4e51b68ef4f886c66763372ef48e966d851798e",
+    "cases": []
+  },
+  "tk02.xml": {
+    "tests": 9,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 9,
+    "seconds": 3.894,
+    "xml_sha256": "ab8f571bba7077b62de87e0bdea0c724c9b5949951ab2ff09a3152d44f8fdf74",
+    "cases": []
+  },
+  "independent04.xml": {
+    "tests": 15,
+    "failures": 13,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 2,
+    "seconds": 6.427,
+    "xml_sha256": "0e8f85ef9067cfaddcf753c32a61c5893629321618efce2d7a3bac9d70caa8b2",
+    "cases": [
+      {
+        "name": "test_foreign_handover_does_not_strand_original_owner[reuse]",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: {'outcome': 'refused', 'reason': 'unsupported_previous_state', 'batch_id': 'f8c5be7bc7df4f0589ccc5bf70ae8ffe', 'job_id': '5a99c7303cf14adab5990a4302684582', ...}\nassert 'refused' in {'completed', 'reused'}"
+      },
+      {
+        "name": "test_foreign_handover_does_not_strand_original_owner[repair]",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: {'outcome': 'refused', 'reason': 'unsupported_previous_state', 'batch_id': '9c1352827b59437a9c5c1fa8e6e58d68', 'job_id': '1f00816dd19e453da42bc53c03691c2f', ...}\nassert 'refused' in {'completed', 'reused'}"
+      },
+      {
+        "name": "test_pending_with_unobservable_artifact_is_not_dispatchable",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: assert '290ee925172b4ac7baf83e58dcb79274' not in ('290ee925172b4ac7baf83e58dcb79274',)"
+      },
+      {
+        "name": "test_pending_without_bound_resolver_is_not_dispatchable",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: assert '3e95f060d4fb41dc87b95dfeabe00f47' not in ('3e95f060d4fb41dc87b95dfeabe00f47',)"
+      },
+      {
+        "name": "test_negative_recovery_binds_the_recorded_artifact[artifact_id]",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: {'outcome': 'repair_queued', 'reason': 'artifact_missing', 'batch_id': '54658990a3944795bef4d758eb8832c0', 'job_id': 'af5c05329c974d528f11e9c87133e872', ...}\nassert 'repair_queued' == 'refused'\n  \n  - refused\n  + repair_queued"
+      },
+      {
+        "name": "test_negative_recovery_binds_the_recorded_artifact[sha256]",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: {'outcome': 'repair_queued', 'reason': 'artifact_missing', 'batch_id': '3be4655874f94b36a6503fa8262eb7f2', 'job_id': 'c3fa3e03b3c947ab98a35c4ae06d2f41', ...}\nassert 'repair_queued' == 'refused'\n  \n  - refused\n  + repair_queued"
+      },
+      {
+        "name": "test_negative_recovery_binds_the_recorded_artifact[size_bytes]",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: {'outcome': 'repair_queued', 'reason': 'artifact_missing', 'batch_id': '3b5d8c384e444804a36a07daf880c6ee', 'job_id': '9ed97a98ad5143239402d7bd5bdf9cbb', ...}\nassert 'repair_queued' == 'refused'\n  \n  - refused\n  + repair_queued"
+      },
+      {
+        "name": "test_fatal_owner_stops_the_new_service_threads",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "assert not True\n +  where True = is_alive()\n +    where is_alive = <Thread(collection-observer, started 210224)>.is_alive\n +      where <Thread(collection-observer, started 210224)> = <core.task_coordinator.TaskCoordinator object at 0x000001C1469721B0>._observer"
+      },
+      {
+        "name": "test_pause_admission_cannot_be_based_on_a_stale_database_read",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: A page enqueued after durable pause was still accepted\nassert ('9928711d82134e1c965b5e2d0f90d455',) is None"
+      },
+      {
+        "name": "test_accept_corruption_stops_activation_of_later_jobs",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "assert not True"
+      },
+      {
+        "name": "test_pause_cancels_remaining_file_observation",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: Pause should not start the next image hash\nassert 2 <= 1\n +  where 2 = len(['1b6f731c053e4bbeba23b7ae5604dee7', '984e48cc774c4b2c965a0a210ab8c487'])"
+      },
+      {
+        "name": "test_excluded_recovery_needed_can_finish_local_recovery",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "core.page_delivery._StorageFault"
+      },
+      {
+        "name": "test_cancelled_owned_temp_can_be_cleaned_after_transient_unlink_failure",
+        "class": "test_fix_boundaries",
+        "status": "failure",
+        "message": "AssertionError: The owned part has no retryable cleanup path after cancellation\nassert not [WindowsPath('E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_reaudit_20261113_01/independent_tmp04/test_cancelled_owned_temp_can_0/downl_Pixiv/.f2e8e1501a6846f1b6c7cfd52f4bd2c0.bfc8y033.part')]"
+      }
+    ]
+  },
+  "independent_source_sha256": "e4da87043be05e03733c77da15f6ce7eb92c19b5a9ea234044a5a91c383f885c",
+  "original_14_regressions": [
+    "test_excluded_from_historical_task_stops_other_task_pending_repair",
+    "test_excluded_from_historical_task_prevents_recovery_repair",
+    "test_recovery_uses_matching_older_artifact_when_latest_version_differs",
+    "test_recovery_rejects_stale_missing_evidence",
+    "test_carried_foreign_hold_can_be_recovered_by_its_current_batch",
+    "test_pending_recovery_with_root_offline_is_really_held",
+    "test_same_page_receipt_replay_does_not_hash_again",
+    "test_intact_recovery_preserves_original_receipt",
+    "test_changed_recovery_preserves_foreign_bytes",
+    "test_corrupt_intent_does_not_silently_allow_automatic_repair",
+    "test_exclusion_during_transfer_prevents_publication",
+    "test_hash_preflight_does_not_block_coordinator_control_commands",
+    "test_completion_between_preflight_and_accept_does_not_create_a_false_hold",
+    "test_carry_parses_the_batch_health_map_once"
+  ],
+  "note": "Full suite excludes the two Tk files. Tk first run had 8 passes and 1 setup error; single-case retry passed and later full Tk retry passed 9/9. Do not erase first failure. Independent final run includes 13 failing expected-behavior regressions and 2 passing controls/boundary probes."
+}
