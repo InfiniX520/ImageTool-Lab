@@ -19,6 +19,7 @@ import json
 import re
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from typing import Any
 
 from core.delivery_cleanup import cleanup_event_payload, cleanup_fact, cleanup_is_terminal
@@ -123,6 +124,26 @@ _CLEANUP_TIER0_SQL = (
 _CLEANUP_TIER1_SQL = (
     _CLEANUP_WINDOW_SQL + _RETRY_PACING_SQL + " ORDER BY d.rowid LIMIT ?"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TierScan:
+    """One bounded read of one cleanup tier.
+
+    eof is only true when the query itself proved there is nothing behind
+    the cursor.  A scan stopped by the examination cap reports
+    budget_exhausted instead, with next_cursor already past every row it
+    examined, so the caller must continue from there and must not wrap
+    (contract v4 Sec.4, RFB-03).
+    """
+
+    facts: tuple[dict, ...]
+    next_cursor: int
+    eof: bool
+    budget_exhausted: bool
+    examined: int
+    offered: int
+
 
 _CHECKPOINT_KEYS = {
     "schema_version",
@@ -579,7 +600,7 @@ class DeliveryRepositoryMixin:
         limit: int = 200,
         after_rowid: int = 0,
         after_retry_rowid: int = 0,
-        stats: dict[str, int] | None = None,
+        stats: dict[str, object] | None = None,
     ) -> tuple[dict, ...]:
         """Cancelled deliveries whose staged temp may still need deleting.
 
@@ -588,16 +609,20 @@ class DeliveryRepositoryMixin:
         cannot dominate the queue, but a reservation keeps tier 1 reachable
         while fresh work keeps arriving: with a window of at least eight rows,
         one eighth is offered to tier 1 whenever tier 0 can fill the window.
-        The tier 1 scan wraps inside this call once, so a failed row is retried
-        on every pass instead of only after the fresh backlog drains.
+        The tier 1 scan wraps inside this call only when it proved EOF, so a
+        failed row is retried on every pass instead of only after the fresh
+        backlog drains.
 
-        Both scans advance past the rows they examined, so unusable prepared
-        evidence can never shrink the window, and each tier has its own
-        continuation cursor.  A terminal fact leaves the queue before either
-        tier is consulted (RFA-03, contract Sec.2.4).
+        Each tier reports its own TierScan: an empty fact list is not an
+        end-of-queue proof.  A scan stopped by the examination cap reports
+        budget_exhausted and a cursor past every examined row, so the next
+        pass continues instead of wrapping onto the same unusable prefix
+        (RFB-03, contract v4 Sec.4).  A terminal fact still leaves the queue
+        before either tier is consulted (RFA-03).
 
         The optional stats sink reports examined / skipped / returned /
-        next_rowid / next_retry_rowid / reserve for diagnostics.
+        next_rowid / next_retry_rowid / reserve plus the per-tier eof and
+        budget flags for diagnostics.
         """
         lib = _lib()
         self._ensure_open()
@@ -609,84 +634,65 @@ class DeliveryRepositoryMixin:
             raise lib.LibraryError("after_retry_rowid must be a non-negative integer")
         limit = max(0, min(limit, 200))
         if limit == 0:
+            if stats is not None:
+                stats.update(
+                    {
+                        "examined": 0,
+                        "skipped": 0,
+                        "returned": 0,
+                        "next_rowid": int(after_rowid),
+                        "next_retry_rowid": int(after_retry_rowid),
+                        "reserve": 0,
+                        "tier0_eof": False,
+                        "tier1_eof": False,
+                        "tier0_budget_exhausted": False,
+                        "tier1_budget_exhausted": False,
+                    }
+                )
             return ()
         retry_reserve = 0 if limit < 8 else max(1, limit // 8)
         examine_cap = min(max(limit * 5, limit), 2000)
-        fresh: list[dict] = []
-        retry: list[dict] = []
-        examined = skipped = 0
-        cursor = int(after_rowid)
-        retry_cursor = int(after_retry_rowid)
         with closing(self._readonly_connection()) as conn:
-            fresh, tier0_examined, tier0_skipped, cursor = self._scan_cleanup_tier(
-                conn,
-                _CLEANUP_TIER0_SQL,
-                int(after_rowid),
-                limit,
-                examine_cap,
+            tier0 = self._scan_cleanup_tier(
+                conn, _CLEANUP_TIER0_SQL, int(after_rowid), limit, examine_cap
             )
-            examined += tier0_examined
-            skipped += tier0_skipped
+            fresh = list(tier0.facts)
+            tier1 = TierScan((), int(after_retry_rowid), False, False, 0, 0)
             if retry_reserve and len(fresh) >= limit:
-                retry, tier1_examined, tier1_skipped, retry_cursor = self._scan_cleanup_tier(
-                    conn,
-                    _CLEANUP_TIER1_SQL,
-                    int(after_retry_rowid),
-                    retry_reserve,
-                    examine_cap,
+                tier1 = self._retry_window(
+                    conn, int(after_retry_rowid), retry_reserve, examine_cap
                 )
-                if not retry and after_retry_rowid > 0:
-                    # One wrap inside the call: a failed row behind the cursor
-                    # is retried on this pass, not only after a full cycle.
-                    retry, more_examined, more_skipped, retry_cursor = self._scan_cleanup_tier(
-                        conn,
-                        _CLEANUP_TIER1_SQL,
-                        0,
-                        retry_reserve,
-                        examine_cap - tier1_examined,
-                    )
-                    tier1_examined += more_examined
-                    tier1_skipped += more_skipped
-                examined += tier1_examined
-                skipped += tier1_skipped
-                if retry:
-                    fresh = fresh[: limit - len(retry)]
+                if tier1.facts:
+                    fresh = fresh[: limit - len(tier1.facts)]
             elif len(fresh) < limit:
-                retry, tier1_examined, tier1_skipped, retry_cursor = self._scan_cleanup_tier(
-                    conn,
-                    _CLEANUP_TIER1_SQL,
-                    int(after_retry_rowid),
-                    limit - len(fresh),
-                    examine_cap,
+                tier1 = self._retry_window(
+                    conn, int(after_retry_rowid), limit - len(fresh), examine_cap
                 )
-                if not retry and after_retry_rowid > 0:
-                    retry, more_examined, more_skipped, retry_cursor = self._scan_cleanup_tier(
-                        conn,
-                        _CLEANUP_TIER1_SQL,
-                        0,
-                        limit - len(fresh),
-                        examine_cap - tier1_examined,
-                    )
-                    tier1_examined += more_examined
-                    tier1_skipped += more_skipped
-                examined += tier1_examined
-                skipped += tier1_skipped
-        facts = fresh + retry
-        if fresh:
-            # The continuation follows the last offered row, so rows dropped by
-            # the reservation are examined again instead of disappearing.
-            cursor = int(fresh[-1]["rowid"])
-        if retry:
-            retry_cursor = int(retry[-1]["rowid"])
+        facts = fresh + list(tier1.facts)
+        # The fresh continuation follows the last offered row, so rows dropped
+        # by the reservation are examined again instead of disappearing.  When
+        # a capped scan offered nothing, it still moved past the rows it
+        # examined; continuing there is what keeps an unusable prefix finite.
+        next_rowid = int(fresh[-1]["rowid"]) if fresh else int(tier0.next_cursor)
+        next_retry_rowid = (
+            int(tier1.facts[-1]["rowid"]) if tier1.facts else int(tier1.next_cursor)
+        )
+        skipped = (tier0.examined - tier0.offered) + (
+            tier1.examined - tier1.offered
+        )
         if stats is not None:
             stats.update(
                 {
-                    "examined": examined,
+                    "examined": tier0.examined + tier1.examined,
                     "skipped": skipped,
                     "returned": len(facts),
-                    "next_rowid": cursor,
-                    "next_retry_rowid": retry_cursor,
+                    "next_rowid": next_rowid,
+                    "next_retry_rowid": next_retry_rowid,
                     "reserve": retry_reserve,
+                    "tier0_eof": tier0.eof,
+                    "tier1_eof": tier1.eof,
+                    "tier0_budget_exhausted": tier0.budget_exhausted,
+                    "tier1_budget_exhausted": tier1.budget_exhausted,
                 }
             )
         return tuple(facts)
@@ -698,26 +704,66 @@ class DeliveryRepositoryMixin:
         cursor: int,
         want: int,
         examine_cap: int,
-    ) -> tuple[list[dict], int, int, int]:
-        """Read one tier of the cleanup window, skipping unusable evidence."""
+    ) -> TierScan:
+        """Read one tier of the cleanup window, skipping unusable evidence.
+
+        The result separates "nothing behind the cursor" from "the
+        examination cap was reached".  Only a short page from the query
+        proves EOF; a capped scan keeps the cursor after the last examined
+        row so unusable rows cannot hold the window forever (RFB-03).
+        """
+        if want <= 0 or examine_cap <= 0:
+            return TierScan((), int(cursor), False, want > 0, 0, 0)
         facts: list[dict] = []
-        examined = skipped = 0
+        examined = 0
+        eof = False
         while len(facts) < want and examined < examine_cap:
             take = min(want - len(facts), examine_cap - examined)
             rows = conn.execute(sql, (cursor, take)).fetchall()
             if not rows:
+                eof = True
                 break
             examined += len(rows)
             cursor = int(rows[-1]["_rowid"])
             for row in rows:
                 fact = self._cleanup_candidate_fact(row)
                 if fact is None:
-                    skipped += 1
                     continue
                 facts.append(fact)
-            if len(facts) >= want or len(rows) < take:
+            if len(rows) < take:
+                eof = True
                 break
-        return facts, examined, skipped, cursor
+        budget_exhausted = bool(
+            not eof and examined >= examine_cap and len(facts) < want
+        )
+        return TierScan(
+            tuple(facts), int(cursor), eof, budget_exhausted, examined, len(facts)
+        )
+
+    def _retry_window(
+        self,
+        conn: sqlite3.Connection,
+        cursor: int,
+        want: int,
+        examine_cap: int,
+    ) -> TierScan:
+        """Read the failed-retry tier, wrapping inside the call only at EOF."""
+        scan = self._scan_cleanup_tier(
+            conn, _CLEANUP_TIER1_SQL, int(cursor), want, examine_cap
+        )
+        if scan.facts or not scan.eof or cursor <= 0:
+            return scan
+        wrapped = self._scan_cleanup_tier(
+            conn, _CLEANUP_TIER1_SQL, 0, want, max(0, examine_cap - scan.examined)
+        )
+        return TierScan(
+            scan.facts + wrapped.facts,
+            wrapped.next_cursor,
+            wrapped.eof,
+            wrapped.budget_exhausted,
+            scan.examined + wrapped.examined,
+            scan.offered + wrapped.offered,
+        )
 
     def _cleanup_candidate_fact(self, row) -> dict | None:
         """Turn one cancelled row into a cleanup fact, or skip it honestly."""

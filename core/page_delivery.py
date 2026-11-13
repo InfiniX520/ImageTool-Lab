@@ -610,10 +610,11 @@ class PageDeliveryExecutor:
         write would only repeat the refusal (or the outage).  The row keeps
         whatever durable state the winner gave it.
         """
-        try:
-            current = self._db("get_delivery", row["delivery_id"])
-        except _StorageFault:
-            return ("recovery_needed", fallback_code)
+        # An unreadable ledger is not a recovery classification.  Letting the
+        # fault escape is what tells the control plane to stop dispatching
+        # (contract v4 Sec.5, RFB-05); reporting recovery_needed here would
+        # disguise a broken ledger as an ordinary recoverable row.
+        current = self._db("get_delivery", row["delivery_id"])
         state = str(current["state"])
         if state == "completed":
             return ("completed", "")
@@ -858,7 +859,14 @@ class PageDeliveryExecutor:
                 transfer.stage.close()
 
     def recover_local(self, *, limit=200):
-        """Reconcile a bounded batch of prepared files, with zero HTTP requests."""
+        """Reconcile a bounded batch of prepared files, with zero HTTP requests.
+
+        A storage fault means the ledger itself cannot be read or trusted, so it
+        deliberately escapes this loop: the caller must stop dispatching instead
+        of reporting an ordinary recoverable row (contract v4 Sec.5, RFB-05).
+        A readable ledger that merely refuses a compensation write is reported
+        as recovery_needed by _settle_local_failure.
+        """
         results = []
         for row in self._db("list_recoverable", limit=limit):
             delivery_id = row["delivery_id"]
@@ -871,10 +879,6 @@ class PageDeliveryExecutor:
                     results.append((delivery_id, published[0]))
                 else:
                     results.append((delivery_id, "completed"))
-            except _StorageFault:
-                # A typed library failure is a local condition, not a reason to
-                # abort startup; the row stays recoverable.
-                results.append((delivery_id, "recovery_needed"))
             except (_Fault, OSError, ContractError):
                 results.append((delivery_id, self._settle_local_failure(row)))
         self._sweep_cleanup(limit)
@@ -920,42 +924,37 @@ class PageDeliveryExecutor:
     def _sweep_cleanup(self, limit):
         """Bounded retry of cancelled-by-intent temps, with fair cursors.
 
-        Each tier keeps its own continuation, so the never-attempted rows and
-        the already-retried rows advance independently; reaching the tail of
-        both wraps once so a single startup pass still cleans the beginning.
+        Each tier keeps its own continuation.  A tier wraps only when that
+        tier proved EOF; a scan stopped by the examination budget keeps its
+        cursor so the next pass continues behind the rows it examined
+        (contract v4 Sec.4, RFB-03).  A storage fault means the ledger cannot
+        be read, which is not an empty queue: it propagates to the caller
+        (Sec.5, RFB-05).
         """
-        rows = ()
-        try:
-            wrapped = False
-            while True:
-                stats: dict[str, int] = {}
-                rows = self._db(
-                    "list_cleanup_candidates",
-                    limit=limit,
-                    after_rowid=self._cleanup_cursor,
-                    after_retry_rowid=self._cleanup_retry_cursor,
-                    stats=stats,
-                )
-                self._cleanup_cursor = max(
-                    self._cleanup_cursor, int(stats.get("next_rowid", 0))
-                )
-                self._cleanup_retry_cursor = int(
-                    stats.get("next_retry_rowid", self._cleanup_retry_cursor)
-                )
-                if rows or wrapped or not (
-                    self._cleanup_cursor or self._cleanup_retry_cursor
-                ):
-                    break
-                # Reached the tail of both tiers: wrap once so one startup pass
-                # still cleans the beginning.
-                self._cleanup_cursor = 0
-                self._cleanup_retry_cursor = 0
-                wrapped = True
-            for fact in rows:
-                try:
-                    self.cleanup_cancelled_delivery(fact["delivery_id"])
-                except (_Fault, OSError, ContractError, _StorageFault):
-                    continue
-        except _StorageFault:
-            return
+        stats: dict[str, object] = {}
+        rows = self._db(
+            "list_cleanup_candidates",
+            limit=limit,
+            after_rowid=self._cleanup_cursor,
+            after_retry_rowid=self._cleanup_retry_cursor,
+            stats=stats,
+        )
+        next_rowid = int(stats.get("next_rowid", self._cleanup_cursor) or 0)
+        if bool(stats.get("tier0_eof")):
+            # Proved end of the fresh tier: one startup pass may start over.
+            self._cleanup_cursor = 0
+        else:
+            self._cleanup_cursor = max(self._cleanup_cursor, next_rowid)
+        next_retry = int(
+            stats.get("next_retry_rowid", self._cleanup_retry_cursor) or 0
+        )
+        if bool(stats.get("tier1_eof")):
+            self._cleanup_retry_cursor = 0
+        else:
+            self._cleanup_retry_cursor = next_retry
+        for fact in rows:
+            try:
+                self.cleanup_cancelled_delivery(fact["delivery_id"])
+            except (_Fault, OSError, ContractError):
+                continue
 
