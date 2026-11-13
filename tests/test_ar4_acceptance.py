@@ -42,7 +42,8 @@ Coverage map:
 * AR4-04  a lagging hardlink and a renamed file continue the asset's own
   generation history instead of colliding with an occupied immutable key.
 * AR4-05  one Windows directory entry keeps one archive identity through an
-  ASCII or mixed-script spelling, and case folding never crosses genuinely
+  ASCII or mixed-script spelling (the enumerator may report the requested or the
+  real directory-entry spelling), and case folding never crosses genuinely
   different directory entries (NFC/NFD, strasse with an eszett).
 * AR4-06  the low-level writers refuse a cross-path or cross-generation
   acceptance and an impossible expected generation *before* any write; naming
@@ -1190,13 +1191,22 @@ def test_ar4_05_an_ascii_case_alias_keeps_one_asset_through_the_plan(library, tm
                 run_id="run-ar4-alias-1", check_id="check-ar4-alias-1", checked_at=T0),
         label="AR4-05 alias first selection",
     )
-    assert entry_upper.path.relative_path == "gallery/A.bin"
+    # The enumerator may report either the requested spelling or the real
+    # directory-entry spelling; only the identity and the stored spelling matter.
+    first_spelling = entry_upper.path.relative_path
+    assert first_spelling.casefold() == "gallery/a.bin", (
+        "AR4-05: the first selection reported an unexpected spelling %r"
+        % (first_spelling,)
+    )
     assert entry_upper.content.sha256 is None, "enumeration must not hash content"
 
     receipt_lower, entry_lower, fact_lower = select_one(root, "gallery/a.bin")
-    assert entry_lower.path.relative_path == "gallery/a.bin"
     if not os.path.samefile(root / "gallery" / "A.bin", root / "gallery" / "a.bin"):
         pytest.skip("The synthetic root is case-sensitive; a case alias cannot be tested")
+    assert entry_lower.path.relative_path.casefold() == "gallery/a.bin", (
+        "AR4-05: the alias selection named a different directory entry: %r"
+        % (entry_lower.path.relative_path,)
+    )
     assert entry_lower.path.identity_key == entry_upper.path.identity_key
     assert entry_lower.physical_identity == entry_upper.physical_identity
 
@@ -1219,8 +1229,9 @@ def test_ar4_05_an_ascii_case_alias_keeps_one_asset_through_the_plan(library, tm
     assert asset_owners(conn, entry_upper.path.identity_key) == {first.content.asset_id}
     rows = stored_assets(conn, entry_upper.path.identity_key)
     spellings = {json.loads(row[2])["relative_path"] for row in rows}
-    assert spellings == {"gallery/A.bin"}, (
-        "AR4-05: the stored rows lost the first display spelling: %r" % (spellings,)
+    assert spellings == {first_spelling}, (
+        "AR4-05: the stored rows lost the first display spelling %r: %r"
+        % (first_spelling, spellings)
     )
     assert {row[3] for row in rows} == {"observed_existing"}, (
         "AR4-05: the accepted rows changed their source kind"
@@ -1241,8 +1252,9 @@ def test_ar4_05_an_ascii_case_alias_keeps_one_asset_through_the_plan(library, tm
         "AR4-05: saving the alias plan added a second spelling of one entry"
     )
     spellings = {json.loads(row[2])["relative_path"] for row in rows}
-    assert spellings == {"gallery/A.bin"}, (
-        "AR4-05: saving the alias plan rewrote the stored spelling: %r" % (spellings,)
+    assert spellings == {first_spelling}, (
+        "AR4-05: saving the alias plan rewrote the stored spelling %r: %r"
+        % (first_spelling, spellings)
     )
     assert {row[3] for row in rows} == {"observed_existing"}, (
         "AR4-05: saving the alias plan changed the saved source kind"
@@ -1259,7 +1271,7 @@ def test_ar4_05_an_ascii_case_alias_keeps_one_asset_through_the_plan(library, tm
         assert len(binding_pairs(reopened)) == 1
         rows = stored_assets(reopened, entry_upper.path.identity_key)
         assert len(rows) == rows_before_save
-        assert {json.loads(row[2])["relative_path"] for row in rows} == {"gallery/A.bin"}
+        assert {json.loads(row[2])["relative_path"] for row in rows} == {first_spelling}
         assert {row[3] for row in rows} == {"observed_existing"}
     finally:
         reopened.close()
@@ -1282,12 +1294,22 @@ def test_ar4_05_a_mixed_script_case_alias_is_one_directory_entry(library, tmp_pa
                 run_id="run-ar4-mixed-1", check_id="check-ar4-mixed-1", checked_at=T0),
         label="AR4-05 mixed-script first selection",
     )
-    assert entry_upper.path.relative_path == "gallery/画A.bin"
+    # As for the ASCII alias: the enumerator may report the requested or the real
+    # directory-entry spelling.  The identity, the physical object and the stored
+    # spelling are what this case pins.
+    first_spelling = entry_upper.path.relative_path
+    assert first_spelling.casefold() == "gallery/画a.bin", (
+        "AR4-05: the first selection reported an unexpected spelling %r"
+        % (first_spelling,)
+    )
 
     receipt_lower, entry_lower, fact_lower = select_one(root, "gallery/画a.bin")
-    assert entry_lower.path.relative_path == "gallery/画a.bin"
     if not os.path.samefile(root / "gallery" / "画A.bin", root / "gallery" / "画a.bin"):
         pytest.skip("The synthetic root is case-sensitive; a case alias cannot be tested")
+    assert entry_lower.path.relative_path.casefold() == "gallery/画a.bin", (
+        "AR4-05: the alias selection named a different directory entry: %r"
+        % (entry_lower.path.relative_path,)
+    )
     assert entry_lower.physical_identity == entry_upper.physical_identity
     assert entry_lower.path.identity_key == entry_upper.path.identity_key, (
         "AR4-05: two selections of one Windows directory entry produced two "
@@ -1309,6 +1331,13 @@ def test_ar4_05_a_mixed_script_case_alias_is_one_directory_entry(library, tmp_pa
     )
     assert asset_owners(conn, entry_upper.path.identity_key) == {first.content.asset_id}
     assert load_content_binding(conn, entry_lower.path).content == first.content
+    rows = stored_assets(conn, entry_upper.path.identity_key)
+    spellings = {json.loads(row[2])["relative_path"] for row in rows}
+    assert spellings == {first_spelling}, (
+        "AR4-05: the mixed-script rows lost the first display spelling %r: %r"
+        % (first_spelling, spellings)
+    )
+    assert {row[3] for row in rows} == {"observed_existing"}
 
     plan = observed_plan(decision, batch_id="batch-ar4-05-mixed", receipt=receipt_lower)
     saved = save_archive_plan(
@@ -1316,6 +1345,11 @@ def test_ar4_05_a_mixed_script_case_alias_is_one_directory_entry(library, tmp_pa
     )
     assert not saved.replayed
     assert load_archive_plan(conn, "batch-ar4-05-mixed").inventory == plan.inventory
+    rows = stored_assets(conn, entry_upper.path.identity_key)
+    assert {json.loads(row[2])["relative_path"] for row in rows} == {first_spelling}, (
+        "AR4-05: saving the mixed-script plan rewrote the stored spelling"
+    )
+    assert {row[3] for row in rows} == {"observed_existing"}
     validate_archive_facts(conn)
 
 
