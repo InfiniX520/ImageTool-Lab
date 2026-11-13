@@ -361,7 +361,7 @@
       "latest_overview": "docs/maintenance/2026-11-13_jpgpng_u1a_indep_fix.md",
       "latest_evidence": "docs/audits/2026-11-13-u1a-independent/evidence/results.json",
       "audited_commit": "8b1c7515d5c91ff49d20eddfe3fefcefbd4f322e",
-      "fixed_commit": "bff7c61",
+      "fixed_commit": "19b809b",
       "runtime_checkout_note": "Daily JpgPng checkout remains 5465e0c; the fix branch is not deployed."
     },
     "archiving_design": {

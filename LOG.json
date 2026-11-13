@@ -1449,7 +1449,7 @@
       "batch": "JPGPNG-U1A-INDEP-FIX-20261113-01",
       "branch": "fix/a1-u1a-indep-20261113",
       "base": "8d8c62c",
-      "final_commit": "bff7c61",
+      "final_commit": "19b809b",
       "summary": "U1-A 独立审计 UA-01..UA-11 全部修复：预检快照与代次、全局意图、恢复证据与所有权、发布门、控制面、根守卫；全量 1,680 项 0 失败。",
       "fixes": [
         "UA-01 完成竞争不再伪造 artifact_unknown：快照绑定页/代次/交付/artifact，代次变化走 RetryPreflight",
@@ -1465,13 +1465,13 @@
         "UA-11 发布门在 os.link 前判定；排除取消未发布行，坏意图保留 .part"
       ],
       "verification": {
-        "non_tk": { "tests": 1671, "passed": 1667, "failed": 0, "errors": 0, "skipped": 4 },
+        "non_tk": { "tests": 1673, "passed": 1669, "failed": 0, "errors": 0, "skipped": 4 },
         "tk": { "tests": 9, "passed": 9, "failed": 0 },
-        "combined": { "tests": 1680, "passed": 1676, "failed": 0, "skipped": 4 },
+        "combined": { "tests": 1682, "passed": 1678, "failed": 0, "skipped": 4 },
         "independent_regressions": { "tests": 14, "passed": 14 },
         "evidence": "../.runtime/jpgpng_u1a_indep_fix_20261113_01/full03/full.xml"
       },
-      "review": "只读 fork 逐行审 diff：1 P1 + 6 P2 + 11 P3；bff7c61 修复 P1-1、P2-1..6、P3-2/P3-10，其余记录为遗留",
+      "review": "只读 fork 逐行审 diff：1 P1 + 6 P2 + 11 P3；bff7c61 修复 P1-1、P2-1..6、P3-2/P3-10，19b809b 修复复审尾巴（停派发、关闭轮询、暂停不造 NV、未知授权保留字节、stop_reason 保留）",
       "product_source_changed": true,
       "business_data_changed": false,
       "product_ready": false,
