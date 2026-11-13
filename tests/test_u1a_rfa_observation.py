@@ -688,3 +688,129 @@ def test_reusing_a_negative_record_costs_no_slice_slot(tmp_path, monkeypatch):
         # One record reused, two files opened, each in its own one file slice.
         assert len(calls) == 2
 
+def test_a_page_of_three_hundred_missing_files_still_commits(tmp_path):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        candidates, page = seed_many(repo, tmp_path, 300, request_id="seed-missing")
+        wiped = 0
+        for index in range(300):
+            path = tmp_path / "downl_Pixiv" / f"{3000 + index}_p0.png"
+            path.unlink()
+            wiped += 1
+        assert wiped == 300
+        job = h.submit(repo, request_id="reuse-missing", max_works=300)
+        budget = PageBudget(max_files=32, max_slices=8)
+
+        # The real observer reports every wiped file as missing.
+        with pytest.raises(PreflightCancelled) as caught:
+            repo.accept_source_page(job["batch_id"], page, page_budget=budget)
+        assert caught.value.reason == "page_slice_limit"
+        assert checkpoint(repo, job) is None
+
+        ids = repo.accept_source_page(job["batch_id"], page, page_budget=budget)
+        assert len(ids) == 300
+        assert checkpoint(repo, job) is not None
+        # 256 missing records are reused; the writer queues one repair each.
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM deliveries WHERE job_id = ? AND state = 'pending'",
+            (job["job_id"],),
+        ) == 300
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM deliveries WHERE job_id = ? AND state = 'completed'",
+            (job["job_id"],),
+        ) == 0
+
+
+def test_a_file_restored_before_the_claim_is_not_overwritten(tmp_path):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, page = deliver(repo, tmp_path, pages=(0, 1, 2), request_id="seed")
+        for index in range(3):
+            (tmp_path / "downl_Pixiv" / f"123_p{index}.png").unlink()
+        job = h.submit(repo, request_id="reuse-missing-restored")
+        ids = repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        assert len(ids) == 3
+        assert all(repo.get_delivery(item)["state"] == "pending" for item in ids)
+
+        # The user restores page zero inside the reuse window, before the
+        # repair is claimed: the delivery refuses to start on an existing final
+        # name, so the restored object is never opened for writing.
+        h.target(tmp_path).write_bytes(h.SAME_SIZE_PNG)
+        result = h.run(
+            repo, job, ids[0], h.executor(repo, tmp_path, h.Transport(h.Response()))
+        )
+        assert (result.state, result.error_code) == ("suspended", "output_file_conflict")
+        delivery = repo.get_delivery(ids[0])
+        assert (delivery["state"], delivery["error_code"]) == (
+            "suspended",
+            "output_file_conflict",
+        )
+        assert h.target(tmp_path).read_bytes() == h.SAME_SIZE_PNG
+
+
+def test_a_file_restored_during_publication_is_a_blocked_recovery(tmp_path):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, page = deliver(repo, tmp_path, pages=(0, 1, 2), request_id="seed")
+        for index in range(3):
+            (tmp_path / "downl_Pixiv" / f"123_p{index}.png").unlink()
+        job = h.submit(repo, request_id="reuse-missing-race")
+        ids = repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+        assert len(ids) == 3
+        restored = tmp_path / "downl_Pixiv" / "123_p0.png"
+
+        def restore(stage, row):
+            if stage == "before_publish":
+                restored.write_bytes(h.SAME_SIZE_PNG)
+
+        result = h.run(
+            repo,
+            job,
+            ids[0],
+            h.executor(
+                repo, tmp_path, h.Transport(h.Response()), fault_hook=restore
+            ),
+        )
+        # The staged bytes belong to this delivery, the restored object does
+        # not: the publication gate fails closed instead of replacing it.
+        assert (result.state, result.error_code) == (
+            "recovery_needed",
+            "published_file_identity_mismatch",
+        )
+        assert repo.get_delivery(ids[0])["state"] == "recovery_needed"
+        assert restored.read_bytes() == h.SAME_SIZE_PNG
+
+
+def test_reusing_a_missing_record_costs_no_slice_slot(tmp_path):
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, page = deliver(repo, tmp_path, pages=(0, 1, 2), request_id="seed")
+        for index in range(3):
+            (tmp_path / "downl_Pixiv" / f"123_p{index}.png").unlink()
+        job = h.submit(repo, request_id="reuse-missing-slot")
+        with pytest.raises(PreflightCancelled):
+            repo.accept_source_page(
+                job["batch_id"], page, page_budget=PageBudget(max_files=1, max_slices=1)
+            )
+        ids = repo.accept_source_page(
+            job["batch_id"], page, page_budget=PageBudget(max_files=1)
+        )
+        assert len(ids) == 3
+        # The one reused missing record does not consume the single file slot:
+        # two more slices each observe exactly one of the remaining files.
+        assert scalar(
+            repo,
+            "SELECT COUNT(*) FROM deliveries WHERE job_id = ? AND state = 'pending'",
+            (job["job_id"],),
+        ) == 3
+
+
+def test_a_negative_record_with_a_bad_timestamp_counts_as_expired():
+    from core.library_repository import LibraryRepository
+
+    class _Record:
+        checked_at = "not-a-timestamp"
+
+    # A corrupt timestamp is expired evidence (observe again), never an error.
+    assert LibraryRepository._negative_observation_is_fresh(_Record()) is False
+
+
+
