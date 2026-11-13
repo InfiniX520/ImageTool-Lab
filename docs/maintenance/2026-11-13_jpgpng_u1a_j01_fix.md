@@ -8,8 +8,11 @@
 - 删除、等长非图替换、同尺寸不同摘要 PNG 不再计为 `completed/existing`；缺失进入 pending 修复，变化进入 `needs_verification`；批次不能在这些页面未解决时结算为 completed。
 - 未改动文件仍可复用；显式 `redownload` 仍可补齐并保留两代 artifact；旧 artifact、delivery、批次计数逐字段不变。
 - W4 用追加式 `events(kind='removal_intent')` 接入 `EXCLUDED`/撤销；`OFFLOADED` 仍明确拒绝，未对外声称支持。
-- W6 的 2,000 文件整链、第二批缺失修复、进程退出后重开子集已通过合成证据（见第 6 节）。
-- **W5（UI/CLI/全库巡检）尚未完成；W6 的根不可用/链接/快速策略 UI 边界与迁移演练仍未完成。本批不是生产发布声明。**
+- 第二轮红队 F1–F8 已修复：resume/claim/carry 回灌、EXCLUDED 跨批、完整 carry 健康门、未绑定 resolver、needs_verification 出口。
+- W5 恢复入口 `recover_verification_page` 已完成仓库层与 41 项测试；UI/CLI 与“批量恢复/全库巡检”仍未接线。
+- W6 的 2,000 文件整链、第二批缺失修复、进程退出后重开子集在 `d8de8dc` 上通过合成证据（见第 6 节）；新提交 `dc3acbc` 的最终规模复跑由独立代理进行。
+- 全量（不含 Tk）1,589 项、0 失败、1 个 Tk 环境错误、4 跳过；Tk 展示文件单独 4/4。
+- **W5 的 UI/CLI/全库巡检、W6 的根不可用/链接/快速策略边界与迁移演练仍未完成。本批不是生产发布声明。**
 
 ## 2. 实现
 
@@ -39,15 +42,16 @@
 | [W1 健康契约](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w1_contract.xml) | 20 项全过 |
 | [W2/W3 复用门](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w2_gate_tests.xml) | 6 项基线全过；复核后扩到 10 项 |
 | [J-01 独立文件](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w4_j01.xml) | 16 过、1 跳过（W 阶段边界） |
-| [复核后全量（不含 Tk）](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w14_full_no_tk.xml) | **1,546 项、0 失败、0 错误、4 跳过**，225.90 s |
+| [复核后全量（不含 Tk）](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w17_full_no_tk.xml) | **1,589 项、0 失败、1 Tk 环境错误、4 跳过**，249.92 s |
 | Tk 展示文件单独运行 | 4 项全过（当前环境；全量中 Tk/Tcl 初始化偶发环境错误，单独运行排除） |
 
 新增/激活的 U1-A 测试：
 
 - `tests/test_u1a_j01_health.py`：17 项，16 过、1 跳过；7 个原红全部转绿，8 个守卫保持绿。
 - `tests/test_u1a_artifact_health.py`：20 项，状态机、payload、过期、根 revision、快速策略不升级。
-- `tests/test_u1a_reuse_gate.py`：10 项，无根绑定 fail-closed、根绑定冲突、过期/伪造策略、I/O 不在 writer 线程、缺失/变化预算、同 job resume、claim-only 回灌、旧 needs_verification 解除。
-- `tests/test_u1a_removal_intent.py`：5 项，EXCLUDED 抑制/撤销、接受后取消 pending、同 job 撤销、结算后记录/重放、OFFLOADED 不虚假宣传。
+- `tests/test_u1a_reuse_gate.py`：11 项，无根绑定 fail-closed、根绑定冲突、过期/伪造策略、I/O 不在 writer 线程、缺失/变化预算、同 job resume、claim-only 回灌、旧 needs_verification 解除、carry 完好页保持 existing。
+- `tests/test_u1a_removal_intent.py`：6 项，EXCLUDED 抑制/撤销、接受后取消 pending、同 job 撤销、跨批 suspended 取消、结算后记录/重放、OFFLOADED 不虚假宣传。
+- `tests/test_u1a_recovery.py`：41 项，显式恢复 API 的状态机、hash_match/missing/changed/root_unavailable、pending 幂等/park、command_id 重放、事务/线程边界。
 
 测试调整说明：`tests/test_delivery_repository.py::test_all_pages_flag_is_not_page_byte_quality` 原先只写数据库记录、不写文件；J-01 后这不再是可复用状态。该用例改为写入真实 1,000 字节并绑定同一根，仍只验证 `all_pages` 不是页面字节属性，未放宽断言。另有两个旧断言随语义收紧更新：resume 重试完成后旧批 works 仍按 delivery join 重算；`needs_verification` 不再永久占用输出槽，新任务会把旧 hold 标为 `failed / superseded_by_new_task`。`test_query_collection` 的终态等待在 Windows 全量负载下由 8 s 放宽到 20 s（仍有界，且产品自身 coordinator 命令为 8 s）；这是测试稳定性调整，不改变产品超时。
 
@@ -69,6 +73,23 @@
 
 仍未关闭：P2-7（预检仍在 accept 同步路径，源泵 20 s Future 超时/大文件预算）、P3-10（root_revision 恒为 1，跨会话 external 重映射）、P3-12（legacy `record_manager` 仍按记录跳过，未纳入 v2 健康门）。这些在 W5/W6 明确列为残余，不声称全产品 J-01 已关闭。
 
+## 3.2 第二轮红队（F1–F8）
+
+红队报告：`E:\Zero9\JuiLiu\.runtime\jpgpng_u1a_w5_20261113_01\redteam2\REPORT.md`。在 `d8de8dc` 上复现并已在 `3aeb642` 修复：
+
+| 编号 | 问题 | 处理 |
+| --- | --- | --- |
+| F1 | 旧 job resume(retry_failed) 在别 job 占槽时抛原始 sqlite IntegrityError | 重置前检查同 output 活动槽；冲突抛 `OutputConflict`，事务回滚，不再泄漏 sqlite 异常 |
+| F2 | claim 补建 carried NV 撞别 job 活动 NV，协调器空转 | 已有 NV 时链接该 hold 而非再插；其他状态冲突转 `OutputConflict`，不再原始 IntegrityError |
+| F3 | EXCLUDED 只取消当前批，旧批 suspended 仍可派发并重建文件 | 按 **job + output_key** 取消 pending/suspended/retry_wait/needs_verification，跨批生效 |
+| F4 | carry 只传 enforce 不传 health，完好 completed 变 NV 并逐批传播 | carry 调用线程对源作品 completed 页做完整健康预检；写者按实际 health 复制；完好页保持 existing，changed/missing 仍 fail closed |
+| F5 | 未绑定 resolver 的 claim 复制旧 completed | 无 resolver/无目标页证据时按 fail closed 处理，旧 completed 不复制 |
+| F6 | `enforce_health=False` 可关闭健康门 | 公共 carry 只接受 True，False 直接拒绝 |
+| F7 | needs_verification 无出口，永久 partial/占槽 | 新增 `repo.recover_verification_page(batch_id, illust_id, page_index, *, command_id=None)`：hash_match 复用、missing 生成 pending 修复、changed/root_unavailable 保持 hold、旧行保留；预检在写事务外 |
+| F8 | intent 事件按全局最新再比 revision，其他 revision 会遮蔽当前 EXCLUDED | 最新映射键加入 root_revision；当前 revision 查询不再被其他 revision 遮蔽 |
+
+恢复 API 设计/契约见 [U1A_W5_RECOVERY_ENTRY.md](../optimization/2026-11-13/U1A_W5_RECOVERY_ENTRY.md)，41 项测试全过。F9（transferring 中记录 EXCLUDED）、F13（intent 全表扫描）、F14（损坏事件跳过）仍作为已知残余，不在本轮扩大。
+
 ## 4. 边界与残余
 
 - 未接触真实图库/生产库/账号/网络；未上传、删除、释放或回读云端。
@@ -81,6 +102,9 @@
 - P2-7：预检仍在 accept 同步路径；大文件/多候选可能超过源泵 20 s Future 超时，W5/W6 需要独立执行器或分页预算。
 - P3-10：`root_revision` 目前恒为 1；跨会话 external 根重映射尚未有持久版本。
 - P3-12：legacy `record_manager` 仍按“记录即跳过”，不属于 v2 健康门；本批只关闭 v2 三条复用旁路。
+- F9：transferring 中记录 EXCLUDED 仍可能完成并落盘；F13：intent 仍是 events 全表扫描；F14：损坏 intent 事件被静默跳过。三者列入后续 W5/W6 清理。
+- `recover_verification_page` 已能单页恢复，但尚无 UI 按钮、批量恢复、跨会话缓存或清理旧 `.part` 的入口。
+- `dc3acbc` 的 2,000 页/claim/carry/退出最终复跑由独立规模代理另行执行；当前第 6 节数字仍对应 `d8de8dc`。
 - 未做真实迁移、备份演练或旧库升级；本批不新增数据库 schema 对象。
 
 ## 5. W6 规模与进程退出证据

@@ -55,4 +55,4 @@
 - [W0 状态与事务决定](W0_DECISIONS.md)
 - [W0–W4 维护记录](../../maintenance/2026-11-13_jpgpng_u1a_j01_fix.md)
 
-W1–W3 已把“历史收据即当前健康”的三条复用路径改为“当前 SHA-256 观察才允许复用”；W4 已用追加式事件接入 `EXCLUDED`/撤销，`OFFLOADED` 仍明确拒绝。W6 的 2,000 文件、第二批缺失修复和进程退出后重开子集已通过合成证据（维护记录第 5 节）。独立复核发现的 resume/claim 回灌、needs_verification 输出槽、已规划 pending、同 job 撤销等 P1 已修复并补测；P2-7（预检同步超时）、P3-10（root revision）与 legacy record_manager 仍未关闭。W5（UI/CLI/全库巡检）与 W6 的根不可用/链接/快速策略 UI 边界仍未完成，因此这仍不是生产发布声明。
+W1–W3 已把“历史收据即当前健康”的三条复用路径改为“当前 SHA-256 观察才允许复用”；W4 已用追加式事件接入 `EXCLUDED`/撤销，`OFFLOADED` 仍明确拒绝。W6 的 2,000 文件、第二批缺失修复和进程退出后重开子集已通过合成证据（维护记录第 5 节）。独立复核发现的 resume/claim 回灌、needs_verification 输出槽、已规划 pending、同 job 撤销等 P1 已修复并补测；第二轮 F1–F8 已修复，W5 恢复入口 `recover_verification_page` 已合入。P2-7（预检同步超时）、P3-10（root revision）、legacy record_manager、F9/F13/F14 仍未关闭。W5（UI/CLI/全库巡检）与 W6 的根不可用/链接/快速策略 UI 边界仍未完成，因此这仍不是生产发布声明。
