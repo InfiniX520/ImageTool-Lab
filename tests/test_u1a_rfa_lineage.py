@@ -405,6 +405,36 @@ def test_the_first_usable_handover_wins_over_a_newer_unusable_one(tmp_path):
         assert "event:artifact_missing" in result.diagnostics
 
 
+def test_a_handover_target_from_another_quality_scope_is_refused(tmp_path):
+    """V3 3.1: the target delivery's quality_key must match the resolved one.
+
+    The window statement selects rows by the resolved delivery's quality_key, so
+    the window path can never offer a row from another quality scope.  The event
+    path must use the same scope, otherwise an explicit handover would answer a
+    question the window could not even ask.
+    """
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, _, hold, completed = handover(repo, tmp_path)
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                "UPDATE deliveries SET quality_key = ? WHERE delivery_id = ?",
+                ("0" * 64, completed),
+            )
+            conn.commit()
+            retired = row(conn, hold)
+            in_scope = conn.execute(
+                "SELECT COUNT(*) FROM deliveries WHERE delivery_id = ? AND quality_key = ?",
+                (completed, retired["quality_key"]),
+            ).fetchone()[0]
+            result = resolve_successor_ex(conn, retired)
+        print("LINEAGE_QUALITY_SCOPE", result.reason, result.successor, result.diagnostics, in_scope)
+        assert in_scope == 0, "the window's quality filter could never return this target"
+        assert result.successor is None, "a named target must not win across quality scopes"
+        assert result.reason == "event_target_unusable", result
+        assert "event:quality_key_mismatch" in result.diagnostics, result.diagnostics
+
+
 def test_a_two_delivery_event_cycle_terminates_after_one_hop(tmp_path):
     with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
         job, hold, first = h.parked_hold(repo, tmp_path)
