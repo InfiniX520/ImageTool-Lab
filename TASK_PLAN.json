@@ -346,22 +346,22 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "RFA fix re-audited at f7c389b; RFB-01..06 open; not deployed",
-      "status": "audit_completed_findings_open_not_production_ready",
+      "phase": "RFB fix merged at 482eb03; RFB-01..06 closed; not deployed",
+      "status": "fix_completed_pending_user_acceptance_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "S0 align evidence/progress, cleanup EOF, lineage edges and recovery faults; S1 fix RFB-01/02/06 together; S2 RFB-03/05; S3 RFB-04; integrated re-audit before W5/production.",
+      "next_step": "W5 wiring and the registered gaps (finish_source final-result query, intent projection/index, carry long transaction, claim statement count, per-install page ceiling, real migration/backup/external volume) before any production gate.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
-      "foundation": "docs/audits/2026-11-14-u1a-rfa-recheck/DEVELOPMENT_GUIDE.md",
-      "evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
+      "latest_batch": "JPGPNG-U1A-RFB-FIX-20261114-01",
+      "foundation": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md",
+      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md",
       "previous_completed_batch": "JPGPNG-U1A-RFA-FIX-20261114-01",
-      "unfinished_draft": "Old RFA/RF/UA cases pass; six newly verified quality/progress/cleanup/recovery/resource defects remain.",
-      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md",
+      "unfinished_draft": "RFB-01..06 closed; the read-only audit's two P2 and one P3 also fixed; the remaining P3 are recorded as boundaries.",
+      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md",
       "latest_overview": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md",
       "latest_evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
-      "audited_commit": "f7c389b6250699060801609304417d2f58583ac8",
-      "fixed_commit": "48a6968",
+      "audited_commit": "de50f805c3ab0610edf20c6a21a21d42790c2024",
+      "fixed_commit": "482eb03",
       "runtime_checkout_note": "Daily JpgPng checkout remains 5465e0c; the fix branch is not deployed."
     },
     "archiving_design": {
@@ -991,6 +991,78 @@
       "business_data_changed": false,
       "product_ready": false,
       "next_step": "S0 align evidence/progress, cleanup EOF, lineage edges and recovery faults; S1 fix RFB-01/02/06 together; S2 RFB-03/05; S3 RFB-04; integrated re-audit before W5/production."
+    },
+    "u1a_rfb_fix": {
+      "id": "JPGPNG-U1A-RFB-FIX-20261114-01",
+      "date": "2026-11-14",
+      "status": "fix_completed_pending_user_acceptance_not_production_ready",
+      "base_audit": "de50f80",
+      "audited_commit": "de50f805c3ab0610edf20c6a21a21d42790c2024",
+      "product_commit_before_fix": "48a6968",
+      "fixed_commit": "482eb03",
+      "branch": "fix/a1-u1a-rfb-20261114",
+      "contract": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md",
+      "record": "docs/maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md",
+      "closed": {
+        "P1": 1,
+        "P2": 5,
+        "total": 6,
+        "audit_followups_fixed": ["P2-1 single-page byte ceiling raised to 8 GiB", "P2-2 truncated handover batch reports budget_exhausted", "P3-1 a full progress event window counts as truncated"],
+        "recorded_boundaries": ["P3-2 one scenario assertion covered elsewhere", "P3-3 unknown artifact size degrades the precheck", "P3-4 MAX_LINEAGE_QUERIES has no headroom"]
+      },
+      "audit_probes": {
+        "tests": 12,
+        "passed": 12,
+        "pre_fix": "10 failed / 2 passed"
+      },
+      "lane_tests": {
+        "observation": 13,
+        "delivery": 9,
+        "lineage": 15,
+        "scenarios": 17,
+        "total": 54
+      },
+      "non_tk": {
+        "tests": 1897,
+        "passed": 1893,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 4
+      },
+      "tk": {
+        "tests": 9,
+        "passed": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "note": "per-test isolation; repeated Tk interpreter creation in one process is environment-flaky and retained"
+      },
+      "previous_regressions": {
+        "RFA": 12,
+        "RF": 15,
+        "UA": 14,
+        "result": "all passed in the current full suite"
+      },
+      "measure": {
+        "confirm_pass_cross_call_33": "1 -> 33 observations (1 fresh + 32 confirmations)",
+        "page_256": "one acceptance commits after 256 observations",
+        "page_257": "256 then 257 observations across two acceptances",
+        "small_page_6": "commits on the 3rd call (was the 4th)",
+        "progress_unavailable": "cache_cap and progress_write each commit on the first call",
+        "cleanup_cursor_limit_1": "[6,11,13,0,6]",
+        "cleanup_cursor_limit_200": "[1001,2001,0,1001,2001]",
+        "lineage_no_event_statements": "2 -> 3",
+        "accept_3x10": 311,
+        "claim_3x10": 61,
+        "accept_2000": 18025,
+        "claim_2000": 8021
+      },
+      "schema_changed": false,
+      "dependencies_added": false,
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "deployed": false,
+      "next_step": "W5 wiring and registered gaps; real migration/backup/external-volume rehearsal remains a separate gate."
     }
   }
 }

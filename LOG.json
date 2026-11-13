@@ -1810,6 +1810,76 @@
       "limitations": "Synthetic offline only; no production/gallery/account/migration/cloud operations; four existing skips retained.",
       "history_errata": "Implementation current docs mixed f7c389b/48a6968 with older 3839c90 evidence. Current pointers corrected; historical reports and 37 old sessions unchanged.",
       "auditor_error": "probe03 collection failed due to indentation in a new audit test; corrected in probe04, raw failure retained separately from product defects."
+    },
+    {
+      "session_date": "2026-11-14",
+      "batch": "JPGPNG-U1A-RFB-FIX-20261114-01",
+      "branch": "fix/a1-u1a-rfb-20261114",
+      "summary": "关闭 RFB-01..06（1 P1、5 P2）：提交前严格确认 pass、进度不可用即完成式尝试、清理 EOF 与检查预算分离、节点集合内展开中间 handover、账本不可读上抛、每页 8 GiB/300 秒硬限额。只读审计提出的 2 项 P2 与 1 项 P3 也已修。12 探针 12/12、非 Tk 1,897 项 1,893 通过/4 跳过、Tk 逐条 9/9。",
+      "fix": {
+        "id": "JPGPNG-U1A-RFB-FIX-20261114-01",
+        "date": "2026-11-14",
+        "status": "fix_completed_pending_user_acceptance_not_production_ready",
+        "base_audit": "de50f80",
+        "product_commit_before_fix": "48a6968",
+        "fixed_commit": "482eb03",
+        "contract": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md",
+        "record": "docs/maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md",
+        "closed": {
+          "P1": 1,
+          "P2": 5,
+          "total": 6
+        },
+        "audit_followups": "P2-1 (page ceiling 8 GiB), P2-2 (truncated event batch reports budget_exhausted) and P3-1 (full event window counts as truncated) fixed; P3-2..P3-4 recorded as boundaries",
+        "audit_probes": {
+          "tests": 12,
+          "passed": 12,
+          "pre_fix": "10 failed / 2 passed"
+        },
+        "non_tk": {
+          "tests": 1897,
+          "passed": 1893,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "tk": {
+          "tests": 9,
+          "passed": 9,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "note": "per-test isolation; repeated Tk interpreter creation in one process is environment-flaky and retained"
+        },
+        "previous_regressions": {
+          "RFA": 12,
+          "RF": 15,
+          "UA": 14,
+          "result": "all passed in the current full suite"
+        },
+        "measure": {
+          "confirm_pass_cross_call_33": "1 -> 33 observations (1 fresh + 32 confirmations)",
+          "page_256": "one acceptance commits after 256 observations",
+          "page_257": "256 then 257 observations across two acceptances",
+          "small_page_6": "commits on the 3rd call (was the 4th)",
+          "progress_unavailable": "cache_cap and progress_write each commit on the first call",
+          "cleanup_cursor_limit_1": "[6,11,13,0,6]",
+          "cleanup_cursor_limit_200": "[1001,2001,0,1001,2001]",
+          "lineage_no_event_statements": "2 -> 3",
+          "accept_3x10": 311,
+          "claim_3x10": 61,
+          "accept_2000": 18025,
+          "claim_2000": 8021
+        },
+        "schema_changed": false,
+        "dependencies_added": false,
+        "product_source_changed": true,
+        "business_data_changed": false,
+        "deployed": false
+      },
+      "organization": "One integration worktree plus four lane worktrees and a read-only measure checkout; audit reports, old worktrees and checkpoints preserved.",
+      "limitations": "Synthetic offline tests only; no real gallery, account, network, external volume, migration or deployment. Tk same-process re-initialisation remains environment-flaky; the four existing skips are unchanged.",
+      "history_errata": "The RFA round reported the line budget as 300 seconds and 512 MiB per page; the RFB round raised the page ceiling to 8 GiB after the audit showed a 660 MB work could never be accepted."
     }
   ]
 }

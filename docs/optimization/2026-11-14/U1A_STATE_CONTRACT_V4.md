@@ -106,7 +106,9 @@ class TierScan:
 ## 6. 协议五：预算（RFB-06）
 
 * `max_files`/`max_slices`：**每次调用**的切片与片数上限。
-* `max_bytes`/`max_seconds`：**每页/每次尝试**的硬限额，覆盖观察 + 提交前确认 pass。默认 `max_bytes=512 MiB`、`max_seconds=300`。
+* `max_bytes`/`max_seconds`：**每页/每次尝试**的硬限额，覆盖观察 + 提交前确认 pass。默认 `max_bytes=8 GiB`、`max_seconds=300`。
+
+> v4.3 修订（2026-11-14，只读审计 P2-1）：默认值从 512 MiB 提高到 8 GiB。提交一页必须读到整页内容一次（切片剩余 + 确认），所以这个数值是"单页内容上限"，不是突发上限；512 MiB 会让 33 页 × 20 MB = 660 MB 的作品永远 `page_byte_budget`。`max_files`/`max_slices` 仍是突发上限。该常量目前是部署级代码常量，配置入口留给 W5。
 * 开文件前用 artifact 行记录的 `size` 预判：`remaining_bytes < size` → 直接 `page_byte_budget`（不打开该文件，不静默超读）。
 * 观察时把 `ObservationBudget(max_bytes=min(remaining, per-file cap), max_seconds=min(remaining, per-file cap))` 传给 `LocalObserver`；观察器自己的上限仍然生效。
 
@@ -120,6 +122,7 @@ class TierScan:
 * 对**节点集合内的每一行**批量读取 `recovery_owner_transfer` 事件（一次查询），逐个校验目标（页面/路径、quality 作用域、字节质量、owner completed、self-reference）。
 * 迭代解析：有事件的节点按事件，无事件的节点按窗口顺序（completed → active → superseded），`visited` 防环。
 * 预算：`MAX_SUPERSEDE_NODES=64`、`MAX_EVENTS=64`、`MAX_LINEAGE_QUERIES=4`；超限 → `budget_exhausted`（不是 `none`）。
+* 批量事件查询取 `MAX_EVENTS + 1` 行：读到第 65 条即证明"还有更多"，直接 `budget_exhausted`（诊断 `event_cap`），**不返回**基于不完整节点集合的候选——宁可拒绝也不给一个可能冲突的后继（v4.2）。
 * 显式坏目标 → `event_target_unusable` 拒绝，不得静默跳到别的 completed。
 * 读预检、writer CAS、carry 共用同一结果；carry 只有在 `reason == "none"` 时才允许自有回退（当前已删）。
 
