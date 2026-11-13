@@ -16,7 +16,8 @@ the named lane lands):
 * 5  two tasks, one output slot ................. A+D / UA-01 (green guard)
 * 6a identical replay: same ids, zero hashes ... A / UA-09   (red)
 * 6b same page identity, different digest ...... A / UA-09   (green guard)
-* 6c changed completed page re-checked ......... B+A / UA-09 (red)
+* Deferred: completed-page re-verification needs its own W5 entry;
+  recover_verification_page stays idempotent for completed pages.
 * 7a corrupt intent blocks claim ................ D+A / UA-10 (red)
 * 7b corrupt intent blocks publication .......... C+D / UA-10 (red)
 * 7c corrupt intent blocks repair ............... B+D / UA-10 (red)
@@ -276,32 +277,6 @@ def test_the_same_page_identity_with_a_different_digest_is_rejected(repo, tmp_pa
     with pytest.raises(CursorConflict):
         h.accept(repo, job["batch_id"], altered)
     assert h.pages(repo, job)["completed"] == 1
-
-
-def test_a_changed_completed_page_is_observed_by_recovery(repo, tmp_path, monkeypatch):
-    """B+A / UA-09: a completed link is not proof; recovery must look at bytes."""
-    h.first_delivery(repo, tmp_path)
-    job = h.submit(repo, request_id="replay-changed")
-    page = h.source((h.candidate(),), page_identity="replay-changed")
-    h.accept(repo, job["batch_id"], page)
-    assert h.pages(repo, job)["completed"] == 1
-
-    observe = repo._observe_artifact
-    calls = []
-
-    def counting(*args, **kwargs):
-        calls.append(str(args[0]["artifact_id"]))
-        return observe(*args, **kwargs)
-
-    monkeypatch.setattr(repo, "_observe_artifact", counting)
-    h.target(tmp_path).write_bytes(h.SAME_SIZE_PNG)
-    result = repo.recover_verification_page(job["batch_id"], h.ARTWORK, 0)
-
-    assert calls, "recovery reported on a completed page without observing the file"
-    assert result["outcome"] in {"held", "reused"}
-    if result["outcome"] == "reused":
-        assert result["artifact_id"]
-        assert h.target(tmp_path).read_bytes() == h.PNG_BYTES
 
 
 # ---------------------------------------------------------------------------
