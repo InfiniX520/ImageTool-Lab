@@ -440,6 +440,13 @@ class PageDeliveryExecutor:
             raise _Fault("invalid_staging_identity", block=True)
         self._hook("before_publish", row)
         if not final.exists():
+            # UA-11: the exclusion linearizes here, immediately before the
+            # final name exists.  A denied gate leaves the staged temp owned by
+            # this delivery and cancels the row; it never removes a published
+            # file and never reports success.
+            decision = self._db("publish_authorized", row["delivery_id"])
+            if not isinstance(decision, dict) or decision.get("allowed") is not True:
+                return self._abort_unpublished(row, evidence, decision)
             self._verify_owned(temp, evidence)
             try:
                 os.link(temp, final)  # atomic, same-directory, refuses existing names
@@ -460,6 +467,31 @@ class PageDeliveryExecutor:
         except (OSError, _Fault, _StorageFault, ContractError):
             pass  # durable success remains success; the owned .part is recoverable
         return artifact
+
+    def _abort_unpublished(self, row, evidence, decision):
+        """Cancel a delivery whose final name was never created.
+
+        The staged file is removed only when it is provably this delivery's
+        own temp (identity, size and digest all verified).  Any doubt keeps
+        the '.part' for local recovery instead of guessing.
+        """
+        reason = "intent_excluded"
+        if isinstance(decision, dict) and decision.get("reason") == "intent_unreadable":
+            reason = "intent_unreadable"
+        self._db(
+            "cancel_unpublished_delivery",
+            row["delivery_id"],
+            row["current_batch_id"],
+            error_code=reason,
+        )
+        temp = self.resolver.resolve(PathRef(**evidence["temp_ref"]))
+        if temp.exists():
+            try:
+                self._verify_owned(temp, evidence)
+                temp.unlink()
+            except (OSError, _Fault, ContractError):
+                pass  # an unverified leftover stays recoverable
+        return ("cancelled", reason)
 
     def cleanup_delivery(self, delivery_id):
         """Explicit local cleanup, safe even after a crash just after confirmation."""
@@ -540,7 +572,9 @@ class PageDeliveryExecutor:
                     self._db("prepare_delivery", row["delivery_id"], row["current_batch_id"], prepared_evidence)
                     prepared = True
                     self._hook("after_prepare", row)
-                    self._publish(row, prepared_evidence)
+                    published = self._publish(row, prepared_evidence)
+                    if isinstance(published, tuple):
+                        return DeliveryOutcome(*published)
                     return DeliveryOutcome("completed")
                 except ImageNeedsVerification as exc:
                     return self._finish_issue(row, stop_event, DeliveryOutcome("needs_verification", exc.code))
@@ -595,8 +629,11 @@ class PageDeliveryExecutor:
             try:
                 if not isinstance(evidence, dict):
                     raise _Fault("prepared_evidence_missing", block=True)
-                self._publish(row, evidence)
-                results.append((row["delivery_id"], "completed"))
+                published = self._publish(row, evidence)
+                if isinstance(published, tuple):
+                    results.append((row["delivery_id"], published[0]))
+                else:
+                    results.append((row["delivery_id"], "completed"))
             except (_Fault, OSError, ContractError):
                 self._db("set_delivery_issue", row["delivery_id"], row["current_batch_id"],
                          state="recovery_needed", error_code="local_recovery_conflict")

@@ -53,6 +53,13 @@ class TaskCoordinator:
         self.repository, self.executor = repository, executor
         self._commands = queue.Queue(command_capacity)
         self._control = queue.Queue(4)
+        # File observation runs on its own single thread: a multi-gigabyte
+        # hash must never own the control loop (UA-07).  Control commands
+        # (snapshot/stop) execute on the caller thread against the repository
+        # writer, so they answer while an observation is still running.
+        self._observations = queue.Queue(16)
+        self._observing = 0
+        self._control_commands = queue.Queue(8)
         self._pages = queue.Queue(queue_capacity)
         self._results = queue.SimpleQueue()
         self._capacity = queue_capacity
@@ -68,6 +75,12 @@ class TaskCoordinator:
         self._owner = threading.Thread(target=self._run, name="collection-coordinator", daemon=False)
         self._workers = [threading.Thread(target=self._worker, name=f"collection-page-{n}", daemon=False)
                          for n in range(workers)]
+        self._observer = threading.Thread(
+            target=self._observation_loop, name="collection-observer", daemon=False
+        )
+        self._control_thread = threading.Thread(
+            target=self._control_loop, name="collection-control", daemon=False
+        )
 
     def start(self) -> Future:
         with self._guard:
@@ -76,16 +89,36 @@ class TaskCoordinator:
             if not self._started:
                 self._started = True
                 self._owner.start()
+                self._observer.start()
+                self._control_thread.start()
                 for worker in self._workers:
                     worker.start()
         return self._ready
 
     def _command(self, name, *args, priority=False, **kwargs) -> Future:
+        if name in {"snapshot", "request_stop"}:
+            return self._run_control_command(name, args, kwargs)
         result = Future()
         with self._guard:
             if not self._started or self._closing or self._shutdown.is_set():
                 result.set_exception(CoordinatorClosed("Coordinator is not accepting commands"))
                 return result
+        if name == "accept_source_page":
+            # Admission happens here, while the batch is known to be running.
+            # An observation that was admitted before a pause may still commit
+            # into 'pausing'; a page admitted after the pause may not.
+            try:
+                admitted_running = self.repository.get_batch(args[0])["phase"] == "running"
+            except BaseException as exc:
+                result.set_exception(exc)
+                return result
+            try:
+                self._observations.put_nowait((args[0], args[1], admitted_running, result))
+            except queue.Full:
+                result.set_exception(CommandQueueFull("Observation capacity reached; try again"))
+                return result
+            return result
+        with self._guard:
             try:
                 (self._control if priority else self._commands).put_nowait((name, args, kwargs, result))
             except queue.Full:
@@ -95,6 +128,58 @@ class TaskCoordinator:
                 self._stop.set()
         self._wake.set()
         return result
+
+    def _run_control_command(self, name, args, kwargs) -> Future:
+        """Answer a control command without waiting for file observation.
+
+        The repository writer is a separate thread, so a snapshot or a stop
+        request stays a short compare-and-set even while a hash is in flight.
+        """
+        result = Future()
+        with self._guard:
+            if not self._started or self._closing or self._shutdown.is_set():
+                result.set_exception(CoordinatorClosed("Coordinator is not accepting commands"))
+                return result
+            try:
+                self._control_commands.put_nowait((name, args, kwargs, result))
+            except queue.Full:
+                result.set_exception(CommandQueueFull("Control capacity reached; try again"))
+                return result
+            if name == "request_stop" and self._active and self._active["job_id"] == args[0]:
+                # The UI signal is immediate; the durable stop is applied on
+                # the control thread, never behind an in-flight hash.
+                self._stop.set()
+        return result
+
+    def _control_loop(self):
+        while True:
+            item = self._control_commands.get()
+            if item is None:
+                break
+            self._execute(item)
+
+    def _observation_loop(self):
+        while True:
+            item = self._observations.get()
+            if item is None:
+                break
+            batch_id, page, admitted_running, future = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            with self._guard:
+                self._observing += 1
+            try:
+                future.set_result(
+                    self.repository.accept_source_page(
+                        batch_id, page, admitted_running=admitted_running
+                    )
+                )
+            except BaseException as exc:
+                future.set_exception(exc)
+            finally:
+                with self._guard:
+                    self._observing -= 1
+                self._wake.set()
 
     def submit(self, request: CollectionRequest, command_id: str, *, parent_job_id: str | None = None) -> Future:
         return self._command("submit", request, command_id, parent_job_id=parent_job_id)
@@ -281,7 +366,7 @@ class TaskCoordinator:
                         self._stop.set()
                         self._drain_pages()
                         with self._guard:
-                            busy = bool(self._inflight)
+                            busy = bool(self._inflight) or bool(self._observing)
                         if not busy:
                             self.repository.settle_stop(batch["batch_id"])
                             batch = self.repository.get_batch(batch["batch_id"])
@@ -292,7 +377,11 @@ class TaskCoordinator:
                     elif batch["phase"] in {"running", "settling"}:
                         self._fill_pages()
                         with self._guard:
-                            idle = not self._queued and not self._inflight
+                            idle = (
+                                not self._queued
+                                and not self._inflight
+                                and not self._observing
+                            )
                         if idle:
                             budget = self.repository.budget_status(batch["batch_id"])
                             if budget["deferred_works"] and budget["used_works"] >= budget["max_works"]:
@@ -338,9 +427,15 @@ class TaskCoordinator:
             self._stop.set()
             self._wake.set()
         if self._started:
-            for thread in (self._owner, *self._workers):
+            try:
+                self._observations.put_nowait(None)
+                self._control_commands.put_nowait(None)
+            except queue.Full:
+                pass
+            threads = (self._owner, *self._workers, self._observer, self._control_thread)
+            for thread in threads:
                 thread.join(max(0, deadline - time.monotonic()))
-            if any(thread.is_alive() for thread in (self._owner, *self._workers)):
+            if any(thread.is_alive() for thread in threads):
                 raise TimeoutError("Collection workers are still settling; repository remains open")
         self.repository.close(timeout=max(0, deadline - time.monotonic()))
         if self._fatal:

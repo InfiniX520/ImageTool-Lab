@@ -1118,6 +1118,8 @@ class LibraryRepository(
             return self._claim_delivery(conn, command.payload)
         if command.kind == "release_delivery":
             return self._release_delivery(conn, command.payload)
+        if command.kind == "cancel_unpublished_delivery":
+            return self._cancel_unpublished_delivery(conn, command.payload)
         if command.kind == "request_stop":
             return self._request_stop(conn, command.payload)
         if command.kind == "settle_stop":
@@ -1253,11 +1255,13 @@ class LibraryRepository(
         return self.admit_query_artist(batch_id, artist_id)
 
     def accept_source_page(
-        self, batch_id: str, page: SourcePage
+        self, batch_id: str, page: SourcePage, *, admitted_running: bool = False
     ) -> tuple[str, ...]:
         batch_id = _validate_identifier(batch_id, "batch id")
         if not isinstance(page, SourcePage):
             raise LibraryError("accept_source_page requires SourcePage")
+        if type(admitted_running) is not bool:
+            raise LibraryError("admitted_running must be a boolean")
         page_json = canonical_json(asdict(page))
         digest = _sha256_text(page_json)
         deadline = time.monotonic() + _ACCEPT_PREFLIGHT_SECONDS
@@ -1277,6 +1281,7 @@ class LibraryRepository(
                 "page_digest": digest,
                 "snapshot": snapshot_payload,
                 "replay": replay is not None,
+                "admitted_running": admitted_running,
             }
             try:
                 return self._enqueue(
@@ -1771,6 +1776,27 @@ class LibraryRepository(
                 "delivery_id": delivery_id,
                 "batch_id": batch_id,
                 "state": state,
+                "error_code": error_code,
+            },
+        )
+
+    def cancel_unpublished_delivery(
+        self, delivery_id: str, batch_id: str, *, error_code: str
+    ) -> None:
+        """Cancel a prepared delivery whose final name was never created.
+
+        The executor calls this only after it verified the final path does not
+        exist and that the staged temp file belongs to this delivery (UA-11).
+        A published file is never rewritten by this command.
+        """
+        delivery_id = _validate_identifier(delivery_id, "delivery id")
+        batch_id = _validate_identifier(batch_id, "batch id")
+        error_code = _validate_error_code(error_code)
+        self._enqueue(
+            "cancel_unpublished_delivery",
+            {
+                "delivery_id": delivery_id,
+                "batch_id": batch_id,
                 "error_code": error_code,
             },
         )
@@ -2541,7 +2567,13 @@ class LibraryRepository(
             batch = self._get_batch_row(conn, batch_id)
             if batch is None:
                 raise NotFoundError(f"Unknown batch: {batch_id}")
-            if batch["phase"] != "running":
+            phase_now = str(batch["phase"])
+            if phase_now != "running" and not (
+                phase_now == "pausing" and bool(payload.get("admitted_running"))
+            ):
+                # An acceptance admitted while the batch was running may still
+                # commit into 'pausing' (the hash was already in flight); a
+                # page admitted after the pause is rejected.
                 raise InvalidStateError("source page acceptance requires a running batch")
             job = self._get_job_row(conn, str(batch["job_id"]))
             if job is None:
@@ -3473,6 +3505,60 @@ class LibraryRepository(
                     "batch_id": batch_id,
                     "state": state,
                     "error_code": error_code,
+                },
+            )
+            self._refresh_items_for_delivery(conn, delivery_id, now)
+            return None
+
+    def _cancel_unpublished_delivery(
+        self, conn: sqlite3.Connection, payload: dict[str, Any]
+    ) -> None:
+        """CAS a prepared, never-published delivery into cancelled.
+
+        This is the only place that may move 'prepared' to 'cancelled'.  The
+        executor has already verified that the final path does not exist; a
+        crash between the final link and confirmation must go through
+        confirm/recovery instead, so it is never treated as unpublished here.
+        """
+        delivery_id = str(payload["delivery_id"])
+        batch_id = str(payload["batch_id"])
+        error_code = str(payload["error_code"])
+        with self._transaction(conn):
+            batch = self._get_batch_row(conn, batch_id)
+            if batch is None:
+                raise NotFoundError(f"Unknown batch: {batch_id}")
+            delivery = self._get_delivery_row(conn, delivery_id)
+            if delivery is None:
+                raise NotFoundError(f"Unknown delivery: {delivery_id}")
+            if delivery["job_id"] != batch["job_id"]:
+                raise InvalidStateError("Batch and delivery belong to different jobs")
+            if delivery["current_batch_id"] != batch_id:
+                raise InvalidStateError("Only the owning batch can cancel the delivery")
+            if delivery["state"] == "cancelled":
+                return None
+            if delivery["state"] != "prepared":
+                raise InvalidStateError(
+                    "Only an unpublished prepared delivery can be cancelled"
+                )
+            now = _utcnow()
+            updated = conn.execute(
+                "UPDATE deliveries SET state = 'cancelled', error_code = ?, "
+                "retry_at = NULL, updated_at = ? "
+                "WHERE delivery_id = ? AND state = 'prepared'",
+                (error_code, now, delivery_id),
+            ).rowcount
+            if updated != 1:
+                raise InvalidStateError("Delivery state changed before cancellation")
+            self._insert_event(
+                conn,
+                job_id=str(batch["job_id"]),
+                batch_id=batch_id,
+                kind="delivery_cancelled",
+                payload={
+                    "delivery_id": delivery_id,
+                    "batch_id": batch_id,
+                    "error_code": error_code,
+                    "reason": "unpublished_intent",
                 },
             )
             self._refresh_items_for_delivery(conn, delivery_id, now)
