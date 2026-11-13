@@ -27,10 +27,12 @@ from core.preservation_policy import (
 )
 from core.task_contracts import ContractError, PathRef, canonical_json, normalize_json
 
-# Schema 4 adds the append-only acceptance table that separates "what a path is
-# currently bound to" from "which diagnostic observations were written"; schema 3
-# copies are refused rather than silently reinterpreted.
-ARCHIVE_SCHEMA_VERSION = "4"
+# Schema 4 added the append-only acceptance table that separates "what a path is
+# currently bound to" from "which diagnostic observations were written".  Schema 5
+# keeps those objects and adds the two covering indexes the digest and path-owner
+# lookups need; the schema 4 acceptance-event draft is refused rather than
+# silently reinterpreted, and no production library of either draft exists.
+ARCHIVE_SCHEMA_VERSION = "5"
 ARCHIVE_PROTOCOL_VERSION = 2
 # One document budget for plan headers, capacity and inventory JSON at both the
 # writer and the audit.  The previous 1 MiB audit limit rejected a legal plan
@@ -761,6 +763,11 @@ ARCHIVE_DDL = (
     "CREATE INDEX idx_archive_checks_content ON archive_checks(content_key, checked_at, check_id)",
     "CREATE INDEX idx_archive_releases_checks ON archive_releases(local_check_id, archive_check_id, observed_at)",
     "CREATE INDEX idx_archive_releases_operation ON archive_releases(operation_id, sequence)",
+    # AR4-07: the digest lookup and the path-owner lookup both scanned with a
+    # temporary sort tree.  These prefixes cover the whole hot query, so neither
+    # needs a table scan or a temporary B-tree any more.
+    "CREATE INDEX idx_archive_contents_digest ON archive_contents(sha256, size_bytes, asset_id, revision)",
+    "CREATE INDEX idx_archive_assets_path ON archive_assets(path_key, asset_id)",
     """CREATE TRIGGER archive_asset_path_owner
     BEFORE INSERT ON archive_assets
     FOR EACH ROW
@@ -2213,6 +2220,29 @@ class ArchiveMigrationReport:
     migrated_tables: tuple[str, ...]
 
 
+_SUPERSEDED_SCHEMA_VERSIONS = {
+    "4": "the schema 4 acceptance-event draft, superseded by schema 5; "
+         "no production library exists",
+    "3": "the schema 3 pre-acceptance draft",
+    "2": "the schema 2 draft",
+}
+
+
+def _refuse_source_version(version: str) -> None:
+    """Refuse a draft version instead of relabelling or reinterpreting it.
+
+    The list of superseded versions and its wording live in one place so a new
+    version number cannot silently fall back to an older message.
+    """
+    detail = _SUPERSEDED_SCHEMA_VERSIONS.get(version, "unknown version marker")
+    raise ArchiveSchemaError(
+        "Unsupported archive schema version %r (%s); only a schema 1 base library "
+        "migrates, and a current schema %s copy is used as is. Re-create a temporary "
+        "copy from a schema 1 library instead of relabelling a draft."
+        % (version, detail, ARCHIVE_SCHEMA_VERSION)
+    )
+
+
 def _inspect_source(conn: sqlite3.Connection) -> str:
     if conn.execute("PRAGMA query_only").fetchone()[0] != 1:
         raise ArchiveSchemaError("Source inspection must be read-only")
@@ -2228,10 +2258,7 @@ def _inspect_source(conn: sqlite3.Connection) -> str:
     if version == ARCHIVE_SCHEMA_VERSION:
         _check_existing_objects(conn)
     elif version != "1":
-        raise ArchiveSchemaError(
-            "Unsupported schema version; only the schema 1 base library migrates "
-            "(schema 2 was a draft and schema 3 is superseded by schema 4)"
-        )
+        _refuse_source_version(version)
     return version
 
 
@@ -2345,8 +2372,5 @@ def _inspect_source_for_migration(conn: sqlite3.Connection) -> str:
     if version == ARCHIVE_SCHEMA_VERSION:
         _check_existing_objects(conn)
     elif version != "1":
-        raise ArchiveSchemaError(
-            "Unsupported schema version; only the schema 1 base library migrates "
-            "(schema 2 was a draft and schema 3 is superseded by schema 4)"
-        )
+        _refuse_source_version(version)
     return version

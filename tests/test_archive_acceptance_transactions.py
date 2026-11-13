@@ -798,42 +798,49 @@ def test_same_timestamp_diagnostics_are_not_a_tie_breaker(library, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Schema 3 -> 4, plan compatibility and the dedicated repository command
+# Schema 4 -> 5, plan compatibility and the dedicated repository command
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_four_and_old_copies_are_refused(library, tmp_path):
+def test_schema_version_is_five_and_old_copies_are_refused(library, tmp_path):
     source, conn = library
-    assert ARCHIVE_SCHEMA_VERSION == "4"
+    assert ARCHIVE_SCHEMA_VERSION == "5"
     assert conn.execute(
         "SELECT value FROM schema_meta WHERE key='schema_version'"
-    ).fetchone()[0] == "4"
+    ).fetchone()[0] == "5"
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     validate_archive_facts(conn)
 
-    with closing(sqlite3.connect(source)) as raw:
-        raw.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
-        raw.commit()
-    with pytest.raises(SchemaVersionError):
-        LibraryRepository(source)
-    with pytest.raises(SchemaVersionError):
-        ArchiveLibraryRepository(source, temporary_copy_confirmed=True)
-    with pytest.raises(ArchiveMigrationError):
-        migrate_archive_copy(source, tmp_path / "refused.backup", temporary_copy_confirmed=True)
-    assert not (tmp_path / "refused.backup").exists()
+    # Both the closest draft (4) and an older one (3) are refused by every entry
+    # point, and neither is relabelled.
+    for draft, suffix in (("3", "three"), ("4", "four")):
+        with closing(sqlite3.connect(source)) as raw:
+            raw.execute(
+                "UPDATE schema_meta SET value=? WHERE key='schema_version'", (draft,))
+            raw.commit()
+        with pytest.raises(SchemaVersionError):
+            LibraryRepository(source)
+        with pytest.raises(SchemaVersionError):
+            ArchiveLibraryRepository(source, temporary_copy_confirmed=True)
+        with pytest.raises(ArchiveMigrationError) as caught:
+            migrate_archive_copy(
+                source, tmp_path / ("refused-" + suffix + ".backup"),
+                temporary_copy_confirmed=True)
+        assert "schema 5" in str(caught.value)
+        assert not (tmp_path / ("refused-" + suffix + ".backup")).exists()
 
     with closing(sqlite3.connect(source)) as raw:
         assert raw.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "3"
-        raw.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
+        ).fetchone()[0] == "4"
+        raw.execute("UPDATE schema_meta SET value='5' WHERE key='schema_version'")
         raw.commit()
     with ArchiveLibraryRepository(source, temporary_copy_confirmed=True):
         pass
 
 
-def test_schema_four_migration_backup_and_standalone_reopen(library, tmp_path):
-    """The 3 -> 4 upgrade keeps a v1 backup, a self-contained copy and old plans."""
+def test_schema_five_migration_backup_and_standalone_reopen(library, tmp_path):
+    """The v1 -> v5 upgrade keeps a v1 backup, a self-contained copy and old plans."""
     source, conn = library
     backup = tmp_path / "before-migration.sqlite3"
     with closing(sqlite3.connect(backup)) as raw:
@@ -846,10 +853,10 @@ def test_schema_four_migration_backup_and_standalone_reopen(library, tmp_path):
         assert "archive_path_acceptances" not in tables
         assert raw.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
-    assert ARCHIVE_SCHEMA_VERSION == "4"
+    assert ARCHIVE_SCHEMA_VERSION == "5"
     assert conn.execute(
         "SELECT value FROM schema_meta WHERE key='schema_version'"
-    ).fetchone()[0] == "4"
+    ).fetchone()[0] == "5"
     assert conn.execute("SELECT COUNT(*) FROM archive_path_acceptances").fetchone()[0] == 0
 
     root = tmp_path / "schema-root"
@@ -859,7 +866,7 @@ def test_schema_four_migration_backup_and_standalone_reopen(library, tmp_path):
     inventory = build_archive_inventory(
         (ArtworkGroup("work-1", (ArchiveEntry(first.content, entry.path, 0,
                                               entry.physical_identity),)),),
-        batch_id="batch-schema-four",
+        batch_id="batch-schema-five",
         policy=InventoryPolicy(target_package_bytes=1024, batch_budget_bytes=10 ** 9),
     )
     capacity = plan_archive_capacity(
@@ -879,7 +886,7 @@ def test_schema_four_migration_backup_and_standalone_reopen(library, tmp_path):
             "SELECT COUNT(*) FROM archive_path_acceptances"
         ).fetchone()[0] == 1
         validate_archive_facts(raw)
-        assert load_archive_plan(raw, "batch-schema-four").inventory == inventory
+        assert load_archive_plan(raw, "batch-schema-five").inventory == inventory
         stored = raw.execute(
             """SELECT b.acceptance_id,a.check_id
                FROM archive_path_bindings AS b
@@ -892,7 +899,7 @@ def test_schema_four_migration_backup_and_standalone_reopen(library, tmp_path):
         source, tmp_path / "second.backup", temporary_copy_confirmed=True,
     )
     assert second.status == "already_current"
-    assert second.source_version == "4"
+    assert second.source_version == "5"
     assert second.backup_path.is_file()
 
 

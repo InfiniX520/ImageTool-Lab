@@ -1,8 +1,8 @@
-"""Persist explicit archive inventories in an already-open temporary schema-3 DB.
+"""Persist explicit archive inventories in an already-open temporary archive DB.
 
 This module is deliberately not a repository factory: it never discovers or opens a
 library.  A caller must provide a sqlite3 connection to an explicitly selected,
-isolated schema-3 copy.  A bounded, segmented inventory document is the single
+isolated copy of the current archive schema.  A bounded, segmented inventory document is the single
 authoritative planned representation; planned package indexes are only an index.
 Plans are not sealed objects, remote locations, verification evidence, or a
 completion ledger.
@@ -968,17 +968,26 @@ def _require_connection(conn: object) -> sqlite3.Connection:
     return conn
 
 
-def _require_schema3(conn: sqlite3.Connection) -> None:
+def _require_archive_schema(conn: sqlite3.Connection) -> None:
+    """Require exactly one archive schema version, objects included.
+
+    The version and its message both come from the shared constant, so a version
+    bump cannot leave a stale schema number in plan persistence.
+    """
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
     if "schema_meta" not in tables or not ARCHIVE_TABLES <= tables:
-        raise ArchivePlanStoreError("Archive plan persistence requires the complete schema 3")
+        raise ArchivePlanStoreError(
+            "Archive plan persistence requires the complete archive schema "
+            "(schema %s)" % ARCHIVE_SCHEMA_VERSION)
     metadata = dict(conn.execute('SELECT "key","value" FROM schema_meta'))
     if metadata.get("format") != "jpgpng-library":
         raise ArchivePlanStoreError("Connection belongs to a different product")
     if metadata.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
-        raise ArchivePlanStoreError("Unsupported archive schema version; exactly schema 3 is required")
+        raise ArchivePlanStoreError(
+            "Unsupported archive schema version; exactly schema %s is required"
+            % ARCHIVE_SCHEMA_VERSION)
     _check_existing_objects(conn)
 
 
@@ -1052,7 +1061,7 @@ def save_prepared_plan_in_transaction(
         raise ArchivePlanStoreError("Expected a prepared archive plan")
     if not conn.in_transaction:
         raise ArchivePlanStoreError("Prepared plan save requires a caller-owned transaction")
-    _require_schema3(conn)
+    _require_archive_schema(conn)
     existing = conn.execute(
         "SELECT 1 FROM archive_batches WHERE batch_id=?", (prepared.batch_id,),
     ).fetchone()
@@ -1249,7 +1258,7 @@ def load_archive_plan_in_transaction(
     if not conn.in_transaction:
         raise ArchivePlanStoreError("Archive plan reload requires a caller-owned transaction")
     try:
-        _require_schema3(conn)
+        _require_archive_schema(conn)
         return _load_in_transaction(conn, batch_id)
     except ArchivePlanStoreError:
         raise
@@ -1276,7 +1285,7 @@ def load_archive_plan(conn: sqlite3.Connection, batch_id: str) -> StoredArchiveP
             conn.execute("PRAGMA query_only=ON")
             conn.execute("BEGIN")
             try:
-                _require_schema3(conn)
+                _require_archive_schema(conn)
                 return _load_in_transaction(conn, batch_id)
             except ArchivePlanStoreError:
                 raise

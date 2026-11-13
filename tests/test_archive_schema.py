@@ -162,7 +162,9 @@ def test_idempotent_second_run_uses_new_backup_without_changes(tmp_path):
 
 
 def test_unknown_future_and_incomplete_schemas_are_refused_without_changes(tmp_path):
-    for index, version in enumerate(("5", "3", "2", "unknown")):
+    # "5" is the current version now, so the future case moved to "6"; the schema 4
+    # acceptance draft is refused by name in its own test below.
+    for index, version in enumerate(("6", "4", "3", "2", "unknown")):
         source = tmp_path / f"bad-{index}.sqlite3"
         make_v1(source)
         with sqlite3.connect(source) as conn:
@@ -172,6 +174,22 @@ def test_unknown_future_and_incomplete_schemas_are_refused_without_changes(tmp_p
             migrate_archive_copy(source, tmp_path / f"bad-{index}.backup", temporary_copy_confirmed=True)
         assert database_hash(source) == before
         assert not (tmp_path / f"bad-{index}.backup").exists()
+
+
+def test_the_schema_four_draft_is_refused_by_name_and_never_relabelled(tmp_path):
+    source = tmp_path / "draft-four.sqlite3"
+    make_v1(source)
+    with sqlite3.connect(source) as conn:
+        conn.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
+    before = database_hash(source)
+    with pytest.raises(ArchiveMigrationError) as caught:
+        migrate_archive_copy(source, tmp_path / "draft-four.backup",
+                             temporary_copy_confirmed=True)
+    message = str(caught.value)
+    assert "schema 5" in message and "schema 4 acceptance-event draft" in message
+    assert "schema 1" in message
+    assert database_hash(source) == before
+    assert not (tmp_path / "draft-four.backup").exists()
 
 
 def test_existing_archive_or_base_object_conflict_rolls_back(tmp_path):
