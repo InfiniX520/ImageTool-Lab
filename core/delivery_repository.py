@@ -1518,7 +1518,11 @@ class DeliveryRepositoryMixin:
                     str(source["payload_json"]),
                     None if source["source_identity"] is None else str(source["source_identity"]),
                     generation,
-                    None if source["checkpoint_json"] is None else str(source["checkpoint_json"]),
+                    # A transfer checkpoint embeds its owning delivery id; it
+                    # is not portable to a new generation.  Keep the carried
+                    # hold readable (checkpoint_json NULL) instead of copying
+                    # corrupt evidence.
+                    None,
                     now,
                     now,
                 ),
