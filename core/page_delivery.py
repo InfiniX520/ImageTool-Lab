@@ -534,13 +534,26 @@ class PageDeliveryExecutor:
                 error_code="unexpected_unpublished_state",
             )
             return ("recovery_needed", "unexpected_unpublished_state")
-        self._db(
-            "cancel_unpublished_delivery",
-            row["delivery_id"],
-            row["current_batch_id"],
-            error_code=reason,
-            expected_state=expected_state,
-        )
+        try:
+            self._db(
+                "cancel_unpublished_delivery",
+                row["delivery_id"],
+                row["current_batch_id"],
+                error_code=reason,
+                expected_state=expected_state,
+            )
+        except _StorageFault:
+            # The row moved between our read and the CAS (or the writer failed
+            # once).  Keep it for a later local recovery instead of aborting
+            # startup with an unclassified fault.
+            self._db(
+                "set_delivery_issue",
+                row["delivery_id"],
+                row["current_batch_id"],
+                state="recovery_needed",
+                error_code="cancel_state_changed",
+            )
+            return ("recovery_needed", "cancel_state_changed")
         if owned:
             try:
                 temp.unlink()
@@ -742,9 +755,17 @@ class PageDeliveryExecutor:
                 self._db("set_delivery_issue", row["delivery_id"], row["current_batch_id"],
                          state="recovery_needed", error_code="local_recovery_conflict")
                 results.append((row["delivery_id"], "recovery_needed"))
+            except _StorageFault:
+                # A typed library failure is a local condition, not a reason to
+                # abort startup; the row stays recoverable.
+                results.append((row["delivery_id"], "recovery_needed"))
         # Bounded retry of cancelled-by-intent temps; never part of a delivery
         # result and never allowed to fail startup.
-        for fact in self._db("list_cleanup_candidates", limit=limit):
+        try:
+            cleanup_rows = self._db("list_cleanup_candidates", limit=limit)
+        except _StorageFault:
+            cleanup_rows = ()
+        for fact in cleanup_rows:
             try:
                 self.cleanup_cancelled_delivery(fact["delivery_id"])
             except (_Fault, OSError, ContractError, _StorageFault):

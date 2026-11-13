@@ -1226,6 +1226,11 @@ class DeliveryRecoveryMixin:
             )
             return None
         if resolved.state in {"pending", "suspended", "retry_wait"}:
+            if str(resolved.job_id) != str(batch["job_id"]):
+                # Another task's active slot is dispatchable only in its own
+                # job.  Linking it here would show repair_queued forever, so
+                # refuse and let the owner's batch make progress.
+                return "successor_foreign_active"
             self._link_batch_item_page(
                 conn,
                 str(batch["batch_id"]),

@@ -527,9 +527,18 @@ class DeliveryRepositoryMixin:
         if limit == 0:
             return ()
         with closing(self._readonly_connection()) as conn:
+            # A cleaned row keeps its prepared evidence for audit, so without
+            # the EXISTS filter 200 old rows would starve newer candidates.
             rows = conn.execute(
-                "SELECT * FROM deliveries WHERE state = 'cancelled' "
-                "AND prepared_json IS NOT NULL ORDER BY rowid LIMIT ?",
+                """SELECT * FROM deliveries AS d WHERE d.state = 'cancelled'
+                AND d.prepared_json IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM events AS e
+                    WHERE e.kind = 'delivery_cleanup'
+                    AND e.safe_payload LIKE '%"delivery_id":"' || d.delivery_id || '"%'
+                    AND e.safe_payload LIKE '%"cleanup_completed":true%'
+                )
+                ORDER BY d.rowid LIMIT ?""",
                 (limit,),
             ).fetchall()
         facts: list[dict] = []
@@ -1553,9 +1562,7 @@ class DeliveryRepositoryMixin:
                             if health_by_artifact is None
                             else health_by_artifact.get(str(artifact["artifact_id"]))
                         )
-                        if not enforce_completed_health or (
-                            callable(gate) and gate(health, artifact)
-                        ):
+                        if callable(gate) and gate(health, artifact):
                             same_job = str(artifact["job_id"]) == target_job_id
                             self._link_batch_item_page(
                                 conn,

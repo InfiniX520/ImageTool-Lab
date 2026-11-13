@@ -46,3 +46,49 @@ def test_page_budget_stops_before_the_second_file(tmp_path, monkeypatch):
             repo._accept_context.budget = None
         assert caught.value.reason == "page_file_budget"
         assert len(calls) == 1, "the budget must be checked before the next file"
+
+class _FailingFuture:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def result(self, timeout=None):
+        raise self.exc
+
+
+class _Repo:
+    def get_batch(self, batch_id):
+        return {"phase": "running"}
+
+
+class _Coordinator:
+    def __init__(self, exc):
+        self.repository = _Repo()
+        self.exc = exc
+
+    def accept_page(self, batch_id, page):
+        return _FailingFuture(self.exc)
+
+
+def _collector(exc):
+    from core.follow_collection import FollowCollection
+
+    collector = FollowCollection(_Coordinator(exc), source=object())
+    collector.batch_id = "batch"
+    collector.stop = None
+    collector.deadline = 10**9
+    collector.calls = 0
+    return collector
+
+
+def test_pause_cancellation_is_a_stop_not_a_source_failure():
+    from core.follow_collection import _Stopped
+
+    with pytest.raises(_Stopped):
+        _collector(PreflightCancelled("cancelled"))._accept(None)
+
+
+def test_page_budget_is_a_budget_result():
+    from core.follow_collection import _Budget
+
+    with pytest.raises(_Budget):
+        _collector(PreflightCancelled("page_byte_budget"))._accept(None)

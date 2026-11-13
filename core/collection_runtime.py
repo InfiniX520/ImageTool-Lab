@@ -15,6 +15,7 @@ from concurrent.futures import Future
 from core.follow_collection import FollowCollection
 from core.library_queries import LibraryQueries
 from core.library_repository import CorruptDataError
+from core.observation_snapshot import PreflightCancelled
 from core.query_collection import QueryCollection
 
 
@@ -234,6 +235,15 @@ class CollectionRuntime:
                     self._log('intent_unreadable',level='error',batch_id=batch_id)
                     try:self.repository.request_block(batch_id,'intent_unreadable')
                     except Exception:pass
+                except PreflightCancelled as exc:
+                    code=str(exc.reason)
+                    if code.startswith('page_'):
+                        with self._guard:self._source_error='source_budget'
+                        self._log('source_budget',level='error',batch_id=batch_id)
+                        try:self.repository.request_block(batch_id,'source_budget')
+                        except Exception:pass
+                    else:
+                        self._log('source_cancelled',batch_id=batch_id)
                 except Exception:
                     with self._guard:self._source_error='source_runner_failed'
                     self._log('source_runner_failed',level='error',batch_id=batch_id)

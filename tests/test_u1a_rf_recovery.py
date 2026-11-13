@@ -183,3 +183,41 @@ def test_a_pending_successor_is_adopted_without_a_new_generation(tmp_path):
             after = conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]
         assert link == successor_id
         assert after == before, "adopting a successor must not create another generation"
+
+def test_a_foreign_active_successor_is_never_adopted(tmp_path):
+    """Another task's pending slot is not a successor this batch can dispatch."""
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        other = h.submit(repo, request_id="other-owner")
+        (other_pending,) = repo.accept_source_page(
+            other["batch_id"],
+            h.source((h.candidate(h.OTHER_ARTWORK),), page_identity="other-owner"),
+        )
+        assert h.run(
+            repo, other, other_pending,
+            h.executor(repo, tmp_path, h.Transport(h.Response())),
+        ).state == "completed"
+        settle(repo, other)
+        job, hold, _ = h.parked_hold(repo, tmp_path)
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.execute(
+                "UPDATE deliveries SET state = 'cancelled', "
+                "error_code = 'superseded_by_recovery_reuse' WHERE delivery_id = ?",
+                (hold,),
+            )
+            clone_delivery(
+                conn, hold, "f" * 32,
+                job_id=other["job_id"], current_batch_id=other["batch_id"],
+                origin_batch_id=other["batch_id"],
+                state="pending", error_code=None,
+            )
+            conn.commit()
+        result = repo.recover_verification_page(job["batch_id"], h.ARTWORK, 0)
+        assert result["outcome"] == "refused", result
+        assert result["reason"] == "successor_foreign_active", result
+        with sqlite3.connect(repo.database_path) as conn:
+            link = conn.execute(
+                "SELECT delivery_id FROM batch_item_pages WHERE batch_id = ? "
+                "AND illust_id = ? AND page_index = 0",
+                (job["batch_id"], h.ARTWORK),
+            ).fetchone()
+        assert link[0] != "f" * 32

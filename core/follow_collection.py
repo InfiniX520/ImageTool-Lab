@@ -19,6 +19,7 @@ from core.library_repository import (
     LibraryError,
     SourceCooling,
 )
+from core.observation_snapshot import PreflightCancelled
 from core.task_contracts import ContractError, SourcePage, canonical_json
 
 
@@ -138,6 +139,15 @@ class FollowCollection:
             raise _WaitTimeout() from None
         except BudgetExceeded:
             raise _Budget('work_budget') from None
+        except PreflightCancelled as exc:
+            # A pause stops observation between files; that is a stop, not a
+            # source failure and not a file-health verdict.  A page budget is
+            # a budget result.  Neither may be classified as source_runner_failed.
+            if str(exc.reason) == "cancelled" or (
+                self.stop is not None and self.stop.is_set()
+            ):
+                raise _Stopped() from None
+            raise _Budget(str(exc.reason)) from None
 
     def _finish(self,complete,reason):
         if self.repository.get_batch(self.batch_id)['phase']=='running':
