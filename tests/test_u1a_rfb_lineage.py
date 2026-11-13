@@ -262,7 +262,7 @@ def test_the_statement_budget_stops_before_a_middle_edge_is_reported(tmp_path, m
         assert result.queries == 3
 
 
-def test_the_event_budget_limits_how_many_middle_edges_are_read(tmp_path, monkeypatch):
+def test_the_event_budget_is_enforced_before_any_decision(tmp_path, monkeypatch):
     import core.delivery_lineage as module
 
     with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
@@ -279,11 +279,11 @@ def test_the_event_budget_limits_how_many_middle_edges_are_read(tmp_path, monkey
             monkeypatch.setattr(module, "MAX_EVENTS", 1)
             result = resolve_successor_ex(conn, row(conn, anchor))
         print("RFB_EVENT_BUDGET", result.reason, result.successor, result.events)
-        # Only the newest event is read, and it is unusable, so the refusal
-        # proves the cap was applied instead of silently reading everything.
-        assert result.reason == "event_target_unusable", result
-        assert result.events == 1, result
-
+        # Two events exist but the cap allows one: deciding on the newest page
+        # alone could drop the usable handover, so this is a budget result.
+        assert result.reason == "budget_exhausted", result
+        assert "event_cap" in result.diagnostics, result
+        assert result.successor is None
 
 def test_the_node_budget_bounds_a_long_supersede_history(tmp_path, monkeypatch):
     import core.delivery_lineage as module
@@ -335,3 +335,71 @@ def test_a_chain_without_events_stays_bounded(history, tmp_path):
         else:
             assert result.reason == "budget_exhausted", result
             assert "window_full" in result.diagnostics
+
+
+def test_more_handovers_than_the_event_budget_are_reported(tmp_path):
+    """A batched read that hits MAX_EVENTS is a budget result, not "none".
+
+    The decisive handover is the oldest event and belongs to the oldest
+    superseded node, so a caller that only saw the newest page would refuse a
+    legal chain.  Reporting event_cap keeps that failure visible.
+    """
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, anchor, completed = h.queued_repair(repo, tmp_path)
+        artifact = artifact_id_of(repo, completed)
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.row_factory = sqlite3.Row
+            retire(conn, anchor)
+            nodes = [
+                middle(conn, anchor, f"{index + 10:032x}", generation=index + 2)
+                for index in range(40)
+            ]
+            handover_event(conn, job, nodes[0], artifact)
+            for index in range(70):
+                handover_event(conn, job, nodes[1 + index % 39], "f" * 32)
+            conn.commit()
+            result = resolve_successor_ex(conn, row(conn, anchor))
+        print(
+            "RFB_EVENT_CAP",
+            result.reason,
+            result.successor,
+            result.queries,
+            result.nodes,
+            result.events,
+        )
+        assert result.successor is None
+        assert result.reason == "budget_exhausted", result
+        assert "event_cap" in result.diagnostics, result
+        assert result.queries <= MAX_LINEAGE_QUERIES
+        assert result.nodes <= MAX_SUPERSEDE_NODES
+
+
+def test_handovers_below_the_event_budget_still_resolve(tmp_path):
+    """A batch that fits the cap keeps resolving normally."""
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, anchor, completed = h.queued_repair(repo, tmp_path)
+        artifact = artifact_id_of(repo, completed)
+        with sqlite3.connect(repo.database_path) as conn:
+            conn.row_factory = sqlite3.Row
+            retire(conn, anchor)
+            nodes = [
+                middle(conn, anchor, f"{index + 10:032x}", generation=index + 2)
+                for index in range(20)
+            ]
+            for index in range(19):
+                handover_event(conn, job, nodes[index], "f" * 32)
+            handover_event(conn, job, nodes[-1], artifact)
+            conn.commit()
+            result = resolve_successor_ex(conn, row(conn, anchor))
+        print(
+            "RFB_EVENT_UNDER_CAP",
+            result.reason,
+            result.successor,
+            result.queries,
+            result.events,
+        )
+        assert result.reason == "supersede_chain", result
+        assert result.successor is not None
+        assert result.successor.delivery_id == completed
+        assert result.queries <= MAX_LINEAGE_QUERIES
+        assert result.events == 20, result

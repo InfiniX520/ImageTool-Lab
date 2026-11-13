@@ -134,6 +134,15 @@ class _BudgetExceeded(Exception):
     """One resolution ran out of its statement budget."""
 
 
+class _EventCapExceeded(Exception):
+    """More handover events exist than one batched read may examine.
+
+    This is a budget result, not an absent record: the oldest nodes of the set
+    may still hold the decisive handover, so the caller must refuse with
+    budget_exhausted instead of reporting "no successor".
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Successor:
     """The delivery that now owns the page, and the artifact it owns."""
@@ -216,6 +225,9 @@ def resolve_successor_ex(conn: Any, delivery: Any, *, hops: int = 0) -> LineageR
     probe = _Probe(conn)
     try:
         return _resolve(probe, page)
+    except _EventCapExceeded:
+        probe.diagnostics.append("event_cap")
+        return probe.result(None, "budget_exhausted")
     except _BudgetExceeded:
         probe.diagnostics.append("statement_budget")
         return probe.result(None, "budget_exhausted")
@@ -329,6 +341,11 @@ class _Probe:
         EVENT_LIMIT each) and whether any matching payload could not be
         parsed.  A payload that mentions one of our ids but is corrupt is a
         data fault, not an absent record.
+
+        A batch that has more rows than MAX_EVENTS sets event_cap_hit: the
+        caller must report a budget result instead of deciding on the newest
+        page alone, because an older node's decisive handover may have been
+        cut off (the same "legal chain refused" harm as a missed edge).
         """
         ids = [
             value
@@ -338,12 +355,18 @@ class _Probe:
         if not ids:
             return {}, False
         matches = " OR ".join("safe_payload LIKE ?" for _ in ids)
+        # One row beyond the cap proves that older handovers exist, so a batch
+        # of exactly MAX_EVENTS rows is not reported as exhausted.
         parameters = (
             _EVENT_KIND,
             *(f'%"delivery_id":"{value}"%' for value in ids),
-            MAX_EVENTS,
+            MAX_EVENTS + 1,
         )
         rows = self.execute(_EVENT_SQL.format(matches=matches), parameters)
+        if len(rows) > MAX_EVENTS:
+            # The batch is longer than the budget: older nodes may still hold
+            # the decisive handover, so this is a budget result, not "none".
+            raise _EventCapExceeded()
         allowed = set(ids)
         grouped: dict[str, list[dict[str, Any]]] = {}
         corrupt = False
