@@ -23,7 +23,7 @@
 
 调用侧（`accept_source_page`）：`RetryPreflight` 在事务外重跑预检，最多 3 次且总耗时 ≤ 2 s；耗尽抛 `PreflightUnavailable`。重试不得推进 cursor、不得重复预算、不得第二次下载。
 
-同批 receipt 重放（UA-09）：同 `batch/source/pass/entity/page_identity` 且 `content_digest` 相同 → 直接返回已存 `delivery_ids`，不哈希；写者仍权威复核 digest，不同则 `CursorConflict`。
+同批 receipt 重放（UA-09）：同 `batch/source/pass/entity/page_identity` 且 `content_digest` 相同 → 直接返回已存 `delivery_ids`，不哈希；写者仍权威复核 digest，不同则 `CursorConflict`。重放是幂等回执，**不表示当前文件健康**：收纳据里没有 mtime/文件身份，accept 不做身份猜测；文件在重放之间被改动，由 `recover_verification_page`（或后续核验入口）实际观察，该入口必须给出 `held`/`reused`，不得静默维持 completed。
 
 ## 2. 全局意图作用域（C2 / UA-02、UA-10、UA-11）
 
