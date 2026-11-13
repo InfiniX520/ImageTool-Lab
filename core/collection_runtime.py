@@ -14,6 +14,7 @@ from concurrent.futures import Future
 
 from core.follow_collection import FollowCollection
 from core.library_queries import LibraryQueries
+from core.library_repository import CorruptDataError
 from core.query_collection import QueryCollection
 
 
@@ -228,6 +229,11 @@ class CollectionRuntime:
                         self._reports[batch_id]=report
                         while len(self._reports)>32:self._reports.popitem(last=False)
                     self._log(report.reason_code,batch_id=batch_id)
+                except CorruptDataError:
+                    with self._guard:self._source_error='intent_unreadable'
+                    self._log('intent_unreadable',level='error',batch_id=batch_id)
+                    try:self.repository.request_block(batch_id,'intent_unreadable')
+                    except Exception:pass
                 except Exception:
                     with self._guard:self._source_error='source_runner_failed'
                     self._log('source_runner_failed',level='error',batch_id=batch_id)

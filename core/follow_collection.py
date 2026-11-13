@@ -12,7 +12,13 @@ from dataclasses import asdict, dataclass, replace
 
 from core.candidate_filter import SourceResponseError, make_candidate, merge_details, needs_details
 from core.follow_contracts import ArtworkPage, FollowingPage
-from core.library_repository import BudgetExceeded, InvalidStateError, LibraryError, SourceCooling
+from core.library_repository import (
+    BudgetExceeded,
+    CorruptDataError,
+    InvalidStateError,
+    LibraryError,
+    SourceCooling,
+)
 from core.task_contracts import ContractError, SourcePage, canonical_json
 
 
@@ -22,6 +28,17 @@ class _Stopped(Exception):
 
 class _Budget(Exception):
     def __init__(self,code):
+        self.code=code
+
+
+class _WaitTimeout(Exception):
+    """The coordinator did not answer in time; the work is not cancelled.
+
+    A timeout is not permission to re-post the same page: the caller must
+    query the batch/command state and report the uncertainty.
+    """
+
+    def __init__(self, code='source_wait_timeout'):
         self.code=code
 
 
@@ -112,8 +129,13 @@ class FollowCollection:
 
     def _accept(self,page):
         self._check()
+        future=self.coordinator.accept_page(self.batch_id,page)
         try:
-            return self.coordinator.accept_page(self.batch_id,page).result(20)
+            return future.result(20)
+        except TimeoutError:
+            # Never re-post a page whose outcome is unknown; the source run
+            # stops and reports the wait, the coordinator keeps the command.
+            raise _WaitTimeout() from None
         except BudgetExceeded:
             raise _Budget('work_budget') from None
 
@@ -168,6 +190,12 @@ class FollowCollection:
             self._carry_unresolved()
             self._finish(complete,'source_exhausted' if complete else 'coverage_unconfirmed')
             return self._report('source_exhausted' if complete else 'coverage_unconfirmed',complete)
+        except _WaitTimeout as exc:
+            self.repository.request_block(batch_id,exc.code)
+            return self._report(exc.code,False)
+        except CorruptDataError:
+            self.repository.request_block(batch_id,'intent_unreadable')
+            raise
         except _Budget as exc:
             self._finish(False,exc.code)
             return self._report(exc.code,False)
