@@ -345,23 +345,23 @@
     },
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
-      "updated_date": "2026-11-13",
-      "phase": "RF fix re-audited at 3839c90; RFA-01..07 open; not deployed",
-      "status": "audit_completed_findings_open_not_production_ready",
+      "updated_date": "2026-11-14",
+      "phase": "RFA fix merged at 48a6968; RFA-01..07 closed by behaviour; not deployed",
+      "status": "fix_completed_pending_user_acceptance_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "S0 freeze progress/evidence/lineage contracts; S1 resumable observation; S2 root-aware cancellation and cleanup/CAS; S3 authoritative bounded lineage; S4 integrated audit before W5/production gates.",
+      "next_step": "W5 wiring and the registered gaps (finish_source final-result query, intent projection/index, carry long transaction, claim statement count, real migration/backup/external volume) before any production gate.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-RF-AUDIT-20261113-01",
-      "foundation": "docs/audits/2026-11-13-u1a-rf-recheck/DEVELOPMENT_GUIDE.md",
-      "evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
-      "previous_completed_batch": "JPGPNG-U1A-RF-FIX-20261113-01",
-      "unfinished_draft": "Old RF/UA regression cases pass; seven newly verified progress/cleanup/recovery issues remain.",
-      "latest_repair_evidence": "docs/maintenance/2026-11-13_jpgpng_u1a_rf_fix.md",
+      "latest_batch": "JPGPNG-U1A-RFA-FIX-20261114-01",
+      "foundation": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V3.md",
+      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md",
+      "previous_completed_batch": "JPGPNG-U1A-RF-AUDIT-20261113-01",
+      "unfinished_draft": "RFA-01..07 closed; the read-only audit's P2-1/P2-2/P3-1/P3-2 also fixed; P3-3..P3-5 recorded as known boundaries.",
+      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md",
       "latest_overview": "docs/audits/2026-11-13-u1a-rf-recheck/README.md",
       "latest_evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
       "audited_commit": "3839c90c3370673be6e0ea01096cbcc53a13a818",
-      "fixed_commit": "b07c2ed",
+      "fixed_commit": "48a6968",
       "runtime_checkout_note": "Daily JpgPng checkout remains 5465e0c; the fix branch is not deployed."
     },
     "archiving_design": {
@@ -872,6 +872,77 @@
       "business_data_changed": false,
       "product_ready": false,
       "next_step": "S0 freeze progress/evidence/lineage contracts; S1 resumable observation; S2 root-aware cancellation and cleanup/CAS; S3 authoritative bounded lineage; S4 integrated audit before W5/production gates."
+    },
+    "u1a_rfa_fix": {
+      "id": "JPGPNG-U1A-RFA-FIX-20261114-01",
+      "date": "2026-11-14",
+      "status": "fix_completed_pending_user_acceptance_not_production_ready",
+      "base_audit": "26afa48",
+      "audited_commit": "3839c90c3370673be6e0ea01096cbcc53a13a818",
+      "product_commit_before_fix": "b07c2ed",
+      "fixed_commit": "48a6968",
+      "branch": "fix/a1-u1a-rfa-20261114",
+      "contract": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V3.md",
+      "record": "docs/maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md",
+      "closed": {
+        "P1": 2,
+        "P2": 5,
+        "total": 7,
+        "audit_followups_fixed": ["P2-1 cleanup retry reachable", "P2-2 negative observation window", "P3-1 carry uses the shared resolver", "P3-2 refused cancel is classified"],
+        "recorded_boundaries": ["P3-3 writer-side millisecond TOCTOU", "P3-4 root_state only checks is_dir", "P3-5 progress read caps and labels"]
+      },
+      "audit_probes": {
+        "tests": 12,
+        "passed": 12,
+        "pre_fix": "10 failed / 2 passed"
+      },
+      "independent_acceptance": {
+        "tests": 25,
+        "passed": 25
+      },
+      "lane_tests": {
+        "observation": 24,
+        "delivery": 18,
+        "lineage": 26,
+        "primitives": 5,
+        "total": 73
+      },
+      "non_tk": {
+        "tests": 1831,
+        "passed": 1827,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 4
+      },
+      "tk": {
+        "tests": 9,
+        "passed": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "note": "per-test isolation; repeated Tk interpreter creation in one process is environment-flaky and retained in the record"
+      },
+      "previous_regressions": {
+        "RF": 15,
+        "UA": 14,
+        "result": "all passed in current full suite"
+      },
+      "measure": {
+        "lineage_statements_32": "82901 -> 2",
+        "lineage_repeat_scans_16": "2517 -> 1",
+        "cleanup_candidates_after_sweep": "160 -> 0",
+        "page_budget_33": "0 progress -> one acceptance commits",
+        "accept_3x10": 311,
+        "claim_3x10": 61,
+        "accept_2000": 18025,
+        "claim_2000": 8021
+      },
+      "schema_changed": false,
+      "dependencies_added": false,
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "deployed": false,
+      "next_step": "W5 wiring and registered gaps; real migration/backup/external-volume rehearsal remains a separate gate."
     }
   }
 }
