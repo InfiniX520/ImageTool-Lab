@@ -1,4 +1,4 @@
-"""Schema-3 archive repository on the existing single-writer transport.
+"""Archive schema repository on the existing single-writer transport.
 
 This class is deliberately opt-in for already migrated temporary copies.  It
 keeps the production LibraryRepository v1 guard and _enqueue transport unchanged,
@@ -56,7 +56,8 @@ class ArchiveLibraryRepository(LibraryRepository):
     def _inspect_existing(self) -> bool:
         if not self._path.exists() or self._path.stat().st_size == 0:
             raise SchemaVersionError(
-                "Archive repository requires an existing migrated schema-3 copy"
+                "Archive repository requires an existing migrated archive copy "
+                "(current schema %s)" % ARCHIVE_SCHEMA_VERSION
             )
         try:
             conn = self._readonly_connection()

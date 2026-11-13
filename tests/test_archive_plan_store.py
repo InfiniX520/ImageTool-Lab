@@ -290,14 +290,15 @@ def test_schema_and_version_gates_reject_wrong_connections(tmp_path, migrated_co
         with pytest.raises(ArchivePlanStoreError, match="explicit sqlite3"):
             load_archive_plan(bad, "batch-synthetic")
     assert not (tmp_path / "never-open.sqlite3").exists()
-    conn.execute("UPDATE schema_meta SET value='5' WHERE key='schema_version'")
+    # "6" is a future version now; the current one is 5.
+    conn.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
     conn.commit()
-    with pytest.raises(ArchivePlanStoreError, match="schema 3|schema version"):
+    with pytest.raises(ArchivePlanStoreError, match="schema 5|schema version"):
         save_plan(conn, inventory, capacity)
-    with pytest.raises(ArchivePlanStoreError, match="schema 3|schema version"):
+    with pytest.raises(ArchivePlanStoreError, match="schema 5|schema version"):
         load_archive_plan(conn, "batch-synthetic")
     assert not conn.in_transaction
-    conn.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
+    conn.execute("UPDATE schema_meta SET value='5' WHERE key='schema_version'")
     conn.commit()
 
     save_plan(conn, inventory, capacity)
