@@ -379,7 +379,7 @@ class FollowCollection:
         after=''
         while True:
             self._check()
-            result=self.repository.carry_unresolved_items(self.batch_id,after=after,limit=100)
+            result=self.repository.carry_unresolved_items(self.batch_id,after=after,limit=100,enforce_health=True)
             if not result['count']:
                 return
             after=result['after']

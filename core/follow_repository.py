@@ -140,11 +140,13 @@ class FollowRepositoryMixin:
                 'GROUP BY bi.artist_id ORDER BY bi.artist_id LIMIT ?', (job_id,after,limit)).fetchall()
         return tuple(dict(row) for row in rows)
 
-    def carry_unresolved_items(self,batch_id,*,after='',limit=100):
+    def carry_unresolved_items(self,batch_id,*,after='',limit=100,enforce_health=True):
         _lib()._validate_identifier(batch_id,'batch id')
         if not isinstance(after,str) or (after and not after.isdecimal()) or type(limit) is not int or not 1<=limit<=200:
             raise _lib().LibraryError('Invalid unresolved item page')
-        return self._enqueue('carry_unresolved_items',{'batch_id':batch_id,'after':after,'limit':limit})
+        if type(enforce_health) is not bool:
+            raise _lib().LibraryError('Invalid carry health flag')
+        return self._enqueue('carry_unresolved_items',{'batch_id':batch_id,'after':after,'limit':limit,'enforce_health':enforce_health})
 
     def _carry_unresolved_items(self,conn,payload):
         lib=_lib()
@@ -170,7 +172,10 @@ class FollowRepositoryMixin:
                     'required_pages_json,result_state,bookmarks,ai_flag,provenance_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (batch['batch_id'],item['illust_id'],item['artist_id'],item['artist_name'],item['title'],item['page_count'],item['decision'],
                      canonical_json(reasons),item['required_pages_json'],item['result_state'],item['bookmarks'],item['ai_flag'],canonical_json(provenance),now,now))
-                self._copy_batch_item_page_links(conn,item['batch_id'],batch['batch_id'],item['illust_id'])
+                self._copy_batch_item_page_links(
+                    conn,item['batch_id'],batch['batch_id'],item['illust_id'],
+                    enforce_completed_health=bool(payload.get('enforce_health')),
+                )
                 self._refresh_batch_item_result(conn,batch['batch_id'],item['illust_id'],now)
             if rows:
                 self._insert_event(conn,job_id=job['job_id'],batch_id=batch['batch_id'],kind='unresolved_items_carried',
@@ -414,21 +419,46 @@ class FollowRepositoryMixin:
             if (candidate.illust_id, page.page_index, page.output_ref.target_key) in excluded_pages:
                 continue
             reusable = False
+            observed_state = None
             for record in health_by_artifact.values():
                 expectation = getattr(record, 'expectation', None)
                 state = getattr(record, 'state', None)
                 if (expectation is not None
-                        and getattr(state, 'value', state) == 'hash_match'
                         and expectation.illust_id == candidate.illust_id
                         and expectation.page_index == page.page_index
                         and expectation.output_key == page.output_ref.target_key):
-                    row = conn.execute(
-                        'SELECT * FROM artifacts WHERE artifact_id = ?',
-                        (expectation.artifact_id,),
-                    ).fetchone()
-                    if row is not None and expectation.matches_row(row):
-                        reusable = True
-                        break
-            if not reusable:
+                    observed_state = getattr(state, 'value', state)
+                    if observed_state == 'hash_match':
+                        row = conn.execute(
+                            'SELECT * FROM artifacts WHERE artifact_id = ?',
+                            (expectation.artifact_id,),
+                        ).fetchone()
+                        if row is None:
+                            observed_state = None
+                        elif expectation.matches_row(row):
+                            reusable = True
+                            break
+            if reusable:
+                continue
+            if observed_state == 'missing':
+                # Only a verified missing page reserves a repair download.
+                return True
+            if observed_state is not None:
+                # Changed/unreadable/root-unavailable/unknown pages need a
+                # decision, not an automatic new-work budget slot.
+                continue
+            # No current observation: an existing candidate is a review item,
+            # not a fresh download; otherwise this is a new page.
+            candidates = self._find_reusable_artifact_candidates(
+                conn,
+                job_id='',
+                illust_id=candidate.illust_id,
+                page_index=page.page_index,
+                output_key=page.output_ref.target_key,
+                original=request.quality.original,
+                validation_policy_version=request.quality.validation_policy_version,
+                limit=1,
+            )
+            if not candidates:
                 return True
         return False

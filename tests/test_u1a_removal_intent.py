@@ -131,6 +131,78 @@ def test_exclusion_suppresses_repair_and_revocation_allows_it_again(tmp_path):
         assert repo.get_delivery(first_delivery) == delivery_row
 
 
+def test_exclusion_after_accept_cancels_pending_repair(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, first_delivery = first_task(repo, tmp_path)
+        artifact = repo.get_artifact(first_delivery)
+        target(tmp_path).unlink()
+        job = start(repo, "late-exclude")
+        (pending,) = repo.accept_source_page(job["batch_id"], page("page-late"))
+        assert repo.batch_results(job["batch_id"])["pages"]["pending"] == 1
+        repo.record_removal_intent(
+            job["batch_id"], "123", 0, OUTPUT,
+            intent="excluded", command_id="intent-late",
+        )
+        counts = repo.batch_results(job["batch_id"])["pages"]
+        assert counts["pending"] == 0
+        assert counts["cancelled"] == 1
+        assert repo.get_delivery(pending)["state"] == "cancelled"
+        assert repo.get_delivery(pending)["error_code"] == "intent_excluded"
+        assert repo.list_dispatchable(job["job_id"]) == ()
+        assert not target(tmp_path).exists()
+        assert repo.get_artifact(first_delivery) == artifact
+
+
+def test_revocation_inside_the_same_job_reopens_the_page(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, first_delivery = first_task(repo, tmp_path)
+        artifact = repo.get_artifact(first_delivery)
+        target(tmp_path).unlink()
+        job = start(repo, "same-job-revoke")
+        repo.record_removal_intent(
+            job["batch_id"], "123", 0, OUTPUT,
+            intent="excluded", command_id="intent-same-exclude",
+        )
+        (cancelled,) = repo.accept_source_page(job["batch_id"], page("page-excluded"))
+        assert repo.get_delivery(cancelled)["state"] == "cancelled"
+        repo.request_stop(job["job_id"], "stop-excluded")
+        assert repo.settle_stop(job["batch_id"]) is True
+        resumed = repo.resume(job["job_id"], "resume-same")
+        batch = repo.activate_next()
+        assert batch is not None and batch["batch_id"] == resumed["batch_id"]
+        repo.record_removal_intent(
+            batch["batch_id"], "123", 0, OUTPUT,
+            intent="none", command_id="intent-same-revoke",
+        )
+        (repair,) = repo.accept_source_page(
+            batch["batch_id"], page("page-reopened", before='"cursor-1"', after='"cursor-2"')
+        )
+        assert repair != cancelled
+        counts = repo.batch_results(batch["batch_id"])["pages"]
+        assert counts["pending"] == 1
+        assert counts["cancelled"] == 0
+        assert repo.get_delivery(repair)["state"] == "pending"
+        assert run(repo, {**job, "batch_id": batch["batch_id"]}, repair,
+                   executor(repo, tmp_path, Transport(Response()))).state == "completed"
+        assert target(tmp_path).read_bytes() == PNG_BYTES
+        assert repo.get_artifact(first_delivery) == artifact
+
+
+def test_intent_can_be_recorded_after_settlement_and_replayed(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job, _ = first_task(repo, tmp_path)
+        assert repo.get_batch(job["batch_id"])["phase"] == "completed"
+        result = repo.record_removal_intent(
+            job["batch_id"], "123", 0, OUTPUT,
+            intent="excluded", command_id="intent-after-settle",
+        )
+        assert result["intent"] == "excluded"
+        assert repo.record_removal_intent(
+            job["batch_id"], "123", 0, OUTPUT,
+            intent="excluded", command_id="intent-after-settle",
+        ) == result
+
+
 def test_offloaded_intent_is_not_falsely_advertised(tmp_path):
     with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
         job = start(repo, "offloaded")

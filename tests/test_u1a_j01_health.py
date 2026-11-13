@@ -559,11 +559,10 @@ def test_removal_intent_decision_never_offers_an_automatic_redownload():
 
 def test_w_phase_local_boundaries_are_not_wired_into_reuse_yet():
     pytest.skip(
-        "W 阶段用例（本轮只登记，不强行通过）：LocalObserver 已能判定根不可用、"
-        "重解析点/符号链接、读取中变化（tests/test_local_observation.py），"
-        "但交付复用路径尚未消费这些结果。接线后本用例至少要有："
-        "①根目录/外置卷不可用时该根标 root_unavailable，不把整库当成丢失，也不自动重下；"
-        "②路径经链接/重解析点指向根外时拒绝复用，不跟随链接读取；"
-        "③读取期间文件变化时标 changed_during_check，保留待核验且不得计入完成；"
-        "④快速核验不得升级为严格复用；⑤同一批次同一 artifact 只核验一次，跨会话不复用旧缓存。"
+        "W 阶段剩余边界（本轮只登记，不强行通过）：根不可用/重解析点/读取中变化"
+        "已能进入 needs_verification（见 test_u1a_reuse_gate 与 artifact_health 契约），"
+        "但仍缺：①根不可用/外置卷的 UI 与恢复动作，不把整库当成丢失；"
+        "②链接/重解析点指向根外时的端到端拒绝断言；"
+        "③同一批次同一 artifact 只观察一次的缓存；④跨会话不复用旧缓存；"
+        "⑤快速核验不得升级为严格复用的端到端用例。"
     )

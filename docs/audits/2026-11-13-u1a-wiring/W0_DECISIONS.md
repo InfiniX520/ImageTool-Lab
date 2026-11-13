@@ -83,7 +83,7 @@ writer 线程：
 
 ## 7. 影响面（静态清点）
 
-- `_find_reusable_artifact`：直接调用者 `library_repository`、`follow_repository`；候选查询重构会保留签名兼容。
+- `_find_reusable_artifact`：直接调用者只剩 `library_repository`（写者）；`follow_repository` 改用同一批 health 记录，不再走无健康查询。
 - `_candidate_requires_write`：仅 `library_repository._accept_source_page` 调用。
 - `accept_source_page`：公开 API 被 coordinator、follow collection、测试调用；新增可选 health payload 不改变返回类型。
 - `PageDeliveryExecutor`：生产 desktop/GUI 与测试均经过；新增根注册是构造期副作用，不触网、不写文件。
@@ -92,6 +92,9 @@ writer 线程：
 ## 8. 本轮验收
 
 - W0 独立红测试 7 红、2 skip 保持为基线。
-- W1/W2/W3 后 7 红转绿，8 个守卫保持绿；新增同 job、follow 预算、根不可用、读取中变化、预算耗尽测试。
-- 全量回归不得新增失败；已知 Tk/Tcl 环境错误单独记录，不冒充通过。
+- W1/W2/W3 后 7 红转绿，8 个守卫保持绿；新增同 job resume、follow 预算、无根绑定、过期预检、I/O 线程边界测试。
+- W4 的 EXCLUDED/撤销已由独立用例覆盖；接受后取消 pending、同 job 撤销、结算后记录/重放也已覆盖；OFFLOADED 明确拒绝。
+- 独立复核的 P1-1（resume/claim 回灌）、P1-2（needs_verification 输出槽）、P1-3（已规划 pending）、P1-4（同 job 撤销）已修复并补测；P2-7/P3-10/P3-12 仍列残余。
+- 全量（不含 Tk）1,546 项、0 失败、0 错误、4 跳过；Tk 展示文件单独 4/4。
+- W6 的 2,000 文件、第二批缺失修复、进程退出后重开子集已在 `3b63f9c` 上通过合成证据；复核后恢复路径改动需再跑同规模。根不可用/链接/读取中变化/预算耗尽的**集成接线**仍只有契约或单元层覆盖，W5/W6 待补。
 - 不接真实图库/账号/网络；不执行上传、删除、释放。

@@ -37,19 +37,37 @@
 | --- | --- |
 | [W0 基线](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w0_baseline.xml) | 17 项、7 失败、2 跳过、0 错误（预期红） |
 | [W1 健康契约](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w1_contract.xml) | 20 项全过 |
-| [W2/W3 复用门](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w2_gate_tests.xml) | 6 项全过 |
+| [W2/W3 复用门](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w2_gate_tests.xml) | 6 项基线全过；复核后扩到 10 项 |
 | [J-01 独立文件](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w4_j01.xml) | 16 过、1 跳过（W 阶段边界） |
-| [W4 全量（不含 Tk）](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w4_full_no_tk.xml) | **1,539 项、0 失败、0 错误、4 跳过**，215.65 s |
+| [复核后全量（不含 Tk）](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w14_full_no_tk.xml) | **1,546 项、0 失败、0 错误、4 跳过**，225.90 s |
 | Tk 展示文件单独运行 | 4 项全过（当前环境；全量中 Tk/Tcl 初始化偶发环境错误，单独运行排除） |
 
 新增/激活的 U1-A 测试：
 
 - `tests/test_u1a_j01_health.py`：17 项，16 过、1 跳过；7 个原红全部转绿，8 个守卫保持绿。
 - `tests/test_u1a_artifact_health.py`：20 项，状态机、payload、过期、根 revision、快速策略不升级。
-- `tests/test_u1a_reuse_gate.py`：6 项，无根绑定 fail-closed、根绑定冲突、过期预检、I/O 不在 writer 线程、预算、同 job resume 修复。
-- `tests/test_u1a_removal_intent.py`：2 项，EXCLUDED 抑制/撤销、OFFLOADED 不虚假宣传。
+- `tests/test_u1a_reuse_gate.py`：10 项，无根绑定 fail-closed、根绑定冲突、过期/伪造策略、I/O 不在 writer 线程、缺失/变化预算、同 job resume、claim-only 回灌、旧 needs_verification 解除。
+- `tests/test_u1a_removal_intent.py`：5 项，EXCLUDED 抑制/撤销、接受后取消 pending、同 job 撤销、结算后记录/重放、OFFLOADED 不虚假宣传。
 
-测试调整说明：`tests/test_delivery_repository.py::test_all_pages_flag_is_not_page_byte_quality` 原先只写数据库记录、不写文件；J-01 后这不再是可复用状态。该用例改为写入真实 1,000 字节并绑定同一根，仍只验证 `all_pages` 不是页面字节属性，未放宽断言。
+测试调整说明：`tests/test_delivery_repository.py::test_all_pages_flag_is_not_page_byte_quality` 原先只写数据库记录、不写文件；J-01 后这不再是可复用状态。该用例改为写入真实 1,000 字节并绑定同一根，仍只验证 `all_pages` 不是页面字节属性，未放宽断言。另有两个旧断言随语义收紧更新：resume 重试完成后旧批 works 仍按 delivery join 重算；`needs_verification` 不再永久占用输出槽，新任务会把旧 hold 标为 `failed / superseded_by_new_task`。`test_query_collection` 的终态等待在 Windows 全量负载下由 8 s 放宽到 20 s（仍有界，且产品自身 coordinator 命令为 8 s）；这是测试稳定性调整，不改变产品超时。
+
+## 3.1 独立复核发现与修复
+
+独立代码复核与红队探针（只读，合成临时库）在 `3b63f9c` 上发现并复现：
+
+| 编号 | 问题 | 处理 |
+| --- | --- | --- |
+| P1-1 | resume/claim 复制旧批 `batch_item_pages` 时覆盖当次健康判定，缺失页回到 completed | 复制改为 `ON CONFLICT DO NOTHING`；claim 前对源作品 completed 页做 health 预检；无健康证据的 carried completed 页新建 `needs_verification`，不再复制 artifact |
+| P1-2 | changed 产生的 `needs_verification` 永久占用 `ux_deliveries_active_output`，后续任务 OutputConflict | 新任务对**其他 job 的 needs_verification** 置为 `failed / superseded_by_new_task` 后重试；pending/suspended/prepared 仍按输出冲突处理，不静默抢占 |
+| P1-3 | 先 accept 产生 pending 再记录 EXCLUDED，pending 仍在 dispatchable 并会重建文件 | 记录 EXCLUDED 时同批同 output 的 pending/suspended/retry_wait 转 `cancelled / intent_excluded` 并刷新页面 |
+| P1-4 | 同 job 撤销 EXCLUDED 后旧 cancelled delivery 被当作 existing 复用 | cancelled 不再走 existing 复用；撤销后新建 pending 代次并可修复 |
+| P2-5 | 结算后不能记录意图；同 command_id 重放抛 InvalidState | 意图命令不再要求 running batch；先查 command event，结算后记录/重放可用 |
+| P2-6 | 每页一次全表 `json_extract` 扫描 intent | 每个 SourcePage 只扫描一次并建最新映射 |
+| P2-8 | 写者信任 payload 的 quick/max_age | `_health_map` 只接受与 `_ARTIFACT_HEALTH_POLICY` 完全相等的 policy；过期/错根/错行仍丢弃 |
+| P3-9 | health 字节未计入 8 MiB admission | `size_payload` 纳入 health |
+| P3-11 | `_confirm_delivery` 更新所有批次的页面链接 | 只更新 current batch 的 artifact link；旧批仅刷新 work 状态 |
+
+仍未关闭：P2-7（预检仍在 accept 同步路径，源泵 20 s Future 超时/大文件预算）、P3-10（root_revision 恒为 1，跨会话 external 重映射）、P3-12（legacy `record_manager` 仍按记录跳过，未纳入 v2 健康门）。这些在 W5/W6 明确列为残余，不声称全产品 J-01 已关闭。
 
 ## 4. 边界与残余
 
@@ -59,7 +77,10 @@
 - 快速策略只保留契约，未默认启用；完整 SHA-256 是当前唯一复用策略。
 - `root_unavailable` 目前保守转 `needs_verification`，尚无单独观察投影/UI 原因；W5 待补。
 - `OFFLOADED` 意图已拒绝写入，避免“记录了但没接线”的虚假能力；待 W5 设计转存核验后再开放。
-- 用户意图事件当前挂在 running batch 上；批次/任务删除会级联事件，生产长期意图存储仍需在 W5/W6 评审。
+- 用户意图已可在结算后记录；但事件外键挂在 job/batch 上，删除任务会级联删除意图，长期意图存储仍需 W5 设计。
+- P2-7：预检仍在 accept 同步路径；大文件/多候选可能超过源泵 20 s Future 超时，W5/W6 需要独立执行器或分页预算。
+- P3-10：`root_revision` 目前恒为 1；跨会话 external 根重映射尚未有持久版本。
+- P3-12：legacy `record_manager` 仍按“记录即跳过”，不属于 v2 健康门；本批只关闭 v2 三条复用旁路。
 - 未做真实迁移、备份演练或旧库升级；本批不新增数据库 schema 对象。
 
 ## 5. W6 规模与进程退出证据
@@ -73,11 +94,11 @@
 | 第三批 2,000 页全在 | 预检/接受 17.909 s，`existing=2000, pending=0, needs_verification=0`，无可派发，批次 `completed` |
 | 进程退出 | 子进程接受 2,000 页后 `os._exit(99)`；重开 `existing=2000`，artifact 数不变（2,001），旧 artifact/delivery 逐字段不变，批次可正常结算 |
 
-证据：[scale_verify_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/scale_verify_result.json)、[crash_probe_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/crash_probe_result.json)。这是 W6 的规模/退出子集，不等于完整 W5/W6 验收；未做真实迁移、备份演练、根不可用/链接/快速策略的 UI 接线。
+证据：[scale_verify_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/scale_verify_result.json)、[crash_probe_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/crash_probe_result.json)。上述规模数字在 `3b63f9c` 核心树上测得；复核后的 claim/carry 健康门与 intent 单扫描改了恢复路径，最终提交需再跑一次同规模（未在本批完成）。这是 W6 的规模/退出子集，不等于完整 W5/W6 验收；未做真实迁移、备份演练、根不可用/链接/快速策略的 UI 接线。
 
 ## 6. 复核入口
 
 - [W0 决定](../audits/2026-11-13-u1a-wiring/W0_DECISIONS.md)
 - [评审总览](../audits/2026-11-13-u1a-wiring/README.md)
 - [开发指导](../audits/2026-11-13-u1a-wiring/DEVELOPMENT_GUIDE.md)
-- [全量 XML](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w4_full_no_tk.xml)
+- [全量 XML](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w14_full_no_tk.xml)

@@ -906,8 +906,9 @@ class DeliveryRepositoryMixin:
                 (delivery_id,),
             ).fetchall()
             conn.execute(
-                "UPDATE batch_item_pages SET artifact_id = ? WHERE delivery_id = ?",
-                (artifact_id, delivery_id),
+                "UPDATE batch_item_pages SET artifact_id = ? "
+                "WHERE delivery_id = ? AND batch_id = ?",
+                (artifact_id, delivery_id, current_batch_id),
             )
             for row in affected:
                 self._refresh_batch_item_result(
@@ -1218,19 +1219,25 @@ class DeliveryRepositoryMixin:
         *,
         delivery_id: str | None,
         artifact_id: str | None,
+        overwrite: bool = True,
     ) -> None:
         if delivery_id is None and artifact_id is None:
             raise _lib().LibraryError("Selected page needs a delivery or artifact")
+        conflict = (
+            "DO UPDATE SET "
+            "delivery_id = excluded.delivery_id, "
+            "artifact_id = excluded.artifact_id, "
+            "output_key = excluded.output_key, "
+            "quality_json = excluded.quality_json"
+            if overwrite
+            else "DO NOTHING"
+        )
         conn.execute(
             "INSERT INTO batch_item_pages("
             "batch_id, illust_id, page_index, delivery_id, artifact_id, "
             "output_key, quality_json"
             ") VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(batch_id, illust_id, page_index) DO UPDATE SET "
-            "delivery_id = excluded.delivery_id, "
-            "artifact_id = excluded.artifact_id, "
-            "output_key = excluded.output_key, "
-            "quality_json = excluded.quality_json",
+            "ON CONFLICT(batch_id, illust_id, page_index) " + conflict,
             (
                 batch_id,
                 illust_id,
@@ -1366,21 +1373,62 @@ class DeliveryRepositoryMixin:
         source_batch_id: str,
         target_batch_id: str,
         illust_id: str,
+        *,
+        health_by_artifact=None,
+        enforce_completed_health: bool = False,
     ) -> None:
+        """Copy links for a recovered work without reusing unverified bytes.
+
+        Existing target links are never overwritten: the accept path already
+        made a current health decision for this batch.  With enforcement on, a
+        completed source link is copied only when the frozen preflight says its
+        bytes still match; otherwise a fresh needs_verification delivery is
+        created instead of claiming completion.
+        """
         rows = conn.execute(
             "SELECT * FROM batch_item_pages WHERE batch_id = ? AND illust_id = ?",
             (source_batch_id, illust_id),
         ).fetchall()
         for row in rows:
+            target_exists = conn.execute(
+                "SELECT 1 FROM batch_item_pages WHERE batch_id = ? AND illust_id = ? "
+                "AND page_index = ?",
+                (target_batch_id, illust_id, int(row["page_index"])),
+            ).fetchone()
+            if target_exists is not None:
+                continue
             artifact_id = row["artifact_id"]
             delivery_id = row["delivery_id"]
-            if artifact_id is None and delivery_id is not None:
+            artifact = None
+            if artifact_id is not None:
                 artifact = conn.execute(
-                    "SELECT artifact_id FROM artifacts WHERE delivery_id = ?",
-                    (delivery_id,),
+                    "SELECT * FROM artifacts WHERE artifact_id = ?",
+                    (str(artifact_id),),
+                ).fetchone()
+            elif delivery_id is not None:
+                artifact = conn.execute(
+                    "SELECT * FROM artifacts WHERE delivery_id = ?",
+                    (str(delivery_id),),
                 ).fetchone()
                 if artifact is not None:
                     artifact_id = str(artifact["artifact_id"])
+            if artifact is not None and enforce_completed_health:
+                gate = getattr(self, "_health_allows_reuse", None)
+                health = None if health_by_artifact is None else health_by_artifact.get(
+                    str(artifact["artifact_id"])
+                )
+                if not callable(gate) or not gate(health, artifact):
+                    source_delivery = str(artifact["delivery_id"])
+                    self._create_carried_unverified_delivery(
+                        conn,
+                        target_batch_id,
+                        illust_id,
+                        int(row["page_index"]),
+                        str(row["output_key"]),
+                        str(row["quality_json"]),
+                        source_delivery,
+                    )
+                    continue
             self._link_batch_item_page(
                 conn,
                 target_batch_id,
@@ -1390,7 +1438,74 @@ class DeliveryRepositoryMixin:
                 str(row["quality_json"]),
                 delivery_id=None if delivery_id is None else str(delivery_id),
                 artifact_id=None if artifact_id is None else str(artifact_id),
+                overwrite=False,
             )
+
+    def _create_carried_unverified_delivery(
+        self,
+        conn: sqlite3.Connection,
+        target_batch_id: str,
+        illust_id: str,
+        page_index: int,
+        output_key: str,
+        quality_json: str,
+        source_delivery_id: str,
+    ) -> None:
+        lib = _lib()
+        batch = self._get_batch_row(conn, target_batch_id)
+        if batch is None:
+            raise lib.NotFoundError(f"Unknown batch: {target_batch_id}")
+        source = self._get_delivery_row(conn, source_delivery_id)
+        if source is None:
+            raise lib.CorruptDataError("Carried completed page has no source delivery")
+        job_id = str(batch["job_id"])
+        quality_key = str(source["quality_key"])
+        max_generation = conn.execute(
+            "SELECT COALESCE(MAX(generation), 0) AS generation FROM deliveries "
+            "WHERE job_id = ? AND illust_id = ? AND page_index = ? AND quality_key = ?",
+            (job_id, illust_id, int(page_index), quality_key),
+        ).fetchone()["generation"]
+        generation = int(max_generation) + 1
+        delivery_id = lib._new_id()
+        now = lib._utcnow()
+        conn.execute(
+            "INSERT INTO deliveries("
+            "delivery_id, job_id, origin_batch_id, current_batch_id, "
+            "completed_batch_id, illust_id, page_index, output_key, "
+            "output_ref_json, quality_json, quality_key, payload_json, "
+            "source_identity, state, attempts, retry_at, error_code, "
+            "generation, checkpoint_json, prepared_json, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "'needs_verification', 0, NULL, 'artifact_unverified_carry', ?, ?, NULL, ?, ?)",
+            (
+                delivery_id,
+                job_id,
+                target_batch_id,
+                target_batch_id,
+                illust_id,
+                int(page_index),
+                output_key,
+                str(source["output_ref_json"]),
+                quality_json,
+                quality_key,
+                str(source["payload_json"]),
+                None if source["source_identity"] is None else str(source["source_identity"]),
+                generation,
+                None if source["checkpoint_json"] is None else str(source["checkpoint_json"]),
+                now,
+                now,
+            ),
+        )
+        self._link_batch_item_page(
+            conn,
+            target_batch_id,
+            illust_id,
+            int(page_index),
+            output_key,
+            quality_json,
+            delivery_id=delivery_id,
+            artifact_id=None,
+        )
 
     def _refresh_batch_item_result(
         self,

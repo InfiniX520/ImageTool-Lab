@@ -105,13 +105,17 @@ class QueryRepositoryMixin:
             'page_json': page_json,
         })
 
-    def carry_query_unresolved_items(self, batch_id, *, after='', limit=100):
+    def carry_query_unresolved_items(self, batch_id, *, after='', limit=100,
+                                     enforce_health=True):
         lib = _lib()
         lib._validate_identifier(batch_id, 'batch id')
         if not isinstance(after, str) or (after and not after.isdecimal()) or type(limit) is not int or not 1 <= limit <= 200:
             raise lib.LibraryError('Invalid unresolved item page')
+        if type(enforce_health) is not bool:
+            raise lib.LibraryError('Invalid carry health flag')
         return self._enqueue('carry_query_unresolved_items', {
             'batch_id': batch_id, 'after': after, 'limit': limit,
+            'enforce_health': enforce_health,
         })
 
     def query_member_count(self, batch_id, logical_source_id):
@@ -406,7 +410,8 @@ class QueryRepositoryMixin:
                      now, now),
                 )
                 self._copy_batch_item_page_links(
-                    conn, item['batch_id'], batch['batch_id'], item['illust_id']
+                    conn, item['batch_id'], batch['batch_id'], item['illust_id'],
+                    enforce_completed_health=bool(payload.get('enforce_health')),
                 )
                 self._refresh_batch_item_result(
                     conn, batch['batch_id'], item['illust_id'], now

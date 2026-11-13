@@ -1240,15 +1240,18 @@ def test_active_output_reserved_by_needs_verification(tmp_path):
 
         second = repo.submit(_request("req-2"), "submit-req-2")
         assert repo.activate_next()["batch_id"] == second["batch_id"]
-        with pytest.raises(OutputConflict):
-            repo.accept_source_page(
-                second["batch_id"],
-                _source((_candidate("100"),), page_identity="page-2"),
-            )
-        assert repo.list_dispatchable(second["job_id"]) == ()
+        (second_id,) = repo.accept_source_page(
+            second["batch_id"],
+            _source((_candidate("100"),), page_identity="page-2"),
+        )
+        assert repo.get_delivery(second_id)["state"] == "pending"
+        old = repo.get_delivery(first_ids[0])
+        assert old["state"] == "failed"
+        assert old["error_code"] == "superseded_by_new_task"
+        assert len(repo.list_dispatchable(second["job_id"])) == 1
         snapshot = repo.snapshot(second["job_id"])
-        assert snapshot["counts"]["works"]["total"] == 0
-        assert snapshot["counts"]["pages"]["total"] == 0
+        assert snapshot["counts"]["works"]["total"] == 1
+        assert snapshot["counts"]["pages"]["total"] == 1
 
 
 def test_active_output_reserved_by_prepared_delivery(tmp_path):

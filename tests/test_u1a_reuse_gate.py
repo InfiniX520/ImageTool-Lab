@@ -5,16 +5,22 @@ network, account, production library or real gallery is touched.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from core.app_paths import AppPaths
+from core.artifact_health import (
+    ArtifactExpectation, ArtifactHealth, ArtifactHealthPolicy, HealthPolicyMode,
+)
 from core.library_paths import PathResolver
 from core.library_repository import LibraryError, LibraryRepository
+from core.preservation_policy import LocalState
 from core.task_contracts import (
     BatchBudget,
     CandidateDecision,
@@ -133,6 +139,34 @@ def test_reopened_repository_without_root_binding_fails_closed(tmp_path):
         assert reopened.get_delivery(accepted[0])["state"] == "needs_verification"
 
 
+def test_writer_rejects_a_forged_health_policy(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        repo.bind_path_resolver(PathResolver(AppPaths(tmp_path)))
+        path = PathRef(relative_path="downl_Pixiv/123_p0.png")
+        expectation = ArtifactExpectation(
+            artifact_id="a" * 32, delivery_id="d" * 32, job_id="j" * 32,
+            illust_id="123", page_index=0, output_key=path.target_key, path=path,
+            root_revision=1, size_bytes=len(PNG_BYTES),
+            sha256=hashlib.sha256(PNG_BYTES).hexdigest(), media_type="image/png",
+            quality_key="q" * 64,
+        )
+        forged = ArtifactHealth(
+            expectation=expectation,
+            policy=ArtifactHealthPolicy(mode=HealthPolicyMode.QUICK, max_age_seconds=86400),
+            state=LocalState.QUICK_MATCH, checked_at="2026-11-13T10:00:00+08:00",
+            reason="quick_metadata", observed_size=len(PNG_BYTES),
+        )
+        assert repo._health_map([forged.to_payload()]) == {}
+        valid = ArtifactHealth(
+            expectation=expectation, policy=ArtifactHealthPolicy(),
+            state=LocalState.HASH_MATCH,
+            checked_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            reason="full_sha256_match", observed_size=len(PNG_BYTES),
+            observed_sha256=expectation.sha256,
+        )
+        assert expectation.artifact_id in repo._health_map([valid.to_payload()])
+
+
 def test_binding_refuses_a_different_project_root(tmp_path):
     with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
         repo.bind_path_resolver(PathResolver(AppPaths(tmp_path / "one")))
@@ -194,6 +228,63 @@ def test_work_budget_uses_the_same_health_decision(tmp_path):
         assert len(accepted) == 1
         assert repo.batch_results(missing_job["batch_id"])["pages"]["pending"] == 1
 
+
+def test_claim_without_accept_does_not_copy_an_unverified_completed_page(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        job = submit(repo, request_id="claim-only-first")
+        ids = accept(repo, job["batch_id"], source((candidate(pages=(0, 1)),)))
+        transport = Transport(Response(), Response(status=404))
+        assert run(repo, job, ids[0], executor(repo, tmp_path, transport)).state == "completed"
+        assert run(repo, job, ids[1], executor(repo, tmp_path, transport)).state == "failed"
+        repo.finish_source(job["batch_id"], coverage_complete=True)
+        assert repo.settle_batch(job["batch_id"]) is True
+        artifact = repo.get_artifact(ids[0])
+        target(tmp_path).unlink()
+
+        resumed = repo.resume(job["job_id"], "resume-claim-only", retry_failed=True)
+        batch = repo.activate_next()
+        assert batch is not None and batch["batch_id"] == resumed["batch_id"]
+        (carried,) = repo.list_dispatchable(job["job_id"])
+        assert repo.claim_delivery(carried, resumed["batch_id"]) is not None
+        counts = repo.batch_results(resumed["batch_id"])["pages"]
+        assert counts["completed"] == 0
+        assert counts["existing"] == 0
+        assert counts["needs_verification"] == 1
+        assert counts["pending"] == 1
+        assert not target(tmp_path).exists()
+        assert repo.get_artifact(ids[0]) == artifact
+
+def test_new_task_supersedes_a_dormant_verification_hold(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        first_delivery(repo, tmp_path)
+        target(tmp_path).write_bytes(b"X" * len(PNG_BYTES))
+        second_job, (old_hold,) = second(repo, request_id="hold-one")
+        assert repo.get_delivery(old_hold)["state"] == "needs_verification"
+        repo.finish_source(second_job["batch_id"], coverage_complete=True)
+        assert repo.settle_batch(second_job["batch_id"]) is True
+        assert repo.get_batch(second_job["batch_id"])["phase"] == "partial"
+
+        third_job, (new_hold,) = second(repo, request_id="hold-two")
+        assert new_hold != old_hold
+        assert repo.get_delivery(new_hold)["state"] == "needs_verification"
+        old = repo.get_delivery(old_hold)
+        assert old["state"] == "failed"
+        assert old["error_code"] == "superseded_by_new_task"
+        assert repo.batch_results(third_job["batch_id"])["pages"]["needs_verification"] == 1
+
+def test_changed_page_needs_verification_without_consuming_work_budget(tmp_path):
+    with LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        first_delivery(repo, tmp_path)
+        target(tmp_path).write_bytes(b"X" * len(PNG_BYTES))
+        job, accepted = second(repo, max_works=1, request_id="second-changed")
+        assert counts_work(repo, job["batch_id"]) == 0
+        counts = repo.batch_results(job["batch_id"])["pages"]
+        assert counts["needs_verification"] == 1
+        assert counts["pending"] == 0
+        assert counts["existing"] == 0
+        assert len(accepted) == 1
+        assert repo.get_delivery(accepted[0])["state"] == "needs_verification"
+        assert repo.list_dispatchable(job["job_id"]) == ()
 
 def test_same_job_completed_delivery_is_not_reused_after_resume(tmp_path):
     """The same-job replay path must use health, not the completed receipt."""

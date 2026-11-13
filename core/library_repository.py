@@ -1192,12 +1192,19 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
             return super().record_source_cooldown(batch_id, seconds, reason_code=reason_code)
         return self.record_query_cooldown(batch_id, seconds, reason_code=reason_code)
 
-    def carry_unresolved_items(self, batch_id: str, *, after: str = "", limit: int = 100) -> Any:
+    def carry_unresolved_items(self, batch_id: str, *, after: str = "", limit: int = 100,
+                                enforce_health: bool = True) -> Any:
+        if type(enforce_health) is not bool:
+            raise LibraryError("enforce_health must be boolean")
         batch = self.get_batch(batch_id)
         request = self.get_request(str(batch["job_id"]))
         if request.query.source == "follow":
-            return super().carry_unresolved_items(batch_id, after=after, limit=limit)
-        return self.carry_query_unresolved_items(batch_id, after=after, limit=limit)
+            return super().carry_unresolved_items(
+                batch_id, after=after, limit=limit, enforce_health=enforce_health
+            )
+        return self.carry_query_unresolved_items(
+            batch_id, after=after, limit=limit, enforce_health=enforce_health
+        )
 
     def admit_source_artist(self, batch_id: str, artist_id: str) -> Any:
         batch = self.get_batch(batch_id)
@@ -1215,12 +1222,13 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         page_json = canonical_json(asdict(page))
         digest = _sha256_text(page_json)
         health = self._preflight_page_health(batch_id, page)
+        health_payload = [record.to_payload() for record in health]
         payload = {
             "batch_id": batch_id,
             "page": page,
             "page_json": page_json,
             "page_digest": digest,
-            "health": [record.to_payload() for record in health],
+            "health": health_payload,
         }
         return self._enqueue(
             "accept_source_page",
@@ -1229,6 +1237,7 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 "kind": "accept_source_page",
                 "batch_id": batch_id,
                 "page": asdict(page),
+                "health": health_payload,
             },
         )
 
@@ -1469,9 +1478,80 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
     def claim_delivery(self, delivery_id: str, batch_id: str) -> dict[str, Any] | None:
         delivery_id = _validate_identifier(delivery_id, "delivery id")
         batch_id = _validate_identifier(batch_id, "batch id")
-        return self._enqueue(
-            "claim_delivery", {"delivery_id": delivery_id, "batch_id": batch_id}
-        )
+        health = self._preflight_claim_health(delivery_id, batch_id)
+        payload: dict[str, Any] = {"delivery_id": delivery_id, "batch_id": batch_id}
+        if health is not None:
+            payload["health"] = [record.to_payload() for record in health]
+        return self._enqueue("claim_delivery", payload)
+
+    def _preflight_claim_health(
+        self, delivery_id: str, batch_id: str
+    ) -> tuple[ArtifactHealth, ...] | None:
+        """Observe completed pages of the work a recovered claim will copy.
+
+        The target batch may have no page links yet (resume followed by a
+        direct claim).  Without this preflight, copying an old artifact link
+        would bypass the health decision made by the accept path.
+        """
+        resolver = self._path_resolver_snapshot()
+        if resolver is None:
+            return None
+        records: dict[str, ArtifactHealth] = {}
+        try:
+            with contextlib_closing(self._readonly_connection()) as conn:
+                delivery = conn.execute(
+                    "SELECT * FROM deliveries WHERE delivery_id = ?", (delivery_id,)
+                ).fetchone()
+                if delivery is None:
+                    return ()
+                source_batch_id = str(delivery["origin_batch_id"])
+                illust_id = str(delivery["illust_id"])
+                already = conn.execute(
+                    "SELECT 1 FROM batch_item_pages WHERE batch_id = ? AND illust_id = ? "
+                    "LIMIT 1",
+                    (batch_id, illust_id),
+                ).fetchone()
+                if already is not None:
+                    # The target batch already made its own page decisions;
+                    # never overwrite them.  Missing pages still get fail-closed
+                    # handling when the claim copies links.
+                    return ()
+                rows = conn.execute(
+                    "SELECT * FROM batch_item_pages WHERE batch_id = ? AND illust_id = ?",
+                    (source_batch_id, illust_id),
+                ).fetchall()
+                for row in rows:
+                    artifact = None
+                    if row["artifact_id"] is not None:
+                        artifact = conn.execute(
+                            "SELECT a.*, d.quality_key AS delivery_quality_key "
+                            "FROM artifacts AS a JOIN deliveries AS d "
+                            "ON d.delivery_id = a.delivery_id WHERE a.artifact_id = ?",
+                            (str(row["artifact_id"]),),
+                        ).fetchone()
+                    elif row["delivery_id"] is not None:
+                        artifact = conn.execute(
+                            "SELECT a.*, d.quality_key AS delivery_quality_key "
+                            "FROM artifacts AS a JOIN deliveries AS d "
+                            "ON d.delivery_id = a.delivery_id WHERE a.delivery_id = ?",
+                            (str(row["delivery_id"]),),
+                        ).fetchone()
+                    if artifact is None:
+                        continue
+                    artifact_id = str(artifact["artifact_id"])
+                    if artifact_id in records:
+                        continue
+                    record = self._observe_artifact(
+                        dict(artifact),
+                        resolver=resolver,
+                        run_id=f"claim-{delivery_id}",
+                        quality_key=str(artifact["delivery_quality_key"] or ""),
+                    )
+                    if record is not None:
+                        records[artifact_id] = record
+        except (sqlite3.Error, ContractError, OSError, ValueError):
+            return ()
+        return tuple(records.values())
 
     def release_delivery(
         self,
@@ -1997,6 +2077,8 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 record = ArtifactHealth.from_payload(item)
             except (ContractError, TypeError, ValueError):
                 continue
+            if record.policy != _ARTIFACT_HEALTH_POLICY:
+                continue
             if not record.is_fresh(now):
                 continue
             try:
@@ -2046,31 +2128,31 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         except ContractError:
             return 1
 
-    def _removal_intent_for(
-        self,
-        conn: sqlite3.Connection,
-        illust_id: str,
-        page_index: int,
-        output_key: str,
-        output_ref: PathRef,
-    ) -> RemovalIntent:
-        revision = self._root_revision_for(output_ref)
-        row = conn.execute(
+    def _removal_intents_for_page(self, conn, page: SourcePage) -> dict:
+        """Load latest intent events once per source page.
+
+        The write transaction must not scan the whole event table once per
+        candidate page; this single ordered scan keeps the lock short while
+        preserving the same latest-event semantics.
+        """
+        latest: dict[tuple[str, int, str], tuple[RemovalIntent, int]] = {}
+        rows = conn.execute(
             "SELECT safe_payload FROM events WHERE kind = 'removal_intent' "
-            "AND json_extract(safe_payload, '$.illust_id') = ? "
-            "AND json_extract(safe_payload, '$.page_index') = ? "
-            "AND json_extract(safe_payload, '$.output_key') = ? "
-            "AND json_extract(safe_payload, '$.root_revision') = ? "
-            "ORDER BY event_seq DESC LIMIT 1",
-            (illust_id, int(page_index), output_key, int(revision)),
-        ).fetchone()
-        if row is None:
-            return RemovalIntent.NONE
-        info = _parse_json_object(row["safe_payload"], "removal intent")
-        try:
-            return RemovalIntent(str(info["intent"]))
-        except (KeyError, ValueError):
-            raise CorruptDataError("Corrupt removal intent") from None
+            "ORDER BY event_seq"
+        ).fetchall()
+        for row in rows:
+            try:
+                info = _parse_json_object(row["safe_payload"], "removal intent")
+                intent = RemovalIntent(str(info["intent"]))
+                key = (
+                    str(info["illust_id"]),
+                    int(info["page_index"]),
+                    str(info["output_key"]),
+                )
+                latest[key] = (intent, int(info["root_revision"]))
+            except (KeyError, TypeError, ValueError, CorruptDataError):
+                continue
+        return latest
 
     def _record_removal_intent(
         self, conn: sqlite3.Connection, payload: dict[str, Any]
@@ -2085,8 +2167,6 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
             batch = self._get_batch_row(conn, batch_id)
             if batch is None:
                 raise NotFoundError(f"Unknown batch: {batch_id}")
-            if str(batch["phase"]) != "running":
-                raise InvalidStateError("removal intent requires a running batch")
             job = self._get_job_row(conn, str(batch["job_id"]))
             if job is None:
                 raise CorruptDataError("Batch references a missing job")
@@ -2124,6 +2204,21 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 },
                 accepted_command_id=command_id,
             )
+            if intent == RemovalIntent.EXCLUDED.value:
+                rows = conn.execute(
+                    "SELECT delivery_id FROM deliveries "
+                    "WHERE current_batch_id = ? AND output_key = ? "
+                    "AND state IN ('pending','suspended','retry_wait')",
+                    (batch_id, output_ref.target_key),
+                ).fetchall()
+                for row in rows:
+                    conn.execute(
+                        "UPDATE deliveries SET state = 'cancelled', "
+                        "error_code = 'intent_excluded', retry_at = NULL, updated_at = ? "
+                        "WHERE delivery_id = ? AND state IN ('pending','suspended','retry_wait')",
+                        (now, str(row["delivery_id"])),
+                    )
+                    self._refresh_items_for_delivery(conn, str(row["delivery_id"]), now)
             return result
 
     def _accept_source_page(
@@ -2201,24 +2296,25 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 ).fetchall()
             }
             excluded_pages: set[tuple[str, int, str]] = set()
+            intents = self._removal_intents_for_page(conn, page)
             for candidate in page.candidates:
                 if candidate.decision != "download":
                     continue
                 for page_spec in candidate.pages:
-                    if self._removal_intent_for(
-                        conn,
+                    key = (
                         candidate.illust_id,
                         page_spec.page_index,
                         page_spec.output_ref.target_key,
-                        page_spec.output_ref,
-                    ) is RemovalIntent.EXCLUDED:
-                        excluded_pages.add(
-                            (
-                                candidate.illust_id,
-                                page_spec.page_index,
-                                page_spec.output_ref.target_key,
-                            )
-                        )
+                    )
+                    recorded = intents.get(key)
+                    if recorded is None:
+                        continue
+                    intent, revision = recorded
+                    if (
+                        intent is RemovalIntent.EXCLUDED
+                        and revision == self._root_revision_for(page_spec.output_ref)
+                    ):
+                        excluded_pages.add(key)
 
             planned: set[str] = set()
             selected_pages: dict[str, list[PageSpec]] = {}
@@ -2437,6 +2533,7 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                     candidates: list = []
                     if (
                         existing is not None
+                        and existing["state"] != "cancelled"
                         and (request.dedup_policy != "redownload" or receipt is not None)
                         and (not excluded or existing["state"] == "completed")
                     ):
@@ -2562,6 +2659,32 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                             if blocked_state in {LocalState.HASH_MATCH, LocalState.QUICK_MATCH}
                             else f"artifact_{blocked_state.value}"
                         )
+                    if new_state != "cancelled":
+                        blocking = conn.execute(
+                            "SELECT delivery_id, job_id, state FROM deliveries "
+                            "WHERE output_key = ? AND state IN ("
+                            "'pending','transferring','validating','prepared',"
+                            "'needs_verification','suspended','retry_wait','recovery_needed'"
+                            ") ORDER BY rowid LIMIT 1",
+                            (output_key,),
+                        ).fetchone()
+                        if (
+                            blocking is not None
+                            and str(blocking["job_id"]) != job_id
+                            and str(blocking["state"]) == "needs_verification"
+                        ):
+                            blocked_state_name = "needs_verification"
+                            next_state = "failed"
+                            conn.execute(
+                                "UPDATE deliveries SET state = ?, "
+                                "error_code = 'superseded_by_new_task', retry_at = NULL, "
+                                "updated_at = ? WHERE delivery_id = ? AND state = ?",
+                                (next_state, now, str(blocking["delivery_id"]),
+                                 blocked_state_name),
+                            )
+                            self._refresh_items_for_delivery(
+                                conn, str(blocking["delivery_id"]), now
+                            )
                     try:
                         conn.execute(
                             "INSERT INTO deliveries("
@@ -2694,6 +2817,9 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         batch: sqlite3.Row,
         delivery: sqlite3.Row,
         now: str,
+        *,
+        health_by_artifact=None,
+        enforce_completed_health: bool = False,
     ) -> None:
         """Persist a recovered work in this batch before its first claim.
 
@@ -2722,7 +2848,9 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 ).fetchone()
             if source is not None:
                 self._copy_batch_item_page_links(
-                    conn, str(source["batch_id"]), batch_id, illust_id
+                    conn, str(source["batch_id"]), batch_id, illust_id,
+                    health_by_artifact=health_by_artifact,
+                    enforce_completed_health=enforce_completed_health,
                 )
             self._ensure_claimed_page_link(conn, batch_id, delivery)
             self._refresh_batch_item_result(conn, batch_id, illust_id, now)
@@ -2850,7 +2978,9 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
         conn.execute("UPDATE batch_items SET counts_work=1 WHERE batch_id=? AND illust_id=?", (batch_id, illust_id))
         if source is not None:
             self._copy_batch_item_page_links(
-                conn, str(source["batch_id"]), batch_id, illust_id
+                conn, str(source["batch_id"]), batch_id, illust_id,
+                health_by_artifact=health_by_artifact,
+                enforce_completed_health=enforce_completed_health,
             )
         self._ensure_claimed_page_link(conn, batch_id, delivery)
         self._refresh_batch_item_result(conn, batch_id, illust_id, now)
@@ -2871,8 +3001,16 @@ class LibraryRepository(DeliveryRepositoryMixin, FollowRepositoryMixin, QueryRep
                 return None
             if delivery["state"] == "retry_wait" and not _retry_due(delivery["retry_at"]):
                 return None
+            health_raw = payload.get("health")
+            health_by_artifact = (
+                self._health_map(health_raw) if health_raw is not None else None
+            )
             now = _utcnow()
-            self._admit_claimed_work(conn, batch, delivery, now)
+            self._admit_claimed_work(
+                conn, batch, delivery, now,
+                health_by_artifact=health_by_artifact,
+                enforce_completed_health=health_raw is not None,
+            )
             cursor = conn.execute(
                 "UPDATE deliveries SET state = 'transferring', attempts = attempts + 1, "
                 "current_batch_id = ?, retry_at = NULL, updated_at = ? "

@@ -133,7 +133,11 @@ def test_ranking_range_deduplicates_works_and_records_dates(tmp_path):
         })
         report = run_query(owner, source, job)
         assert report.coverage_complete and report.reason_code == 'source_exhausted'
-        wait_for(lambda: owner.repo.get_batch(job['batch_id'])['phase'] == 'completed')
+        # Full-suite Windows scheduling can briefly starve the coordinator;
+        # keep the wait bounded but not tighter than the product's own 8 s
+        # coordinator commands.
+        wait_for(lambda: owner.repo.get_batch(job['batch_id'])['phase'] == 'completed',
+                 timeout=20)
         result = owner.repo.batch_results(job['batch_id'])
         assert result['works']['download'] == 2
         assert len(owner.transport.calls) == 2
