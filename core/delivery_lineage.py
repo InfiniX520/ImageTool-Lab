@@ -2,11 +2,20 @@
 
 Recovery may retire another task's hold with a deliberate supersede.  The old
 job keeps its historical rows; its next active batch must nevertheless be able
-to find the newer delivery that now owns the same page.  This module resolves
-that link strictly by page identity and quality, never by "any cancelled row".
+to find the newer delivery that now owns the same page.  Resolution is strictly
+by page identity and quality; "any cancelled row" is never a successor.
+
+v2.1 order (the RF review proved a cross-job, older completed winner):
+
+1. the exact artifact recorded by an explicit `recovery_owner_transfer` event;
+2. the newest completed delivery for the page, in any job, whose artifact row
+   still exists (its rowid may predate the retired hold);
+3. a newer row (rowid) that is still an active follow-up;
+4. a newer superseded row, followed with a bounded depth.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,28 +83,63 @@ def _candidate(conn: Any, row: Any) -> Successor:
     )
 
 
+def _recorded_successor(conn: Any, delivery: Any) -> Successor | None:
+    """Follow an explicit handover event when the artifact row is older.
+
+    A reuse handover links the current batch to an artifact that may predate
+    the retired hold, so "newer rowid" alone cannot find it.  The
+    recovery_owner_transfer event records exactly which artifact took over.
+    """
+    delivery_id = str(delivery["delivery_id"])
+    rows = conn.execute(
+        "SELECT safe_payload FROM events WHERE kind = 'recovery_owner_transfer' "
+        "AND safe_payload LIKE ? ORDER BY event_seq DESC LIMIT 8",
+        (f'%"delivery_id":"{delivery_id}"%',),
+    ).fetchall()
+    for row in rows:
+        try:
+            info = json.loads(row["safe_payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(info, dict) or str(info.get("delivery_id")) != delivery_id:
+            continue
+        artifact_id = info.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            continue
+        artifact = conn.execute(
+            "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+        ).fetchone()
+        if artifact is None:
+            continue
+        if (
+            str(artifact["illust_id"]) != str(delivery["illust_id"])
+            or int(artifact["page_index"]) != int(delivery["page_index"])
+            or str(artifact["output_key"]) != str(delivery["output_key"])
+        ):
+            continue
+        candidate = conn.execute(
+            "SELECT * FROM deliveries WHERE delivery_id = ?",
+            (str(artifact["delivery_id"]),),
+        ).fetchone()
+        if (
+            candidate is not None
+            and str(candidate["state"]) == "completed"
+            and str(candidate["delivery_id"]) != delivery_id
+        ):
+            return _candidate(conn, candidate)
+    return None
+
+
 def resolve_successor(
     conn: Any, delivery: Any, *, hops: int = 0, _seen: frozenset[str] | None = None
 ) -> Successor | None:
-    """Find the delivery that now owns the same page, or None.
-
-    v2.1 order (the RF review showed a cross-job, older completed winner):
-
-    1. the newest completed delivery for the same page and quality, in any
-       job, whose artifact row still exists;
-    2. a follow-up row created after the current one (rowid greater) that is
-       still active;
-    3. a newer cancelled row that carries a supersede code, followed with a
-       bounded depth.
-
-    History is never rewritten: the caller links only the current active batch.
-    """
+    """Find the delivery that now owns the same page, or None."""
     if hops > MAX_SUPERSEDE_HOPS:
-        raise LineageError("successor chain is too deep")
+        return None
     current_id = str(delivery["delivery_id"])
     seen = set() if _seen is None else set(_seen)
     if current_id in seen:
-        raise LineageError("successor chain is cyclic")
+        return None
     seen.add(current_id)
     key = (
         str(delivery["illust_id"]),
@@ -104,6 +148,10 @@ def resolve_successor(
         str(delivery["quality_key"]),
     )
 
+    recorded = _recorded_successor(conn, delivery)
+    if recorded is not None and recorded.delivery_id != current_id:
+        return recorded
+
     completed_rows = conn.execute(
         "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
         "AND output_key = ? AND quality_key = ? AND delivery_id != ? "
@@ -111,35 +159,35 @@ def resolve_successor(
         (*key, current_id),
     ).fetchall()
     for row in completed_rows:
-        artifact_id = _row_artifact(conn, str(row["delivery_id"]))
-        if artifact_id is not None:
-            return _candidate(conn, row)
+        candidate = _candidate(conn, row)
+        if candidate.is_completed:
+            return candidate
 
-    current_rowid = conn.execute(
-        "SELECT rowid FROM deliveries WHERE delivery_id = ?", (current_id,)
-    ).fetchone()
-    if current_rowid is not None:
-        placeholders = ",".join("?" for _ in ACTIVE_FOLLOWUP)
-        rows = conn.execute(
-            "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
-            "AND output_key = ? AND quality_key = ? AND rowid > ? "
-            f"AND state IN ({placeholders}) ORDER BY rowid DESC LIMIT 8",
-            (*key, int(current_rowid[0]), *ACTIVE_FOLLOWUP),
-        ).fetchall()
-        for row in rows:
-            if str(row["delivery_id"]) != current_id:
-                return _candidate(conn, row)
-
-    placeholders = ",".join("?" for _ in SUPERSEDE_CODES)
     rows = conn.execute(
         "SELECT * FROM deliveries WHERE illust_id = ? AND page_index = ? "
-        "AND output_key = ? AND quality_key = ? AND delivery_id != ? "
-        f"AND state = 'cancelled' AND error_code IN ({placeholders}) "
-        "ORDER BY rowid DESC LIMIT 8",
-        (*key, current_id, *SUPERSEDE_CODES),
+        "AND output_key = ? AND quality_key = ? AND rowid > ("
+        "SELECT rowid FROM deliveries WHERE delivery_id = ?"
+        ") ORDER BY rowid DESC LIMIT 32",
+        (*key, current_id),
     ).fetchall()
+    followup: Successor | None = None
     for row in rows:
-        nested = resolve_successor(conn, row, hops=hops + 1, _seen=frozenset(seen))
-        if nested is not None:
-            return nested
-    return None
+        state = str(row["state"])
+        code = row["error_code"]
+        if state == "cancelled" and is_supersede_code(code):
+            nested = resolve_successor(
+                conn, row, hops=hops + 1, _seen=frozenset(seen)
+            )
+            if nested is not None:
+                if nested.is_completed:
+                    return nested
+                if followup is None:
+                    followup = nested
+            continue
+        if state in TERMINAL_SUCCESS:
+            candidate = _candidate(conn, row)
+            if candidate.is_completed:
+                return candidate
+        elif state in ACTIVE_FOLLOWUP and followup is None:
+            followup = _candidate(conn, row)
+    return followup

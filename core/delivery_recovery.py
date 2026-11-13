@@ -68,6 +68,7 @@ from enum import StrEnum
 from typing import Any
 
 from core.artifact_health import ArtifactHealth
+from core.delivery_lineage import is_supersede_code, resolve_successor
 from core.preservation_policy import LocalState
 from core.task_contracts import ContractError
 
@@ -133,7 +134,20 @@ _PARK_ERROR_CODE = {
     "artifact_root_unavailable": "artifact_root_unavailable",
     "artifact_changed_during_check": "artifact_changed_during_check",
     "observation_unknown": "artifact_unknown",
+    # RF-04: a pending page with recorded history but no observation at all is
+    # parked with the observation reason itself.
+    "no_resolver": "no_resolver",
+    "observation_failed": "observation_failed",
+    "observation_unavailable": "observation_unavailable",
 }
+
+# A pending page that once had recorded bytes but cannot be observed at all is
+# parked with the observation reason itself; the page is deliberately not
+# dispatchable until the user re-checks it.
+_NO_OBSERVATION_PARK = frozenset(
+    {"no_resolver", "observation_failed", "observation_unavailable"}
+)
+_SUPERSEDE_RECOVERY_STATES = frozenset({"needs_verification", "pending", "suspended", "retry_wait"})
 
 
 def _lib():
@@ -264,6 +278,7 @@ class _RecoveryPage:
     generation: int
     artifacts: tuple[dict[str, Any], ...]
     cross_task_receipt: bool
+    successor: dict[str, Any] | None = None
 
 
 def _unavailable_reason(page: _RecoveryPage) -> str:
@@ -289,11 +304,10 @@ def _recovery_result(
     recorded artifact, so a 'changed' verdict can never be reported together
     with another version's artifact id (UA-04).
     """
-    artifact_id = (
-        observation.expectation.artifact_id
-        if matched and observation is not None
-        else None
+    observed_artifact_id = (
+        None if observation is None else observation.expectation.artifact_id
     )
+    matched_artifact_id = observed_artifact_id if matched else None
     return {
         "outcome": decision.outcome.value,
         "reason": decision.reason,
@@ -314,7 +328,9 @@ def _recovery_result(
         "previous_error_code": page.error_code,
         "delivery_id": page.delivery_id,
         "state": page.delivery_state,
-        "artifact_id": artifact_id,
+        "artifact_id": matched_artifact_id,
+        "observed_artifact_id": observed_artifact_id,
+        "matched_artifact_id": matched_artifact_id,
         "repair_delivery_id": None,
         "health": None if observation is None else observation.to_payload(),
         "observed_state": None if observation is None else observation.state.value,
@@ -375,6 +391,7 @@ class DeliveryRecoveryMixin:
         resolver = self._path_resolver_snapshot()
         observation: ArtifactHealth | None = None
         matched = False
+        successor = page.successor
         if page.delivery_state == "completed":
             decision = RecoveryDecision(
                 RecoveryOutcome.COMPLETED, RecoveryAction.NONE, "already_completed"
@@ -383,10 +400,26 @@ class DeliveryRecoveryMixin:
             decision = RecoveryDecision(
                 RecoveryOutcome.REFUSED, RecoveryAction.NONE, "batch_not_running"
             )
-        elif resolver is None:
-            decision = RecoveryDecision(
-                RecoveryOutcome.HELD, RecoveryAction.NONE, "observation_unavailable"
+        elif successor is not None:
+            decision, observation, matched = self._successor_decision(
+                page, successor, resolver, f"recover-{batch_id}"
             )
+        elif page.delivery_state == "cancelled" and is_supersede_code(page.error_code):
+            decision = RecoveryDecision(
+                RecoveryOutcome.REFUSED, RecoveryAction.NONE, "superseded_unresolved"
+            )
+        elif resolver is None:
+            # A pending page with recorded history cannot be observed at all:
+            # park it with the observation reason instead of claiming a hold
+            # while leaving it dispatchable (RF-04).
+            if page.delivery_state == "pending" and page.artifacts:
+                decision = RecoveryDecision(
+                    RecoveryOutcome.HELD, RecoveryAction.PARK, "no_resolver"
+                )
+            else:
+                decision = RecoveryDecision(
+                    RecoveryOutcome.HELD, RecoveryAction.NONE, "observation_unavailable"
+                )
         else:
             primary, chosen = self._observe_recovery_page(
                 page, resolver, f"recover-{batch_id}"
@@ -395,12 +428,21 @@ class DeliveryRecoveryMixin:
             # The selected record drives the decision; a negative verdict uses
             # the one observation that produced it, never a different primary.
             observation = chosen[1] if chosen is not None else primary
-            decision = decide_page_recovery(
-                page.delivery_state,
-                None if observation is None else observation.state,
-                reusable=matched,
-                unavailable_reason=_unavailable_reason(page),
-            )
+            if (
+                observation is None
+                and page.delivery_state == "pending"
+                and page.artifacts
+            ):
+                decision = RecoveryDecision(
+                    RecoveryOutcome.HELD, RecoveryAction.PARK, "observation_failed"
+                )
+            else:
+                decision = decide_page_recovery(
+                    page.delivery_state,
+                    None if observation is None else observation.state,
+                    reusable=matched,
+                    unavailable_reason=_unavailable_reason(page),
+                )
 
         draft = _recovery_result(page, decision, observation, matched=matched)
         return self._enqueue(
@@ -420,7 +462,20 @@ class DeliveryRecoveryMixin:
                     "quality_key": page.quality_key,
                 },
                 "action": decision.action.value,
+                "reason": decision.reason,
                 "artifact_id": (
+                    observation.expectation.artifact_id
+                    if matched and observation is not None
+                    else None
+                ),
+                # Both identities travel for every verdict: a negative verdict
+                # must still prove which recorded row it observed (RF-05).
+                "observed_artifact_id": (
+                    None
+                    if observation is None
+                    else observation.expectation.artifact_id
+                ),
+                "matched_artifact_id": (
                     observation.expectation.artifact_id
                     if matched and observation is not None
                     else None
@@ -431,6 +486,13 @@ class DeliveryRecoveryMixin:
                 # The frozen observation is submitted for reuse, repair and
                 # park alike; the writer gates all three identically (UA-06).
                 "health": [] if observation is None else [observation.to_payload()],
+                "successor_delivery_id": (
+                    None if successor is None else successor["delivery_id"]
+                ),
+                "successor_state": None if successor is None else successor["state"],
+                "successor_artifact_id": (
+                    None if successor is None else successor.get("artifact_id")
+                ),
                 "draft": draft,
             },
         )
@@ -553,6 +615,34 @@ class DeliveryRecoveryMixin:
                         output_key=output_key,
                         request=request,
                     )
+            successor = None
+            if (
+                delivery is not None
+                and state != "completed"
+                and str(delivery["state"]) == "cancelled"
+                and is_supersede_code(error_code)
+            ):
+                resolved = resolve_successor(conn, delivery)
+                if resolved is not None:
+                    successor = {
+                        "delivery_id": resolved.delivery_id,
+                        "job_id": resolved.job_id,
+                        "batch_id": resolved.batch_id,
+                        "state": resolved.state,
+                        "generation": resolved.generation,
+                        "artifact_id": resolved.artifact_id,
+                    }
+                    if resolved.is_completed and resolved.artifact_id:
+                        row = conn.execute(
+                            "SELECT * FROM artifacts WHERE artifact_id = ?",
+                            (resolved.artifact_id,),
+                        ).fetchone()
+                        if row is not None and _artifact_is_valid(dict(row)):
+                            artifacts = (dict(row),) + tuple(
+                                item
+                                for item in artifacts
+                                if str(item["artifact_id"]) != resolved.artifact_id
+                            )
         return _RecoveryPage(
             batch_id=batch_id,
             job_id=str(job["job_id"]),
@@ -567,6 +657,7 @@ class DeliveryRecoveryMixin:
             generation=0 if delivery is None else int(delivery["generation"]),
             artifacts=artifacts,
             cross_task_receipt=cross_task_receipt,
+            successor=successor,
         )
 
     def _read_recovery_candidates(
@@ -648,6 +739,71 @@ class DeliveryRecoveryMixin:
                 limit=1,
             )
         )
+
+    def _successor_decision(
+        self, page: _RecoveryPage, successor: dict[str, Any], resolver, run_id: str
+    ) -> tuple[RecoveryDecision, ArtifactHealth | None, bool]:
+        """Decide a page whose link was superseded by another delivery.
+
+        The successor is the only authority: a completed artifact may be
+        reused, a missing one may repair in the current batch, a live hold is
+        adopted, and a live transfer is never stolen.  No write happens here.
+        """
+        state = str(successor["state"])
+        if state == "completed":
+            if resolver is None:
+                return RecoveryDecision(
+                    RecoveryOutcome.HELD, RecoveryAction.NONE, "observation_unavailable"
+                ), None, False
+            target = successor.get("artifact_id")
+            for artifact in page.artifacts:
+                if str(artifact["artifact_id"]) != str(target):
+                    continue
+                record = self._observe_artifact(
+                    artifact,
+                    resolver=resolver,
+                    run_id=run_id,
+                    quality_key=page.quality_key,
+                )
+                if record is None:
+                    return RecoveryDecision(
+                        RecoveryOutcome.HELD,
+                        RecoveryAction.NONE,
+                        "observation_failed",
+                    ), None, False
+                if record.reusable:
+                    return RecoveryDecision(
+                        RecoveryOutcome.REUSED,
+                        RecoveryAction.REUSE,
+                        "successor_hash_match",
+                    ), record, True
+                if record.state is LocalState.MISSING:
+                    return RecoveryDecision(
+                        RecoveryOutcome.REPAIR_QUEUED,
+                        RecoveryAction.REPAIR,
+                        "successor_missing",
+                    ), record, False
+                return RecoveryDecision(
+                    RecoveryOutcome.HELD,
+                    RecoveryAction.NONE,
+                    _PARK_REASON.get(record.state, "observation_unknown"),
+                ), record, False
+            return RecoveryDecision(
+                RecoveryOutcome.HELD, RecoveryAction.NONE, "observation_unavailable"
+            ), None, False
+        if state == "needs_verification":
+            return RecoveryDecision(
+                RecoveryOutcome.HELD, RecoveryAction.NONE, "successor_holding"
+            ), None, False
+        if state in {"pending", "suspended", "retry_wait"}:
+            return RecoveryDecision(
+                RecoveryOutcome.REPAIR_QUEUED, RecoveryAction.NONE, "successor_pending"
+            ), None, False
+        return RecoveryDecision(
+            RecoveryOutcome.REFUSED,
+            RecoveryAction.NONE,
+            "output_blocked_by_other_task",
+        ), None, False
 
     def _observe_recovery_page(
         self, page: _RecoveryPage, resolver, run_id: str
@@ -748,7 +904,10 @@ class DeliveryRecoveryMixin:
                 raise lib.CorruptDataError("Selected page references a missing delivery")
             foreign = str(delivery["job_id"]) != str(batch["job_id"])
             current_state = str(delivery["state"])
-            if foreign and current_state != "needs_verification":
+            superseded_link = current_state == "cancelled" and is_supersede_code(
+                delivery["error_code"]
+            )
+            if foreign and current_state != "needs_verification" and not superseded_link:
                 # A carried page may only ever act on another task's hold.  A
                 # live transfer/validation/prepared slot is never stolen.
                 return self._refuse_recovery(
@@ -762,6 +921,28 @@ class DeliveryRecoveryMixin:
                 return self._refuse_recovery(
                     conn, batch, result, "state_changed", command_id,
                     requested_action=action,
+                )
+            if payload.get("successor_delivery_id") is not None:
+                # RF-02: the linked row was superseded by another delivery.
+                # Resolve that successor inside the writer; history is not
+                # rewritten and only the current batch page moves.
+                reason = self._apply_recovery_successor(
+                    conn, batch, link, delivery, payload, result
+                )
+                if reason is not None:
+                    result["outcome"] = RecoveryOutcome.REFUSED.value
+                    result["reason"] = reason
+                    result["repair_delivery_id"] = None
+                applied = "none"
+                if reason is None and action in {
+                    RecoveryAction.REUSE.value,
+                    RecoveryAction.REPAIR.value,
+                }:
+                    applied = action
+                return self._finish_recovery(
+                    conn, batch, result, command_id,
+                    requested_action=action,
+                    applied_action=applied,
                 )
             if action == RecoveryAction.NONE.value:
                 if result.get("outcome") == RecoveryOutcome.REPAIR_QUEUED.value:
@@ -854,8 +1035,21 @@ class DeliveryRecoveryMixin:
         if generation != int(delivery["generation"]):
             return None, "observation_generation_changed"
         raw = payload.get("health")
-        if not isinstance(raw, list) or len(raw) != 1:
+        observed_id = payload.get("observed_artifact_id")
+        if not raw:
+            # RF-04: a pending page with recorded history that could not be
+            # observed at all is parked with the observation reason, not left
+            # dispatchable.  No artifact row can be validated in this branch.
+            reason = str(payload.get("reason") or "")
+            if (
+                action == RecoveryAction.PARK.value
+                and observed_id is None
+                and reason in _NO_OBSERVATION_PARK
+            ):
+                return None, None
             return None, "observation_missing" if not reuse else stale
+        if not isinstance(raw, list) or len(raw) != 1:
+            return None, stale
         records = self._health_map(raw)
         if not records:
             # Policy version, freshness and the current root binding are all
@@ -872,28 +1066,29 @@ class DeliveryRecoveryMixin:
             return None, "observation_page_mismatch"
         if payload.get("selected_state") != record.state.value:
             return None, "observation_mismatch"
-        selected = payload.get("artifact_id")
-        artifact = None
-        if selected is not None:
-            if not isinstance(selected, str) or expectation.artifact_id != selected:
-                return None, "observation_mismatch"
-            artifact = conn.execute(
-                "SELECT * FROM artifacts WHERE artifact_id = ?", (selected,)
-            ).fetchone()
-            if artifact is None or not _artifact_is_valid(dict(artifact)):
-                return None, stale
-            if not expectation.matches_row(artifact):
-                return None, stale
+        # RF-05: every verdict, including a negative one, names the recorded
+        # row it observed and must pass the same row binding.
+        if not isinstance(observed_id, str) or expectation.artifact_id != observed_id:
+            return None, "observation_mismatch"
+        artifact = conn.execute(
+            "SELECT * FROM artifacts WHERE artifact_id = ?", (observed_id,)
+        ).fetchone()
+        if artifact is None or not _artifact_is_valid(dict(artifact)):
+            return None, stale
+        if not expectation.matches_row(artifact):
+            return None, stale
+        if (
+            str(artifact["illust_id"]) != expected["illust_id"]
+            or int(artifact["page_index"]) != expected["page_index"]
+            or str(artifact["output_key"]) != expected["output_key"]
+        ):
+            return None, "observation_page_mismatch"
         if reuse:
-            if artifact is None or record.state is not LocalState.HASH_MATCH:
+            if payload.get("matched_artifact_id") != observed_id:
+                return None, "observation_mismatch"
+            if record.state is not LocalState.HASH_MATCH:
                 return None, stale
             if not self._health_allows_reuse(record, artifact):
-                return None, stale
-            if (
-                str(artifact["illust_id"]) != expected["illust_id"]
-                or int(artifact["page_index"]) != expected["page_index"]
-                or str(artifact["output_key"]) != expected["output_key"]
-            ):
                 return None, stale
         elif action == RecoveryAction.REPAIR.value:
             if record.state is not LocalState.MISSING:
@@ -950,6 +1145,216 @@ class DeliveryRecoveryMixin:
                 "action": action,
             },
         )
+
+    def _apply_recovery_successor(
+        self, conn, batch, link, delivery, payload: dict[str, Any], result: dict[str, Any]
+    ) -> str | None:
+        """Move only the current batch page onto the resolved successor.
+
+        A completed successor is linked by artifact; a live hold or queued
+        repair is adopted by reference.  The superseded row and every historical
+        batch keep their original facts.
+        """
+        lib = _lib()
+        resolved = resolve_successor(conn, delivery)
+        if resolved is None:
+            return "superseded_unresolved"
+        if str(resolved.delivery_id) != str(payload.get("successor_delivery_id")):
+            return "successor_changed"
+        _, intent_reason = self._recovery_intent_state(conn, link, delivery)
+        if intent_reason is not None:
+            return intent_reason
+        action = str(payload.get("action"))
+        now = lib._utcnow()
+        if resolved.is_completed:
+            artifact, invalid = self._validate_recovery_observation(
+                conn, payload, link, delivery
+            )
+            if invalid is not None:
+                return invalid
+            if action == RecoveryAction.REPAIR.value:
+                return self._apply_successor_repair(conn, batch, link, delivery, result)
+            if action != RecoveryAction.REUSE.value:
+                return "successor_state_changed"
+            if artifact is None or str(artifact["artifact_id"]) != str(resolved.artifact_id):
+                return "successor_artifact_mismatch"
+            self._link_batch_item_page(
+                conn,
+                str(batch["batch_id"]),
+                str(link["illust_id"]),
+                int(link["page_index"]),
+                str(link["output_key"]),
+                str(link["quality_json"]),
+                delivery_id=None,
+                artifact_id=str(artifact["artifact_id"]),
+            )
+            self._record_owner_transfer(
+                conn, batch, delivery, str(artifact["artifact_id"]), "successor_reuse"
+            )
+            self._refresh_batch_item_result(
+                conn, str(batch["batch_id"]), str(link["illust_id"]), now
+            )
+            result.update(
+                outcome=RecoveryOutcome.REUSED.value,
+                state="completed",
+                delivery_id=str(resolved.delivery_id),
+                artifact_id=str(artifact["artifact_id"]),
+                repair_delivery_id=None,
+            )
+            return None
+        if resolved.state == "needs_verification":
+            self._link_batch_item_page(
+                conn,
+                str(batch["batch_id"]),
+                str(link["illust_id"]),
+                int(link["page_index"]),
+                str(link["output_key"]),
+                str(link["quality_json"]),
+                delivery_id=str(resolved.delivery_id),
+                artifact_id=None,
+            )
+            self._record_owner_transfer(conn, batch, delivery, None, "successor_hold")
+            self._refresh_batch_item_result(
+                conn, str(batch["batch_id"]), str(link["illust_id"]), now
+            )
+            result.update(
+                outcome=RecoveryOutcome.HELD.value,
+                state="needs_verification",
+                delivery_id=str(resolved.delivery_id),
+                artifact_id=None,
+                repair_delivery_id=None,
+            )
+            return None
+        if resolved.state in {"pending", "suspended", "retry_wait"}:
+            self._link_batch_item_page(
+                conn,
+                str(batch["batch_id"]),
+                str(link["illust_id"]),
+                int(link["page_index"]),
+                str(link["output_key"]),
+                str(link["quality_json"]),
+                delivery_id=str(resolved.delivery_id),
+                artifact_id=None,
+            )
+            self._record_owner_transfer(conn, batch, delivery, None, "successor_repair")
+            self._refresh_batch_item_result(
+                conn, str(batch["batch_id"]), str(link["illust_id"]), now
+            )
+            result.update(
+                outcome=RecoveryOutcome.REPAIR_QUEUED.value,
+                state=str(resolved.state),
+                delivery_id=str(resolved.delivery_id),
+                artifact_id=None,
+                repair_delivery_id=str(resolved.delivery_id),
+            )
+            return None
+        return "output_blocked_by_other_task"
+
+    def _apply_successor_repair(
+        self, conn, batch, link, delivery, result: dict[str, Any]
+    ) -> str | None:
+        """Queue one new pending generation when the successor's bytes are gone."""
+        lib = _lib()
+        batch_id = str(batch["batch_id"])
+        job_id = str(batch["job_id"])
+        illust_id = str(link["illust_id"])
+        page_index = int(link["page_index"])
+        item = conn.execute(
+            "SELECT * FROM batch_items WHERE batch_id = ? AND illust_id = ?",
+            (batch_id, illust_id),
+        ).fetchone()
+        if item is None or str(item["decision"]) != "download":
+            return "page_not_in_batch"
+        counts_work = int(item["counts_work"] or 0)
+        if not counts_work:
+            budget = lib._parse_json_object(batch["budget_json"], "batch budget")
+            max_works = budget.get("max_works")
+            if type(max_works) is not int or max_works < 1:
+                raise lib.CorruptDataError("Corrupt batch work budget")
+            used_works = int(
+                conn.execute(
+                    "SELECT COUNT(DISTINCT illust_id) AS count FROM batch_items "
+                    "WHERE batch_id = ? AND counts_work = 1",
+                    (batch_id,),
+                ).fetchone()["count"]
+            )
+            if used_works + 1 > max_works:
+                return "work_budget_exhausted"
+        blocking = conn.execute(
+            "SELECT delivery_id FROM deliveries WHERE output_key = ? "
+            "AND delivery_id != ? AND state IN ("
+            + ",".join("?" for _ in ACTIVE_OUTPUT_STATES)
+            + ") LIMIT 1",
+            (str(link["output_key"]), str(delivery["delivery_id"]), *ACTIVE_OUTPUT_STATES),
+        ).fetchone()
+        if blocking is not None:
+            return "output_blocked_by_other_task"
+        generation = (
+            int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(generation), 0) AS generation FROM deliveries "
+                    "WHERE job_id = ? AND illust_id = ? AND page_index = ? "
+                    "AND quality_key = ?",
+                    (job_id, illust_id, page_index, str(delivery["quality_key"])),
+                ).fetchone()["generation"]
+            )
+            + 1
+        )
+        repair_delivery_id = lib._new_id()
+        now = lib._utcnow()
+        conn.execute(
+            "INSERT INTO deliveries("
+            "delivery_id, job_id, origin_batch_id, current_batch_id, "
+            "completed_batch_id, illust_id, page_index, output_key, "
+            "output_ref_json, quality_json, quality_key, payload_json, "
+            "source_identity, state, attempts, http_attempts, retry_at, error_code, "
+            "generation, checkpoint_json, prepared_json, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', "
+            "0, 0, NULL, NULL, ?, NULL, NULL, ?, ?)",
+            (
+                repair_delivery_id,
+                job_id,
+                batch_id,
+                batch_id,
+                illust_id,
+                page_index,
+                str(delivery["output_key"]),
+                str(delivery["output_ref_json"]),
+                str(delivery["quality_json"]),
+                str(delivery["quality_key"]),
+                str(delivery["payload_json"]),
+                None
+                if delivery["source_identity"] is None
+                else str(delivery["source_identity"]),
+                generation,
+                now,
+                now,
+            ),
+        )
+        self._link_batch_item_page(
+            conn,
+            batch_id,
+            illust_id,
+            page_index,
+            str(link["output_key"]),
+            str(link["quality_json"]),
+            delivery_id=repair_delivery_id,
+            artifact_id=None,
+        )
+        if not counts_work:
+            conn.execute(
+                "UPDATE batch_items SET counts_work = 1 WHERE batch_id = ? AND illust_id = ?",
+                (batch_id, illust_id),
+            )
+        self._refresh_batch_item_result(conn, batch_id, illust_id, now)
+        result.update(
+            outcome=RecoveryOutcome.REPAIR_QUEUED.value,
+            state="pending",
+            delivery_id=repair_delivery_id,
+            artifact_id=None,
+            repair_delivery_id=repair_delivery_id,
+        )
+        return None
 
     def _apply_recovery_reuse(
         self, conn, batch, link, delivery, artifact, result: dict[str, Any],
