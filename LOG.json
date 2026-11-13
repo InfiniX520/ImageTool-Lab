@@ -1565,6 +1565,69 @@
       "organization": "One new audit worktree/report directory; current navigation consolidated; historical reports/worktrees retained.",
       "known_limitations": "No real account/gallery/network/migration; symlink skips retained; first Tk error retained.",
       "history_errata": "Previous fix LOG summary said 1680 while its structured total was 1682; full03/tk04 references differ from final full04/tk05. Original session preserved."
+    },
+    {
+      "session_date": "2026-11-13",
+      "batch": "JPGPNG-U1A-RF-FIX-20261113-01",
+      "branch": "fix/a1-u1a-rf-20261113",
+      "base": "b334a29",
+      "contract_base": "b1a4f1d",
+      "final_commit": "b07c2ed",
+      "summary": "U1-A RF 复审的 RF-01..RF-09 全部修复：取消/清理闭环、后继与证据绑定、控制票据/信任故障/生命周期/取消预算；复审 15 项反例 15/15，旧 14 项 14/14。",
+      "fixes": [
+        "RF-01 recovery_needed 排除后可完成本地恢复，final 已存在走 publish-before-abort",
+        "RF-02 外任务接管后原任务可续跑；carry 不复制 cancelled；外任务活动槽拒绝收养",
+        "RF-03 坏意图 accept 停整轮并持久 block，普通单图失败不升级",
+        "RF-04 无观察的 pending 有历史时 PARK 成 NV 并不可派发",
+        "RF-05 negative 证据绑定 artifact 行，三种篡改全部拒绝",
+        "RF-06 受理改为 guard 内 admission + 票据登记，settle 用 outstanding",
+        "RF-07 四循环统一 shutdown/closing，fatal owner 不再留线程",
+        "RF-08 候选间取消 + 整页预算前置检查；暂停归为 _Stopped，预算归为 _Budget",
+        "RF-09 取消后的 .part 有精确证据的清理重试，已清理行不饿死候选"
+      ],
+      "verification": {
+        "non_tk": {
+          "tests": 1721,
+          "passed": 1717,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "tk_first": {
+          "tests": 9,
+          "passed": 8,
+          "errors": 1
+        },
+        "tk_rerun": {
+          "tests": 9,
+          "passed": 9
+        },
+        "combined_rerun": {
+          "tests": 1730,
+          "passed": 1726,
+          "failed": 0,
+          "skipped": 4
+        },
+        "independent": {
+          "tests": 15,
+          "passed": 15
+        },
+        "previous_14_regressions": "14 passed",
+        "evidence": "../.runtime/jpgpng_u1a_rf_fix_20261113_01/full03/full.xml"
+      },
+      "review": "只读 fork 审 b1a4f1d..HEAD：1 P1 + 3 P2 + P3；b07c2ed 修复暂停误分类、cleanup 饥饿、外任务活动后继、recover_local 未分类异常、carry gate fail-open",
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "product_ready": false,
+      "residuals": [
+        "finish_source 的 result(20) 仍是旧语义，未实现超时后查询协议",
+        "AdmissionTicket 类未实例化，跨进程不保留",
+        "清理去重只看最近 200 条事件",
+        "意图投影/索引未做，cleanup/handover 查询仍扫 events",
+        "carry 长事务与 claim 对 2,000 页约 8,020 条语句未优化",
+        "真实迁移/备份/外置卷、W5 UI、completed 重新核验、旧 record_manager 未做"
+      ],
+      "next_step": "意图投影/迁移门禁；finish_source 等待协议；carry 可续窗口；W5 UI；真实迁移与备份演练"
     }
   ]
 }
