@@ -108,7 +108,9 @@ class TierScan:
 * `max_files`/`max_slices`：**每次调用**的切片与片数上限。
 * `max_bytes`/`max_seconds`：**每页/每次尝试**的硬限额，覆盖观察 + 提交前确认 pass。默认 `max_bytes=512 MiB`、`max_seconds=300`。
 * 开文件前用 artifact 行记录的 `size` 预判：`remaining_bytes < size` → 直接 `page_byte_budget`（不打开该文件，不静默超读）。
-* 观察时把 `ObservationBudget(max_bytes=min(remaining, per-file cap), max_seconds=min(remaining, per-file cap))` 传给 `LocalObserver`，并传取消标志；观察器自己的上限仍然生效。
+* 观察时把 `ObservationBudget(max_bytes=min(remaining, per-file cap), max_seconds=min(remaining, per-file cap))` 传给 `LocalObserver`；观察器自己的上限仍然生效。
+
+> v4.1 修订（2026-11-14，S1 实施反馈）：**不把取消标志传入 `LocalObserver`**。v3 §3.1 的 admission 契约要求"已经受理的观察可以完成"（`test_a_ticket_taken_before_pause_may_finish` 依赖它）；传入取消标志会让在飞的哈希变成 CANCELLED 判决，把控制结果伪装成文件判决。暂停/取消仍在**文件之间**与**切片之间**生效。
 * 末文件之后再检查一次：超限 → `page_byte_budget`/`page_time_budget`（cursor 不动），不得提交。
 * 单个文件本身大于整页上限：`page_byte_budget`，明确不可推进；不得无限空切片。
 
