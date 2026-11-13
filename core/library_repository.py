@@ -2846,7 +2846,10 @@ class LibraryRepository(
         except (sqlite3.Error, LibraryError):
             return None
         records: dict[str, ProgressRecord] = {}
-        truncated = False
+        # A full event window means older progress facts may have been cut off:
+        # that is exactly as unusable as a full record set, so the caller must
+        # finish the page in one attempt instead (contract v4 §3.1).
+        truncated = len(rows) >= MAX_PROGRESS_EVENTS
         for row in rows:
             try:
                 stored_key, stored = progress_from_event(

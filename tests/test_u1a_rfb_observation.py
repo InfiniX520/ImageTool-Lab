@@ -2,13 +2,22 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+import uuid
+from datetime import datetime, timezone
 
 import pytest
 
 import test_u1a_recovery as h
 import test_u1a_rfa_observation as o
 from core.library_repository import LibraryError
-from core.observation_snapshot import PageBudget, PreflightCancelled
+from core.observation_snapshot import (
+    MAX_PROGRESS_EVENTS,
+    PROGRESS_EVENT_KIND,
+    PageBudget,
+    PreflightCancelled,
+)
+from core.task_contracts import canonical_json
 
 
 class _Switch:
@@ -234,4 +243,108 @@ def test_two_hundred_and_fifty_seven_pages_need_exactly_one_more_call(
         assert len(set(calls)) == 257
         assert links(repo, job["batch_id"]) == 257
         assert o.checkpoint(repo, job) is not None
+
+def _pad_progress_window(repo, job, count: int = MAX_PROGRESS_EVENTS) -> None:
+    """Push this page slice out of the newest-event window.
+
+    The facts are valid progress payloads for another page of the same job: the
+    reader must treat a full window as "older facts may be missing" instead of
+    silently believing it saw the whole history.  No product code writes these.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    payload = canonical_json(
+        {
+            "schema_version": 1,
+            "page_key": {
+                "job_id": job["job_id"],
+                "source_id": "follow",
+                "pass_id": "history",
+                "entity_id": "source-1",
+                "page_identity": "older-page",
+                "page_digest": "0" * 64,
+            },
+            "records": [],
+            "observed_files": 0,
+            "observed_bytes": 0,
+            "slice_seq": 1,
+            "root_revisions": {"project": 1},
+            "policy_version": 1,
+        }
+    )
+    with sqlite3.connect(repo.database_path) as conn:
+        for _ in range(count):
+            conn.execute(
+                "INSERT INTO events(event_uuid, job_id, batch_id, kind, safe_payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    uuid.uuid4().hex,
+                    job["job_id"],
+                    job["batch_id"],
+                    PROGRESS_EVENT_KIND,
+                    payload,
+                    now,
+                ),
+            )
+        conn.commit()
+
+
+def test_the_page_budget_covers_the_whole_page_content(tmp_path, monkeypatch):
+    """max_bytes is the page ceiling: exactly the content commits, one less does not."""
+    assert PageBudget().max_bytes == 8 * 1024 * 1024 * 1024
+    assert PageBudget().max_bytes >= 1024 * 1024 * 1024
+    assert PageBudget().max_bytes >= 660 * 1024 * 1024, (
+        "a 660 MB work must fit the default page ceiling"
+    )
+    page_bytes = 3 * len(h.PNG_BYTES)
+
+    exact_root = tmp_path / "exact"
+    exact_root.mkdir()
+    with h.LibraryRepository(tmp_path / "exact.sqlite3") as repo:
+        _, page = o.deliver(repo, exact_root, pages=(0, 1, 2), request_id="exact")
+        job = h.submit(repo, request_id="exact-budget")
+        calls = o.observe_counter(repo, monkeypatch)
+        accept(repo, job, page, PageBudget(max_bytes=page_bytes, max_seconds=60))
+        assert len(calls) == 3
+        assert links(repo, job["batch_id"]) == 3
+        assert o.checkpoint(repo, job) is not None
+
+    short_root = tmp_path / "short"
+    short_root.mkdir()
+    with h.LibraryRepository(tmp_path / "short.sqlite3") as repo:
+        _, page = o.deliver(repo, short_root, pages=(0, 1, 2), request_id="short")
+        job = h.submit(repo, request_id="short-budget")
+        calls = o.observe_counter(repo, monkeypatch)
+        with pytest.raises(PreflightCancelled, match="page_byte_budget"):
+            accept(
+                repo,
+                job,
+                page,
+                PageBudget(max_bytes=page_bytes - 1, max_seconds=60),
+            )
+        assert len(calls) == 2, "the third file would overrun the page ceiling"
+        assert o.checkpoint(repo, job) is None
+
+
+def test_a_full_progress_event_window_is_treated_as_truncated(tmp_path, monkeypatch):
+    """A window that pushed older facts out cannot be trusted as resumable."""
+    with h.LibraryRepository(tmp_path / "ledger.sqlite3") as repo:
+        _, page = o.deliver(repo, tmp_path, pages=tuple(range(6)))
+        job = h.submit(repo, request_id="window-full")
+        calls = o.observe_counter(repo, monkeypatch)
+        with pytest.raises(PreflightCancelled):
+            accept(repo, job, page, PageBudget(max_files=1, max_slices=1))
+        assert len(calls) == 1
+        assert o.checkpoint(repo, job) is None
+
+        _pad_progress_window(repo, job)
+        o.settle(repo, job, False)
+        job = o.resume(repo, job, 0)
+        calls.clear()
+        accept(repo, job, page, PageBudget(max_files=1, max_slices=2))
+        assert len(calls) == 6, (
+            "a full event window must finish the page in one attempt"
+        )
+        assert o.checkpoint(repo, job) is not None
+        assert links(repo, job["batch_id"]) == 6
+
 
