@@ -181,11 +181,15 @@ CREATE INDEX idx_archive_assets_path   ON archive_assets(path_key, asset_id)
 | AR3-04 观察/回执不得重标 | **本包修一半** | `observe_candidate` 拒绝候选根版本与观察根版本不一致，`rebind_observation` 不再用候选值覆盖；`prepare_observed_plan` 增加 receipt 与 candidate 同源校验（snapshot_id / mtime / 物理对象 / 大小 / 已绑定摘要） |
 | AR3-05 混合字符段别名 | **未实现（有意保留红）** | ASCII 大小写重选已修好（同一 identity_key、保留首次拼写、不再报 immutable facts）。`画A.bin`/`画a.bin` 需要 identity_key 对非 ASCII 段也折叠，或引入按真实目录项规范化的路径层；两者都会改变资产键、receipt 事实与旧计划的键语义，无法在 archive_scope 内自证安全，按裁决未用全局 casefold 硬过测 |
 
+> 2026-11-13 AR4 后续：AR3-04/05、计划保存旁路与 schema 4→5 已在 AR4-01..08 关闭；上表保留当时 N1/N2 的实现状态，不改写历史。
+
 已知边界：
 
 - `archive_plan_store.save_prepared_plan_in_transaction` 仍按"当前 revision 比较"推进
   绑定；本包未修改该文件，新的受控命令不经过它。接线时必须把 expected binding 作为该
   计划的不可变输入传进去（N3 任务）。
+- 2026-11-13 AR4/R3 更新：上述旁路已关闭；计划保存不再推进已有绑定，统一走
+  `apply_observed_plan`。
 - 旧审计脚本 `docs/audits/2026-11-12-a1/evidence/probes.py` 直接以 autocommit 调用
   `ensure_archive_asset` 等写接口，按新契约会得到 `ArchiveTransactionRequiredError`；
   它是历史证据，不在本包修改范围。

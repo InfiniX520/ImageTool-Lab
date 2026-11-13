@@ -346,25 +346,25 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-13",
-      "phase": "A1 schema 4 acceptance transaction independently audited at 2ccabca",
-      "status": "independent_audit_eight_open_two_p1_six_p2_not_production_ready",
+      "phase": "A1 AR4-01..08 closed at dda6fc1; schema 5; offline acceptance complete",
+      "status": "offline_ar4_findings_closed_not_production_wired",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet.",
+      "next_step": "R5/R6 complete: AR4-01..08 closed at dda6fc1; A1 offline interface ready for production wiring review (U1-A/J-01). Real gallery, cloud readback, release and production migration remain separate gates.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "latest_batch": "JPGPNG-A1-AR4-20261113-01",
       "foundation": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
-      "evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
+      "evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
       "previous_completed_batch": "JPGPNG-A1-SCOPE-ADAPTER-20261111-01",
-      "unfinished_draft": "AR4-01..08 open; AR3-03/10 original cases closed; AR3-07/08 remain closed",
+      "unfinished_draft": "AR4-01..08 closed; AR3-07/08 remain closed; production J-01/U1-A not wired",
       "latest_repair_evidence": ".runtime/jpgpng_a1_repair_20261112_01/validation.json",
       "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json"
+      "latest_evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml"
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
       "date": "2026-11-11",
-      "status": "independent_audit_eight_open_two_p1_six_p2_not_production_ready",
+      "status": "offline_ar4_findings_closed_not_production_wired",
       "overview": "docs/archiving/README.md",
       "design": "docs/archiving/DESIGN.md",
       "acceptance": "docs/archiving/ACCEPTANCE.md",
@@ -393,14 +393,14 @@
       "first_transport": "Manual official Quark client; user attests origin, program verifies full bytes; not automated provider proof",
       "stages": {
         "A0": "design_ready",
-        "A1": "partial_implementation_independently_audited_at_2ccabca_findings_open",
+        "A1": "offline_implementation_complete_ar4_closed_not_production_ready",
         "A2": "not_started",
         "A3": "not_started",
         "A4": "not_started",
         "A5": "not_started",
         "A6": "not_started"
       },
-      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet.",
+      "next_step": "R5/R6 complete: AR4-01..08 closed at dda6fc1; A1 offline interface ready for production wiring review (U1-A/J-01). Real gallery, cloud readback, release and production migration remain separate gates.",
       "user_action_now": "No retrieval, password or account access needed",
       "later_user_action": "A4 upload and retrieve generated harmless test packages, approximately several hundred MiB to 2 GiB",
       "gates": [
@@ -410,17 +410,17 @@
         "Precise file identity and explicit batch release only after evidence gates",
         "Register archive_store as protected business data before creating it"
       ],
-      "scope_note": "Schema 4 / plan 3 / receipt 2; accepted-event writer and source checks improved. Two P1 binding/plan-state issues and six P2 remain; no production or real archive/readback/release.",
+      "scope_note": "Schema 5 / plan 3 / receipt 2; AR4-01..08 closed; v4 drafts refused; no production or real archive/readback/release.",
       "current_foundation": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
-      "current_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
-      "latest_batch": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "current_evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
+      "latest_batch": "JPGPNG-A1-AR4-20261113-01",
       "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json"
+      "latest_evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml"
     },
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
       "date": "2026-11-11",
-      "status": "independent_audit_eight_open_two_p1_six_p2_not_production_ready",
+      "status": "offline_ar4_findings_closed_not_production_wired",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
       "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
@@ -440,7 +440,7 @@
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
-        "U1-A_A1": "AR4-01..08 pending: binding token, plan application, replay, multi-path identity, aliases, write/audit invariants, SQL growth and integration; original production J-01 remains pending.",
+        "U1-A_A1": "AR4-01..08 closed at dda6fc1; original production J-01 remains pending.",
         "U1-B": "Shared dependency maintenance pending; separate governed environment change",
         "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
         "U2-A": "Coverage and pending-reason summaries pending",
@@ -453,11 +453,11 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-A1-ACCEPTANCE-AUDIT-20261112-01",
+      "latest_batch": "JPGPNG-A1-AR4-20261113-01",
       "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
-      "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_acceptance_audit",
-      "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet."
+      "latest_evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
+      "historical_tests_note": "tests and implemented above describe the first pure-policy batch, not current whole-tree acceptance; latest results in a1_ar4_repair and docs/maintenance/2026-11-13_jpgpng_a1_ar4_fix.md",
+      "next_step": "R5/R6 complete: AR4-01..08 closed at dda6fc1; A1 offline interface ready for production wiring review (U1-A/J-01). Real gallery, cloud readback, release and production migration remain separate gates."
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
@@ -634,6 +634,34 @@
       "product_source_changed_by_auditor": false,
       "product_ready": false,
       "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet."
+    },
+    "a1_ar4_repair": {
+      "id": "JPGPNG-A1-AR4-20261113-01",
+      "date": "2026-11-13",
+      "status": "offline_acceptance_complete_ar4_findings_closed_not_production_wired",
+      "base_commit": "57a25329f3e0eb29cb3df44c4252301daab0d1cf",
+      "product_commit": "dda6fc1596583d060bbec004665c2be851ec94b6",
+      "branch": "fix/a1-ar3-20261112",
+      "findings_closed": ["AR4-01", "AR4-02", "AR4-03", "AR4-04", "AR4-05", "AR4-06", "AR4-07", "AR4-08"],
+      "full": {
+        "total": 1494,
+        "passed": 1491,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 3,
+        "seconds": 218.137,
+        "report": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
+        "note": "tests/test_collection_presentation.py ignored (Tk environment); that file separately 4/4 passed"
+      },
+      "independent": {
+        "ar4_acceptance": {"total": 23, "passed": 23, "failed": 0},
+        "ar4_atomic_plan": {"total": 6, "passed": 6, "failed": 0}
+      },
+      "scale": "../.runtime/jpgpng_a1_ar4_20261113_01/scale_atomic02/result.json",
+      "crash": "../.runtime/jpgpng_a1_ar4_20261113_01/crash_atomic01/results.json",
+      "report": "docs/maintenance/2026-11-13_jpgpng_a1_ar4_fix.md",
+      "product_ready": false,
+      "next_step": "A1 offline interface may enter production wiring review (U1-A/J-01); real gallery, cloud readback, release and production migration remain separate gates."
     }
   }
 }

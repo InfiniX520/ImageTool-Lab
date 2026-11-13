@@ -1181,17 +1181,17 @@
         "修正对抗审查发现的同路径多代次查询、旧计划重载、转移意图绑定、释放 operation 跨内容、异常类型与队列字节计费"
       ],
       "verification": {
-        "focused_report": "../.runtime/jpgpng_a1_repair_20261112_01/archive_focused09.xml",
+        "focused_report": ".runtime/jpgpng_a1_repair_20261112_01/archive_focused09.xml",
         "focused_passed": 203,
         "focused_failed_or_errors": 0,
         "focused_skipped": 0,
-        "independent_scope_report": "../.runtime/jpgpng_a1_repair_20261112_01/scope_independent04.xml",
+        "independent_scope_report": ".runtime/jpgpng_a1_repair_20261112_01/scope_independent04.xml",
         "independent_scope_passed": 92,
-        "full_clean_report": "../.runtime/jpgpng_a1_repair_20261112_01/full03.xml",
+        "full_clean_report": ".runtime/jpgpng_a1_repair_20261112_01/full03.xml",
         "full_clean_passed": 1298,
         "full_clean_failed_or_errors": 0,
         "full_clean_skipped": 3,
-        "full_latest_report": "../.runtime/jpgpng_a1_repair_20261112_01/full11.xml",
+        "full_latest_report": ".runtime/jpgpng_a1_repair_20261112_01/full11.xml",
         "full_latest_passed": 1300,
         "full_latest_errors": 1,
         "full_latest_error_cause": "Tk/Tcl environment setup error in tests/test_collection_presentation.py; not a product assertion failure",
@@ -1215,8 +1215,8 @@
         "No multi-process writer, crash/WAL recovery, real symlink, real gallery, tools, password, upload, readback or release"
       ],
       "evidence": "docs/maintenance/2026-11-12_jpgpng_a1_repair.md",
-      "validation": "../.runtime/jpgpng_a1_repair_20261112_01/validation.json",
-      "checkpoint": "../.runtime/jpgpng_a1_repair_20261112_01/checkpoint_lowlevel_receipt_20261112/manifest.json",
+      "validation": ".runtime/jpgpng_a1_repair_20261112_01/validation.json",
+      "checkpoint": ".runtime/jpgpng_a1_repair_20261112_01/checkpoint_lowlevel_receipt_20261112/manifest.json",
       "next_step": "Decide whether to remove the low-level require_receipt=False compatibility path; separately evaluate PathRef.target_key vs inventory; then production schema-3/single-writer review. A1 remains not production-ready.",
       "remaining": [
         "A1-04 all default plan APIs enforce ScopeReceipt; explicit require_receipt=False synthetic bypass remains",
@@ -1306,6 +1306,44 @@
       "evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
       "next_step": "R0 integrate independent regressions; R1 binding/acceptance token, complete idempotence and write/read invariants; R2 multi-path revisions and aliases; R3 atomic observed-plan application; R4 query/index growth; R5 retained regressions/crash; R6 final integration and records. No production/archive/cloud/release yet.",
       "product_source_changed": false,
+      "business_data_changed": false
+    },
+    {
+      "session_date": "2026-11-13",
+      "id": "JPGPNG-A1-AR4-20261113-01",
+      "summary": "完成 AR4-01..08：绑定令牌/幂等/写读不变量、资产级多路径历史、真实目录项别名、唯一原子接受+计划命令、schema 5 覆盖索引与 v4 拒绝；29 项独立测试、2,000 文件整链和提交前后进程退出通过；未接生产。",
+      "product_commit": "dda6fc1596583d060bbec004665c2be851ec94b6",
+      "tests": {
+        "full": {
+          "total": 1494,
+          "passed": 1491,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 3,
+          "seconds": 218.137,
+          "report": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
+          "note": "tests/test_collection_presentation.py ignored (Tk environment); that file separately 4/4 passed"
+        },
+        "independent": {
+          "ar4_acceptance": {"total": 23, "passed": 23, "failed": 0},
+          "ar4_atomic_plan": {"total": 6, "passed": 6, "failed": 0}
+        }
+      },
+      "scale": {
+        "files": 2000,
+        "changed_batch": 20,
+        "command_seconds": 10.69,
+        "report": "../.runtime/jpgpng_a1_ar4_20261113_01/scale_atomic02/result.json"
+      },
+      "crash": {
+        "before_commit": "0 rows after exit 97; reopen accepted 20",
+        "after_commit": "20 bindings/checks/acceptances + 1 batch after exit 98; reopen accepted 20",
+        "report": "../.runtime/jpgpng_a1_ar4_20261113_01/crash_atomic01/results.json"
+      },
+      "report": "docs/maintenance/2026-11-13_jpgpng_a1_ar4_fix.md",
+      "evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/measure/REPORT.md",
+      "next_step": "A1 offline interface may enter production wiring review (U1-A/J-01); real gallery, cloud readback, release and production migration remain separate gates.",
+      "product_source_changed": true,
       "business_data_changed": false
     }
   ]

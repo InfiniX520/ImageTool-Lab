@@ -4,7 +4,7 @@
 
 ## 目标与当前边界
 
-承接 [A1 基础](A1_FOUNDATION.md)，在合成目录中实现显式范围元数据枚举、稳定分页游标，以及显式临时库的计划保存/重载。本页记录 2026-11-11 历史批次；2026-11-12 修复批次已改为 schema 3、分段计划与 ScopeReceipt，最新状态见[归档实施日志](IMPLEMENTATION_LOG.md)第 3C 节。
+承接 [A1 基础](A1_FOUNDATION.md)，在合成目录中实现显式范围元数据枚举、稳定分页游标，以及显式临时库的计划保存/重载。本页记录 2026-11-11 历史批次；2026-11-12 修复批次当时改为 schema 3、分段计划与 ScopeReceipt；2026-11-13 AR4 后当前为 schema 5，最新状态见[归档实施日志](IMPLEMENTATION_LOG.md)第 10 节。
 
 本批不扫描真实图库、不改生产数据库或下载入口，不接入 LibraryRepository._enqueue/_dispatch，不封包、上传、回读、释放或删除。生产 LibraryRepository._enqueue 影响为 HIGH（9 个直接调用者/3 条流程），本批明确不修改它。
 
@@ -22,7 +22,7 @@ ScopeEnumerator(root, ScopeRequest(prefixes, files, kind, root_id, root_revision
 
 ## 临时计划适配
 
-当前实现为 `save_archive_plan(conn, inventory, capacity, scope=...)` / `prepare_archive_plan` / `save_prepared_plan_in_transaction`，只接受显式 sqlite3.Connection，要求现有 schema 3、foreign_keys=ON、query_only=OFF 和正确的事务所有权。历史 schema 2 段落只作背景。
+当前实现为 `save_archive_plan(conn, inventory, capacity, scope=...)` / `prepare_archive_plan` / `save_prepared_plan_in_transaction`，只接受显式 sqlite3.Connection，当时要求 schema 3、foreign_keys=ON（现行为 schema 5）、query_only=OFF 和正确的事务所有权。历史 schema 2 段落只作背景。
 
 - 保存完整版本化 ArchiveInventory/CapacityPlan 文档：inventory 切为 `archive_plan_segments` 有界分段，header 只留 scope/摘要；内容/路径复用 ensure_archive_asset，同资产新代次可条件更新路径绑定。
 - 计划包仅 planned，工具、密钥引用、大小/摘要保持未知；不写 archive_members/objects/locations/checks/releases，不形成完成账本。
@@ -36,5 +36,5 @@ ScopeEnumerator(root, ScopeRequest(prefixes, files, kind, root_id, root_revision
 下一步：
 1. 将 `ScopeReceipt` 从“提供时校验、持久化并在重载时验证”推进为“所有新计划必须携带”；当前计划层仍接受不带 receipt 的计划，这是 A1-04 的剩余未闭环点。
 2. 单独评估 `PathRef.target_key` 的 casefold 语义与下游 inventory 碰撞；当前范围层保留 NFC/NFD 物理不同路径，不静默丢失。
-3. 在合成范围完成“枚举→观察→清单→临时计划”整链预算，随后独立评审生产 schema 3/唯一写入者接入；禁止直接投产临时迁移器。
+3. 在合成范围完成“枚举→观察→清单→临时计划”整链预算，随后独立评审生产 schema 3/唯一写入者接入（当时；现为 schema 5）；禁止直接投产临时迁移器。
 4. A2 工具/密码、A3–A6 与 U1-B/U1-C/U2/U3/U4、E1-3/4 保留各自门槛。

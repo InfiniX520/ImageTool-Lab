@@ -1,19 +1,20 @@
 # 版本留档与恢复
 
-**当前审计补充（2026-11-13）**：[2ccabca 接受事务复审](audits/2026-11-13-a1-acceptance/README.md)已形成。8 项开放，产品未验收；新开发先读当前 R0–R6。下列早期标签保留，不能当最新稳定发布。
+**当前修复补充（2026-11-13）**：AR4-01..08 已在 `dda6fc1` 关闭，schema 5；A1 离线验收完成，产品尚未接生产。当前记录见[维护记录](maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)。早期标签与历史审计保留，不能当最新稳定发布。
 
-更新日期：2026-11-12。仓库：[InfiniX520/ImageTool-Lab](https://github.com/InfiniX520/ImageTool-Lab)，当前为用户自己的私有 GitHub 仓库。继续使用现有 origin 和登录，不改变仓库可见性。
+更新日期：2026-11-13。仓库：[InfiniX520/ImageTool-Lab](https://github.com/InfiniX520/ImageTool-Lab)，当前为用户自己的私有 GitHub 仓库。继续使用现有 origin 和登录，不改变仓库可见性。
 
 ## 当前检查点
 
-本次保留两个标签：
+当前保留三个标签：
 
 - `checkpoint-2026-11-12-a1-audit`：与审计基线一致的 173 个 Python 文件，archive_schema 为 schema 2。
 - `checkpoint-2026-11-12-a1-wip`：开始留档时实际工作树，保留 archive_schema 已有的 schema 3 未验收草稿。
+- `checkpoint-2026-11-13-a1-ar4`：AR4-01..08 关闭、schema 5、独立测试与 2,000 文件/进程退出证据齐全的离线验收点；仍未生产接线。可用 `git rev-parse checkpoint-2026-11-13-a1-ar4^{}` 复核确切提交。
 
-两版都包含下载器重构、整理 CLI、优化/归档设计和审计文档。只在 Git 索引中取回已核验的旧 schema 文件形成前一个版本，当前工作树不被回退；随后保存现有草稿。版本边界见[本次说明](maintenance/2026-11-12_version_checkpoint.md)。
+这些标签都包含下载器重构、整理 CLI、优化/归档设计和审计文档。只在 Git 索引中取回已核验的旧 schema 文件形成前一个版本，当前工作树不被回退；随后保存现有草稿。版本边界见[本次说明](maintenance/2026-11-12_version_checkpoint.md)。
 
-前一标签是“审计后、修复前”的可恢复基线，对应 A1 相关测试 250 通过、5 失败、3 跳过。后一标签是未重新测试的开发中快照，不能沿用这组统计；也不能凭 schema 号提升或局部改动声称 12 项问题已修复。两者均不是全部功能通过的稳定发布。下一步按[开发指导](audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md)先核对草稿再推进。检查点标签不可移动来掩盖后来改动。
+前一标签是“审计后、修复前”的可恢复基线，对应 A1 相关测试 250 通过、5 失败、3 跳过。后一标签是未重新测试的开发中快照，不能沿用这组统计；也不能凭 schema 号提升或局部改动声称 12 项问题已修复。这些标签均不是生产发布。AR4 修复已完成离线验收；下一步是生产接线评审（U1-A/J-01）与 A2–A6/E1，见[当前总入口](optimization/IMPLEMENTATION.md)。检查点标签不可移动来掩盖后来改动。
 
 ## 保存什么
 

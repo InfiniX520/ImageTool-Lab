@@ -8,7 +8,7 @@
 
 **这是可离线验证的 A1 基础，不是生产归档发布，也不表示 J-01 已修复。**
 
-> 本页记录 2026-11-11 基础批次。2026-11-12 的修复批次已把临时库 schema 推进到 v3（内容/资产/路径绑定分离、分段计划、物理观察、释放事件），并完成范围/计划/单写入者离线联测；最新状态见[归档实施日志](IMPLEMENTATION_LOG.md)第 3C 节和[维护记录](../maintenance/2026-11-12_jpgpng_a1_repair.md)。本页的 v1→v2 描述保留为历史，不覆盖最新实现。
+> 本页记录 2026-11-11 基础批次。2026-11-12 的修复批次当时把临时库 schema 推进到 v3（内容/资产/路径绑定分离、分段计划、物理观察、释放事件）；2026-11-13 AR4 后当前为 schema 5。最新状态见[归档实施日志](IMPLEMENTATION_LOG.md)第 10 节和[维护记录](../maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)。本页的 v1→v2 描述保留为历史，不覆盖最新实现。
 
 ## 模块职责
 
@@ -39,7 +39,7 @@ Windows 本机使用 st_dev/st_ino 身份；这不是对抗性写者的原子锁
 
 ## 临时库 schema 与迁移
 
-历史基础批次使用 schema 2；当前修复批次已到 schema 3：archive_contents（内容代次）、archive_assets（路径/来源）、archive_path_bindings（当前路径绑定）分开，archive_plan_segments 保存有界计划文档，archive_objects 独立表示真实包/恢复/控制对象，位置绑定具体对象代次。本地与归档 evidence_json 是带完整类型信息的不可变快照，校验器检查索引列、JSON、内容/路径、包成员、位置、转移意图与释放 operation 关联。细节以 `core/archive_schema.py` 当前实现为准。
+历史基础批次使用 schema 2；当时修复批次到 schema 3（现行为 schema 5）：archive_contents（内容代次）、archive_assets（路径/来源）、archive_path_bindings（当前路径绑定）分开，archive_plan_segments 保存有界计划文档，archive_objects 独立表示真实包/恢复/控制对象，位置绑定具体对象代次。本地与归档 evidence_json 是带完整类型信息的不可变快照，校验器检查索引列、JSON、内容/路径、包成员、位置、转移意图与释放 operation 关联。细节以 `core/archive_schema.py` 当前实现为准。
 
 只可通过 migrate_archive_copy(path, backup, temporary_copy_confirmed=True) 显式迁移已关闭的临时副本。使用现有 .writer.lock、逐项旧 DDL 预检、只读完整性检查、独立不覆盖备份、BEGIN IMMEDIATE 和回滚。未知/未来版本或不兼容对象拒绝。
 

@@ -17,7 +17,7 @@
 
 ## 当前进度与计划
 
-- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：2ccabca：现有全量 1,412 通过/3 跳过；未合入的独立反例 22 通过/1 失败；8 项开放（2 P1、6 P2），A1 未验收。
+- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：dda6fc1：AR4-01..08 已关闭；schema 5；全量 1,494 项 1,491 通过/3 跳过（Tk 文件单独 4/4），独立 29/29；A1 离线验收完成，尚未接生产。
 - [当前接受事务复审与开发指导](audits/2026-11-13-a1-acceptance/README.md)：AR4、修复复核、R0–R6 和版本证据。
 - [上一轮后续实现审计](audits/2026-11-12-a1-final/README.md)：历史 AR3、N0–N6 与原始证据，不能当新树结果。
 - [上一轮 A1 修复后复审与开发指导](audits/2026-11-12-a1-recheck/README.md)：逐项复核首轮修复、实际反例和 F0–F5，先补约束再评审生产。
