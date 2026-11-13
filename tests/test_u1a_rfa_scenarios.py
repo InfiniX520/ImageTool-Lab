@@ -1,9 +1,15 @@
 """Independent RFA acceptance scenarios (T lane).
 
 These are the *next round's* acceptance input: every case below states a
-requirement frozen in docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V3.md and
-is expected to be RED at 336541b because the product does not implement that
-requirement yet -- never because of a fixture or syntax problem.
+requirement frozen in docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md and
+is expected to be RED at the round's base commit because the product does not
+implement that requirement yet -- never because of a fixture or syntax problem.
+
+Contract v4 changed the evidence model: a progress record is only a candidate
+hint, and every reused artifact is observed once more before the writer command
+is queued (Sec.2.2 "pre-commit confirm pass").  The four record-reuse cases
+below are therefore written against the two phases instead of "reuse means no
+I/O at all".
 
 Synthetic SQLite, synthetic PNG and temporary directories only.  No network,
 no account, no production library and no real gallery is touched.
@@ -13,12 +19,12 @@ Mapping (contract section -> test):
 * R-A  Sec.1.2/1.4/1.6  progress survives an attempt, a page replays for free
 * R-A  Sec.1.1          max_slices is a budget result, never a file verdict
 * R-A  Sec.1.4          a page of many multi-page works fits the slice budget
-* R-A  Sec.1.3          only fresh progress may replace a real observation
+* R-A  Sec.2.2/3.1      a fresh slice hints, the confirm pass verifies, old is history
 * R-A  Sec.1.1          a pause between slices keeps the finished slice
-* R-A  Sec.1.3.1        a moved artifact row invalidates its progress record
-* R-A  Sec.1.3.6        a moved disk identity invalidates the progress record
+* R-A  Sec.2.2          a moved artifact row is re-observed in the slice phase
+* R-A  Sec.2.2          a moved disk identity is re-observed in the slice phase
 * R-A  Sec.1.3.6        a record without an object identity is not evidence
-* R-A  Sec.1.3.6/1.1    a matching identity is reused and its stat costs no slot
+* R-A  Sec.2.2/6        a matching record saves the slot but still needs confirming
 * R-B  Sec.2.2          an unreachable root never cancels a delivery
 * R-B  Sec.2.3/2.4      cleanup claims nothing while offline, retries after
 * R-B  Sec.2.4          legacy "cleaned" facts and bad rows do not hold the window
@@ -36,28 +42,13 @@ Mapping (contract section -> test):
 * R-A  Sec.1.3.7        an offline root is not relaxed and the 120 s window holds
 * R-B  Sec.2.6          a refused cancel reports the winner instead of a fault
 
-Two baselines matter for this file.  Against product 336541b (S0 only) every case
-below fails; against the merged product c24becd (S1+S2+S3 landed, before the
-v3.2-v3.4 fixes) the file is 25 tests, 21 passed, 4 failed, 0 errors, 88.8 s
-(`lanes/tests/run15.xml`), and the four failures are exactly the last four
-entries above (P2-1, P2-2, the P2-2 boundary and P3-2).
-
-Red baseline at 336541b: 21 tests, 21 failed, 0 errors, 42.9 s
-(`lanes/tests/run09.xml`), none for a fixture or syntax reason:
-
-* missing interface x3: `PageBudget(max_slices=...)` (two cases) and
-  `LineageResult`/`queries` from `core.delivery_lineage`
-* no resumable progress x7: the resumed / paused / expired / moved-row /
-  moved-identity / anonymous-identity attempts hit `page_file_budget` again
-  instead of reusing a persisted slice, a 36 file page fails instead of taking
-  two slices, and 32 matching stat rechecks still consume `max_files=1`
-* R-B x5: an unreachable root cancels the row, cleanup claims "already absent",
-  a legacy `outcome=cleaned` fact stays in the window, an unparsable row
-  starves `limit=1`, and a losing compensation raises `_StorageFault`
-* R-C x6: a foreign-quality and a missing handover target silently fall back to
-  rowid, `LineageResult` is absent, a 64 link chain runs 41,449 scans, a 24
-  wide fan runs 12,951, and both the read path and recovery follow the newer
-  unrelated pending instead of the recorded handover
+Historical baselines are kept in LOG.json and the audit reports: against
+product 336541b this file was 21 tests / 21 failed, and against the merged
+product c24becd it was 25 tests / 21 passed / 4 failed.  Both numbers predate
+contract v4.  The four record-reuse cases now also require the Sec.2.2 confirm
+pass, so their expected observation counts are 33 (1 slice + 32 confirm, or
+2 + 31 for a moved record) instead of 1/2/2/2, and the file is expected to be
+red again until S1 lands the confirm pass.
 """
 from __future__ import annotations
 
@@ -163,6 +154,34 @@ def instrument_observations(repo, monkeypatch, ids, records=None):
 
     monkeypatch.setattr(repo, "_observe_artifact", counted)
     return counted
+
+
+def instrument_phases(repo, monkeypatch):
+    """Split the observations of one acceptance into its two contract phases.
+
+    Contract v4 Sec.2.2: a record read from `page_observation_progress` is a
+    candidate *hint*.  The slice phase may skip it, but before the writer
+    command is queued every reused artifact is observed once more.  The product
+    persists a finished slice through `record_page_observation` before that
+    confirm pass, so that frozen call is the observable phase boundary.
+    """
+    original = repo._observe_artifact
+    phases = {"slice": [], "confirm": [], "boundary": False}
+
+    def counted(artifact, **kwargs):
+        target = "confirm" if phases["boundary"] else "slice"
+        phases[target].append(str(artifact["artifact_id"]))
+        return original(artifact, **kwargs)
+
+    monkeypatch.setattr(repo, "_observe_artifact", counted)
+    persist = repo.record_page_observation
+
+    def marked(*args, **kwargs):
+        phases["boundary"] = True
+        return persist(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "record_page_observation", marked)
+    return phases
 
 
 def prepared_reuse_page(repo, root, monkeypatch, *, request_id, pages=33):
@@ -556,7 +575,14 @@ def test_a_page_with_twelve_multi_page_works_commits_within_the_slice_budget(tmp
 
 
 def test_progress_events_are_reused_only_inside_the_health_window(tmp_path, monkeypatch):
-    """Sec.1.3: a durable slice replaces re-hashing only while it is fresh."""
+    """Sec.2.2/3.1: a fresh slice only hints; the pre-commit pass still verifies.
+
+    Contract v4 splits the layers.  A `page_observation_progress` record may
+    keep the slice phase from opening those 32 files again, but the confirm
+    pass must open every reused artifact exactly once.  A record older than
+    `max_age_seconds` is not even a hint: the next attempt observes from
+    scratch, which is why a 1 file slice cannot cover the page.
+    """
     root = tmp_path / "library"
     root.mkdir()
     from core.observation_snapshot import PageBudget, PreflightCancelled
@@ -585,38 +611,47 @@ def test_progress_events_are_reused_only_inside_the_health_window(tmp_path, monk
         assert caught.value.reason == "page_file_budget"
         assert len(captured) == 32
         records = progress_records(captured)
+        cached = {record["artifact_id"] for record in records}
+        never_observed = set(all_artifacts(repo)) - cached
+        assert len(never_observed) == 1
 
         write_progress_event(repo, job, page, records)
-        seen = observe(repo, monkeypatch)
+        phases = instrument_phases(repo, monkeypatch)
         try:
-            repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
+            repo.accept_source_page(
+                job["batch_id"], page, page_budget=PageBudget(max_files=1)
+            )
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.2: the persisted slice must be reusable by the next "
-                f"acceptance, but it raised {exc.reason!r}"
+                "Sec.2.2: cached hints must not consume max_files and the page "
+                f"must commit, but the acceptance raised {exc.reason!r}"
             )
-        assert len(seen) == 1, (
-            "Sec.1.3: the 32 recorded files must be reused; "
-            f"{len(seen)} files were hashed again"
+        assert phases["slice"] == sorted(never_observed), (
+            "Sec.2.2: the slice phase may open only the file no record covers; "
+            f"got {phases['slice']}"
         )
+        assert len(phases["confirm"]) == 32 and set(phases["confirm"]) == cached, (
+            "Sec.2.2: every reused artifact must be confirmed exactly once; got "
+            f"{sorted(phases['confirm'])}"
+        )
+        assert checkpoint(repo, job) is not None
 
         # A slice older than max_age_seconds is history, never current evidence.
         # The previous batch must settle first: one active batch at a time.
         settle(repo, job)
         job = h.submit(repo, request_id="reuse-33-aged")
         write_progress_event(repo, job, page, records, age_seconds=1200)
-        seen.clear()
-        try:
-            repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
-        except PreflightCancelled as exc:
-            pytest.fail(
-                "Sec.1.4: an expired slice must fall back to fresh observation "
-                f"and still commit, but it raised {exc.reason!r}"
+        seen = observe(repo, monkeypatch)
+        with pytest.raises(PreflightCancelled) as aged:
+            repo.accept_source_page(
+                job["batch_id"], page, page_budget=PageBudget(max_files=1)
             )
-        assert len(seen) == 33, (
-            "Sec.1.3.4: records older than max_age_seconds must be discarded; "
-            f"only {len(seen)} files were observed"
+        assert aged.value.reason == "page_slice_limit", (
+            "Sec.3.1: an expired record is not a hint, so a 1 file slice cannot "
+            f"cover 33 files; got {aged.value.reason!r}"
         )
+        assert len(seen) <= PageBudget().max_slices
+        assert checkpoint(repo, job) is None
 
 
 def test_a_pause_between_slices_does_not_reobserve_the_finished_slice(tmp_path, monkeypatch):
@@ -665,7 +700,7 @@ def test_a_pause_between_slices_does_not_reobserve_the_finished_slice(tmp_path, 
 
 
 def test_a_newer_artifact_row_invalidates_its_stale_progress_record(tmp_path, monkeypatch):
-    """Sec.1.3.1: a progress record belongs to one artifact row identity."""
+    """Sec.2.2: a moved row is re-observed in the slice phase, not confirmed."""
     import threading
 
     root = tmp_path / "library"
@@ -697,23 +732,29 @@ def test_a_newer_artifact_row_invalidates_its_stale_progress_record(tmp_path, mo
             conn.commit()
 
         resumed = resume_job(repo, job, "resume-33-identity")
-        seen.clear()
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(resumed["batch_id"], page, page_budget=PageBudget())
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.3.1: the one unobserved file must be observed so the page "
+                "Sec.2.2: the one unobserved file must be observed so the page "
                 f"can commit, but the acceptance raised {exc.reason!r}"
             )
         expected = {moved} | (set(all_artifacts(repo)) - set(observed))
-        assert set(seen) == expected, (
-            "Sec.1.3.1: only the artifact whose row identity moved and the file "
-            "that was never observed may be opened again; got " + repr(sorted(seen))
+        assert set(phases["slice"]) == expected, (
+            "Sec.2.2: only the artifact whose row identity moved and the file "
+            "that was never observed may be opened during the slice phase; got "
+            + repr(sorted(phases["slice"]))
+        )
+        rest = set(all_artifacts(repo)) - expected
+        assert set(phases["confirm"]) == rest and len(phases["confirm"]) == len(rest), (
+            "Sec.2.2: the remaining cached artifacts are confirmed once each; got "
+            + repr(sorted(phases["confirm"]))
         )
 
 
 def test_a_disk_identity_change_invalidates_the_progress_record(tmp_path, monkeypatch):
-    """Sec.1.3.6: the recorded object identity must still be the one on disk."""
+    """Sec.2.2: a record whose object moved is re-observed, never confirmed."""
     root = tmp_path / "library"
     root.mkdir()
     from core.observation_snapshot import PageBudget, PreflightCancelled
@@ -737,16 +778,22 @@ def test_a_disk_identity_change_invalidates_the_progress_record(tmp_path, monkey
         }
         assert len(unobserved) == 1
 
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.3.6: a record whose disk identity moved must be re-observed "
+                "Sec.2.2: a record whose disk identity moved must be re-observed "
                 f"and the page must still commit, but it raised {exc.reason!r}"
             )
-        assert set(seen) == {moved} | unobserved, (
-            "Sec.1.3.6: only the drifted record and the never-observed file may be "
-            f"opened again; got {sorted(seen)}"
+        assert set(phases["slice"]) == {moved} | unobserved, (
+            "Sec.2.2: only the drifted record and the never-observed file may be "
+            f"opened during the slice phase; got {sorted(phases['slice'])}"
+        )
+        rest = set(all_artifacts(repo)) - {moved} - unobserved
+        assert set(phases["confirm"]) == rest, (
+            "Sec.2.2: the untouched records are confirmed once each; got "
+            f"{sorted(phases['confirm'])}"
         )
         assert len(page_links(repo, job["batch_id"])) == 33
 
@@ -786,7 +833,7 @@ def test_a_progress_record_without_an_identity_is_not_reused(tmp_path, monkeypat
 
 
 def test_a_progress_record_is_still_reused_when_the_disk_identity_matches(tmp_path, monkeypatch):
-    """Sec.1.3.6/1.1: a matching stat recheck keeps the record and costs no slot."""
+    """Sec.2.2/6: a matching record saves the slice slot, not the confirmation."""
     root = tmp_path / "library"
     root.mkdir()
     from core.observation_snapshot import PageBudget, PreflightCancelled
@@ -808,25 +855,27 @@ def test_a_progress_record_is_still_reused_when_the_disk_identity_matches(tmp_pa
         }
         assert len(unobserved) == 1
 
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(
                 job["batch_id"], page, page_budget=PageBudget(max_files=1)
             )
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.1/1.3.6: 32 matching stat rechecks must not consume "
-                f"max_files=1, but the acceptance raised {exc.reason!r}"
+                "Sec.2.2/6: 32 cached hints must not consume max_files=1, so the "
+                f"confirm pass is not a slice; the acceptance raised {exc.reason!r}"
             )
-        assert set(seen) == unobserved and len(seen) == 1, (
-            "Sec.1.3.6: every matching record must be reused without opening the "
-            f"file again; observed {sorted(seen)}"
+        assert phases["slice"] == sorted(unobserved), (
+            "Sec.2.2: the slice phase opens only the file no record covers; got "
+            f"{phases['slice']}"
+        )
+        assert len(phases["confirm"]) == 32 and set(phases["confirm"]) == {
+            record["artifact_id"] for record in records
+        }, (
+            "Sec.2.2: each matching record is confirmed exactly once; got "
+            f"{sorted(phases['confirm'])}"
         )
         assert len(page_links(repo, job["batch_id"])) == 33
-
-
-# ---------------------------------------------------------------------------
-# R-B: presence evidence, cleanup facts and recovery compensation
-# ---------------------------------------------------------------------------
 
 
 def test_an_unreachable_root_cannot_cancel_a_recovery_needed_delivery(tmp_path):
