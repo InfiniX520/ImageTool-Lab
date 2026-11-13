@@ -1,6 +1,6 @@
 # JpgPng 重构进度
 
-**当前接续**：最新版本、验证结果和待办以[联合实施总入口](../optimization/IMPLEMENTATION.md)及 `TASK_PLAN.current_plan.active_workstream` 为准；本页下方按原日期保留阶段历史。最新审计为 [U1-A RF 修复后独立审计](../audits/2026-11-13-u1a-rf-recheck/README.md)。生产归档和真实资料释放仍未发布。
+**当前接续**：版本、验证结果和待办以[联合实施总入口](../optimization/IMPLEMENTATION.md)及 `TASK_PLAN.current_plan.active_workstream` 为准；最新为 [U1-A RFA 修复后独立审计](../audits/2026-11-14-u1a-rfa-recheck/README.md)，RFB-01..06 待修。本页下方按原日期保留阶段历史；生产归档和真实资料释放仍未发布。
 
 **前置阶段补充（2026-11-13，dda6fc1）**：dda6fc1：AR4-01..08 已关闭；schema 5；全量 1,494 项 1,491 通过/3 跳过（Tk 文件单独 4/4），独立 29/29；A1 离线验收完成，尚未接生产。见[修复记录](../maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)；原轮次保持历史。
 

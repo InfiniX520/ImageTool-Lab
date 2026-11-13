@@ -1,0 +1,130 @@
+{
+  "full01.xml": {
+    "tests": 1831,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 4,
+    "passed": 1827,
+    "seconds": 471.421,
+    "source_sha256": "c8dc4c651bba85ca5ae70e6cda10b8731ab2da56b4001c43ca9056a64d060023",
+    "failed_cases": [],
+    "skipped_cases": [
+      "tests.test_local_observation.test_real_symlink_file_is_rejected_when_platform_supports_it",
+      "tests.test_local_observation.test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+      "tests.test_local_observation.test_real_symlink_root_is_rejected",
+      "tests.test_u1a_j01_health.test_w_phase_local_boundaries_are_not_wired_into_reuse_yet"
+    ]
+  },
+  "tk01.xml": {
+    "tests": 9,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 9,
+    "seconds": 5.361,
+    "source_sha256": "2b2327694f5e8004042bf18ce32bc7cac040f0d59e011c427f14aba755a517b8",
+    "failed_cases": [],
+    "skipped_cases": []
+  },
+  "probe01.xml": {
+    "tests": 7,
+    "failures": 7,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 0,
+    "seconds": 4.267,
+    "source_sha256": "b062e7fdd3309f6b45c265b8815557847748139b4e645f961c2194ee15da8119",
+    "failed_cases": [
+      "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[False]",
+      "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[True]",
+      "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[cache_cap]",
+      "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[progress_write]",
+      "test_cleanup_sweep_does_not_treat_examine_budget_as_end_of_queue",
+      "test_superseded_intermediate_event_can_lead_to_an_older_completed_artifact",
+      "test_unreadable_ledger_is_not_reported_as_a_recovery_classification"
+    ],
+    "skipped_cases": []
+  },
+  "probe02.xml": {
+    "tests": 10,
+    "failures": 8,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 2,
+    "seconds": 4.978,
+    "source_sha256": "a46fd76a2eefaf6be1437c40b91b60467d4a7822cc3c7c18dff2ec10f550a4ef",
+    "failed_cases": [
+      "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[False]",
+      "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[True]",
+      "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[cache_cap]",
+      "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[progress_write]",
+      "test_cleanup_sweep_does_not_treat_examine_budget_as_end_of_queue",
+      "test_superseded_intermediate_event_can_lead_to_an_older_completed_artifact",
+      "test_unreadable_ledger_is_not_reported_as_a_recovery_classification",
+      "test_a_single_file_cannot_silently_exceed_the_declared_slice_byte_budget"
+    ],
+    "skipped_cases": []
+  },
+  "probe03.xml": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 1,
+    "skipped": 0,
+    "passed": 0,
+    "seconds": 0.309,
+    "source_sha256": "e29f4d80dab86a76bb9c15f77f3afd92bb0fc40f2897fb693c131c7dc6ab0c4c",
+    "failed_cases": [],
+    "skipped_cases": []
+  },
+  "probe04.xml": {
+    "tests": 12,
+    "failures": 10,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 2,
+    "seconds": 6.193,
+    "source_sha256": "60401950246d40650c30c1ba9fe79ce58965c0847ba8983367b84eb13c837d42",
+    "failed_cases": [
+      "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[False]",
+      "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[True]",
+      "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[cache_cap]",
+      "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[progress_write]",
+      "test_cleanup_sweep_does_not_treat_examine_budget_as_end_of_queue[1]",
+      "test_cleanup_sweep_does_not_treat_examine_budget_as_end_of_queue[200]",
+      "test_superseded_intermediate_event_can_lead_to_an_older_completed_artifact",
+      "test_unreadable_ledger_is_not_reported_as_a_recovery_classification",
+      "test_recover_local_surfaces_an_unreadable_publication_ledger",
+      "test_a_single_file_cannot_silently_exceed_the_declared_slice_byte_budget"
+    ],
+    "skipped_cases": []
+  },
+  "notes": {
+    "author_error": "probe03 is a collection error in the new audit test indentation, corrected before probe04; not a product failure.",
+    "final_probe": "probe04.xml: 12 cases, 10 failing, 2 passing; six distinct findings, not ten defects.",
+    "previous_regressions": "The original 12 RFA regression function ASTs are identical to their imported tests; full suite includes old 15 and 14 regressions.",
+    "tk": "This audit first same-process run passed 9/9 with explicit Tcl/Tk paths; earlier implementation failures remain historical evidence, cause not proven.",
+    "capacity": "Cache retention probe scales MAX_PROGRESS_RECORDS to 3; it does not claim execution at the actual 4096-record cap.",
+    "cleanup": "Both limit=1 and default limit=200 executed; 11/2001 malformed predecessors respectively."
+  },
+  "portable01.xml": {
+    "tests": 12,
+    "failures": 10,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 2,
+    "seconds": 6.258,
+    "source_sha256": "f2d2788fc00391a50d84aa46a09554b0d5a9208565c89f7e4c051e6520d83d75"
+  },
+  "previous_regression_files": {
+    "tests.test_u1a_rfa_boundaries": 12,
+    "tests.test_u1a_fix_boundaries": 15,
+    "tests.test_u1a_independent_regressions": 14
+  },
+  "rfa_implementation_suite": {
+    "tests": 110,
+    "passed": 110,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  }
+}

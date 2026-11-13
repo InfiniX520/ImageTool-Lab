@@ -346,21 +346,21 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "RFA fix merged at 48a6968; RFA-01..07 closed by behaviour; not deployed",
-      "status": "fix_completed_pending_user_acceptance_not_production_ready",
+      "phase": "RFA fix re-audited at f7c389b; RFB-01..06 open; not deployed",
+      "status": "audit_completed_findings_open_not_production_ready",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "W5 wiring and the registered gaps (finish_source final-result query, intent projection/index, carry long transaction, claim statement count, real migration/backup/external volume) before any production gate.",
+      "next_step": "S0 align evidence/progress, cleanup EOF, lineage edges and recovery faults; S1 fix RFB-01/02/06 together; S2 RFB-03/05; S3 RFB-04; integrated re-audit before W5/production.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-RFA-FIX-20261114-01",
-      "foundation": "docs/optimization/2026-11-14/U1A_STATE_CONTRACT_V3.md",
-      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md",
-      "previous_completed_batch": "JPGPNG-U1A-RF-AUDIT-20261113-01",
-      "unfinished_draft": "RFA-01..07 closed; the read-only audit's P2-1/P2-2/P3-1/P3-2 also fixed; P3-3..P3-5 recorded as known boundaries.",
+      "latest_batch": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
+      "foundation": "docs/audits/2026-11-14-u1a-rfa-recheck/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
+      "previous_completed_batch": "JPGPNG-U1A-RFA-FIX-20261114-01",
+      "unfinished_draft": "Old RFA/RF/UA cases pass; six newly verified quality/progress/cleanup/recovery/resource defects remain.",
       "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md",
-      "latest_overview": "docs/audits/2026-11-13-u1a-rf-recheck/README.md",
-      "latest_evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
-      "audited_commit": "3839c90c3370673be6e0ea01096cbcc53a13a818",
+      "latest_overview": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md",
+      "latest_evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
+      "audited_commit": "f7c389b6250699060801609304417d2f58583ac8",
       "fixed_commit": "48a6968",
       "runtime_checkout_note": "Daily JpgPng checkout remains 5465e0c; the fix branch is not deployed."
     },
@@ -443,7 +443,7 @@
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
-        "U1-A_A1": "AR4 retained closed; old RF 15 and UA 14 cases pass at 3839c90. RFA-01..07 open; not deployed.",
+        "U1-A_A1": "AR4 preserved; old RFA 12, RF 15 and UA 14 pass at f7c389b. RFB-01..06 open; not deployed.",
         "U1-B": "Shared dependency maintenance pending; separate governed environment change",
         "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
         "U2-A": "Coverage and pending-reason summaries pending",
@@ -456,12 +456,12 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-U1A-RF-AUDIT-20261113-01",
-      "latest_overview": "docs/audits/2026-11-13-u1a-rf-recheck/README.md",
-      "latest_evidence": "docs/audits/2026-11-13-u1a-rf-recheck/evidence/results.json",
-      "historical_tests_note": "tests/implemented above describe the original pure-policy batch; current results/open findings are in u1a_rf_reaudit.",
-      "next_step": "S0 freeze progress/evidence/lineage contracts; S1 resumable observation; S2 root-aware cancellation and cleanup/CAS; S3 authoritative bounded lineage; S4 integrated audit before W5/production gates.",
-      "latest_audit": "docs/audits/2026-11-13-u1a-rf-recheck/README.md"
+      "latest_batch": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
+      "latest_overview": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md",
+      "latest_evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
+      "historical_tests_note": "tests/implemented above describe the original pure-policy batch; current results/open findings are in u1a_rfa_reaudit.",
+      "next_step": "S0 align evidence/progress, cleanup EOF, lineage edges and recovery faults; S1 fix RFB-01/02/06 together; S2 RFB-03/05; S3 RFB-04; integrated re-audit before W5/production.",
+      "latest_audit": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md"
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
@@ -943,6 +943,54 @@
       "business_data_changed": false,
       "deployed": false,
       "next_step": "W5 wiring and registered gaps; real migration/backup/external-volume rehearsal remains a separate gate."
+    },
+    "u1a_rfa_reaudit": {
+      "id": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
+      "date": "2026-11-14",
+      "status": "audit_completed_findings_open_not_production_ready",
+      "audited_commit": "f7c389b6250699060801609304417d2f58583ac8",
+      "product_commit": "48a6968",
+      "branch": "audit/u1a-rfa-recheck-20261114",
+      "report": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md",
+      "findings": "docs/audits/2026-11-14-u1a-rfa-recheck/FINDINGS.md",
+      "guide": "docs/audits/2026-11-14-u1a-rfa-recheck/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
+      "findings_open": {
+        "P1": 1,
+        "P2": 5,
+        "total": 6
+      },
+      "non_tk": {
+        "tests": 1831,
+        "passed": 1827,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 4
+      },
+      "tk": {
+        "tests": 9,
+        "passed": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "independent": {
+        "tests": 12,
+        "passed": 2,
+        "failures": 10,
+        "errors": 0,
+        "skipped": 0
+      },
+      "previous_regressions": {
+        "RFA": 12,
+        "RF": 15,
+        "UA": 14,
+        "result": "all passed in current full suite; RFA function AST unchanged"
+      },
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "product_ready": false,
+      "next_step": "S0 align evidence/progress, cleanup EOF, lineage edges and recovery faults; S1 fix RFB-01/02/06 together; S2 RFB-03/05; S3 RFB-04; integrated re-audit before W5/production."
     }
   }
 }

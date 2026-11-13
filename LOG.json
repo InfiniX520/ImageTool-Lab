@@ -1752,6 +1752,64 @@
       "organization": "One integration worktree plus four lane worktrees and a read-only measure checkout; audit reports, old worktrees and checkpoints preserved.",
       "limitations": "Synthetic offline tests only; no real gallery, account, network, external volume, migration or deployment. Tk same-process re-initialisation remains environment-flaky; the four existing skips are unchanged.",
       "history_errata": "The previous session guessed claim 60 and accept 8,020; the measured non-regression baseline for this round is claim 61 and 8,021, because the RF round added one batch-row read per claim."
+    },
+    {
+      "session_date": "2026-11-14",
+      "batch": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
+      "branch": "audit/u1a-rfa-recheck-20261114",
+      "summary": "f7c389b（产品 48a6968）独立复审：现有非 Tk 1,827 通过/4 跳过，Tk 首轮同进程 9/9；新增 12 项边界为 10 失败/2 通过，确认 RFB-01..06（1 P1、5 P2）。旧 RFA 12/RF 15/UA 14 仍通过。未改产品、未部署，日常目录保持 5465e0c。",
+      "audit": {
+        "id": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
+        "date": "2026-11-14",
+        "status": "audit_completed_findings_open_not_production_ready",
+        "audited_commit": "f7c389b6250699060801609304417d2f58583ac8",
+        "product_commit": "48a6968",
+        "branch": "audit/u1a-rfa-recheck-20261114",
+        "report": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md",
+        "findings": "docs/audits/2026-11-14-u1a-rfa-recheck/FINDINGS.md",
+        "guide": "docs/audits/2026-11-14-u1a-rfa-recheck/DEVELOPMENT_GUIDE.md",
+        "evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
+        "findings_open": {
+          "P1": 1,
+          "P2": 5,
+          "total": 6
+        },
+        "non_tk": {
+          "tests": 1831,
+          "passed": 1827,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "tk": {
+          "tests": 9,
+          "passed": 9,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "independent": {
+          "tests": 12,
+          "passed": 2,
+          "failures": 10,
+          "errors": 0,
+          "skipped": 0
+        },
+        "previous_regressions": {
+          "RFA": 12,
+          "RF": 15,
+          "UA": 14,
+          "result": "all passed in current full suite; RFA function AST unchanged"
+        },
+        "product_source_changed": false,
+        "business_data_changed": false,
+        "product_ready": false,
+        "next_step": "S0 align evidence/progress, cleanup EOF, lineage edges and recovery faults; S1 fix RFB-01/02/06 together; S2 RFB-03/05; S3 RFB-04; integrated re-audit before W5/production."
+      },
+      "organization": "One isolated worktree/report; current navigation and machine pointers aligned; history/checkpoints preserved.",
+      "limitations": "Synthetic offline only; no production/gallery/account/migration/cloud operations; four existing skips retained.",
+      "history_errata": "Implementation current docs mixed f7c389b/48a6968 with older 3839c90 evidence. Current pointers corrected; historical reports and 37 old sessions unchanged.",
+      "auditor_error": "probe03 collection failed due to indentation in a new audit test; corrected in probe04, raw failure retained separately from product defects."
     }
   ]
 }
