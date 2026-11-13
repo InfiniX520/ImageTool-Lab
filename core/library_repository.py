@@ -2770,12 +2770,14 @@ class LibraryRepository(
         artifact is never promoted to healthy, and a stale record is never
         treated as current proof.
 
-        A negative observation (unreadable or unrecognised) is the one
+        A negative observation (unreadable, unrecognised or absent) is the one
         controlled exception: inside `_NEGATIVE_REUSE_SECONDS` it may stand for
-        this attempt so that a page of broken files can still finish instead of
-        re-reading the same slice forever.  It carries no health: the writer
-        turns it into the same needs_verification hold a fresh look would, and
-        an unreachable root is never reused at all.
+        this attempt so that a page of broken or vanished files can still
+        finish instead of re-reading the same slice forever.  It carries no
+        health: the writer turns an unreadable/unrecognised record into the same
+        needs_verification hold and an absent record into the same repair
+        pending a fresh look would, and an unreachable root is never reused at
+        all.
         """
         if record is None or not _artifact_is_valid(artifact):
             return None
@@ -2799,7 +2801,11 @@ class LibraryRepository(
             return None
         if revision != expectation.root_revision or revision != record.root_revision:
             return None
-        if health.state in {LocalState.UNREADABLE, LocalState.UNKNOWN}:
+        if health.state in {
+            LocalState.UNREADABLE,
+            LocalState.UNKNOWN,
+            LocalState.MISSING,
+        }:
             if not self._negative_observation_is_fresh(health):
                 return None
             return health
@@ -2814,8 +2820,19 @@ class LibraryRepository(
         """True while a negative observation may hold a page's next slice.
 
         The window is deliberately much shorter than the health policy: it only
-        bridges the slices of one page, so a broken file is looked at again by
-        the next run instead of being frozen into a hold forever.
+        bridges the slices of one page, so a broken or vanished file is looked
+        at again by the next run instead of being frozen into a verdict forever.
+        An unparsable timestamp counts as expired (observe again), never as an
+        error.
+
+        Reusing an absent (§MISSING) record is safe even if the user restores
+        the file inside the window: the repaired delivery downloads to its own
+        staged temp and `_publish` finds the restored final name already there,
+        then verifies the final against this delivery's prepared identity.  A
+        restored file is a different object, so that check fails closed into
+        `_Fault("published_file_identity_mismatch", block=True)` and the
+        delivery becomes recovery_needed.  The restored file is never
+        overwritten, renamed or deleted.
         """
         try:
             checked = datetime.fromisoformat(health.checked_at)
