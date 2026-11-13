@@ -436,7 +436,7 @@ def new_redownload_pending(repo, request_id="unrelated"):
 
 
 def test_a_resumed_attempt_must_reuse_the_persisted_slice_not_rehash_it(tmp_path, monkeypatch):
-    """Sec.1.2/1.6.3: every attempt has to move forward, never re-read the same files."""
+    """Sec.3.2: 32 hints + 32 new observations cover the page in the second call."""
     root = tmp_path / "library"
     root.mkdir()
     from core.observation_snapshot import PageBudget, PreflightCancelled
@@ -451,47 +451,41 @@ def test_a_resumed_attempt_must_reuse_the_persisted_slice_not_rehash_it(tmp_path
         with pytest.raises(PreflightCancelled) as caught:
             repo.accept_source_page(job["batch_id"], page, page_budget=budget)
         assert caught.value.reason == "page_slice_limit", (
-            "Sec.1.1: one slice ends the call as a budget result"
+            "Sec.3.2: one slice ends the call as a budget result"
+        )
+        assert caught.value.details == {"new": 32, "persisted": 32, "remaining": 32}, (
+            "Sec.3.2: the budget result must prove its net progress, got "
+            f"{caught.value.details!r}"
         )
         first = list(seen)
-        assert len(first) == 32, "Sec.1.1: a slice opens at most max_files files"
+        assert len(first) == 32, "Sec.3.2: a slice opens at most max_files files"
         assert checkpoint(repo, job) is None, (
-            "Sec.1.6.1: a partial page must not advance the cursor"
+            "Sec.2.3: a partial page must not advance the cursor"
         )
 
         resumed = resume_job(repo, job, "resume-64-a")
-        seen.clear()
-        with pytest.raises(PreflightCancelled) as caught:
-            repo.accept_source_page(resumed["batch_id"], page, page_budget=budget)
-        assert caught.value.reason == "page_slice_limit", (
-            "Sec.1.1: the second slice is still a budget result"
-        )
-        second = list(seen)
-        overlap = sorted(set(first) & set(second))
-        assert not overlap, (
-            "Sec.1.2/1.6.3: the resumed attempt re-read "
-            f"{len(overlap)} already-observed files instead of reusing progress"
-        )
-        assert len(second) == 32, (
-            "Sec.1.4: the resumed attempt must observe the next slice, not nothing"
-        )
-        assert checkpoint(repo, resumed) is None
-
-        resumed = resume_job(repo, resumed, "resume-64-b")
-        seen.clear()
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(resumed["batch_id"], page, page_budget=budget)
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.4: once every file is observed the page must commit, but it "
-                f"raised {exc.reason!r}"
+                "Sec.3.2: the second call covers the page (32 hints + 32 new) and "
+                f"must commit instead of asking for one more slice; got {exc.reason!r}"
             )
-        assert seen == [], (
-            "Sec.1.3: the last attempt only has to commit already-observed files"
+        assert len(phases["slice"]) == 32, (
+            "Sec.3.2: the slice phase observes the next 32 files, got "
+            f"{len(phases['slice'])}"
+        )
+        assert set(phases["slice"]) == set(all_artifacts(repo)) - set(first), (
+            "Sec.3.2: the slice phase must not open the persisted hints"
+        )
+        assert len(phases["confirm"]) == 32 and set(phases["confirm"]) == set(first), (
+            "Sec.2.2: the confirm pass opens exactly the 32 reused hints; got "
+            f"{sorted(phases['confirm'])}"
         )
         current = checkpoint(repo, resumed)
         assert current is not None and current["cursor_json"] == '"cursor-1"', (
-            "Sec.1.6.1: the cursor advances only with the complete page"
+            "Sec.2.3: the cursor advances only with the complete page"
         )
         assert len(page_links(repo, resumed["batch_id"])) == 64
 
@@ -499,7 +493,7 @@ def test_a_resumed_attempt_must_reuse_the_persisted_slice_not_rehash_it(tmp_path
 def test_the_slice_limit_is_a_budget_result_and_an_accepted_page_replays_without_hashing(
     tmp_path, monkeypatch
 ):
-    """Sec.1.1/1.4: max_slices ends the call, and the commit replays for free."""
+    """Sec.3.2/2.2: max_slices ends a call only while the page is incomplete."""
     root = tmp_path / "library"
     root.mkdir()
     from core.observation_snapshot import PageBudget, PreflightCancelled
@@ -514,30 +508,42 @@ def test_the_slice_limit_is_a_budget_result_and_an_accepted_page_replays_without
         with pytest.raises(PreflightCancelled) as caught:
             repo.accept_source_page(job["batch_id"], page, page_budget=budget)
         assert caught.value.reason == "page_slice_limit", (
-            "Sec.1.1: exhausting max_slices is a budget result, not a file verdict"
+            "Sec.3.2: exhausting max_slices is a budget result, not a file verdict"
         )
-        assert len(seen) == 32, "Sec.1.1: one slice observes max_files files"
+        assert caught.value.details == {"new": 32, "persisted": 32, "remaining": 1}, (
+            f"Sec.3.2: the budget result must prove one file is left, got {caught.value.details!r}"
+        )
+        first = list(seen)
+        assert len(first) == 32, "Sec.3.2: one slice observes max_files files"
         assert checkpoint(repo, job) is None
 
         resumed = resume_job(repo, job, "resume-33-limit")
-        seen.clear()
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(resumed["batch_id"], page, page_budget=budget)
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.4: the second call must commit the one remaining file, "
+                "Sec.3.2: the second call must commit the one remaining file, "
                 f"but it raised {exc.reason!r}"
             )
-        assert list(seen) and len(seen) == 1, (
-            "Sec.1.3: only the unobserved file may be opened again"
+        unobserved = set(all_artifacts(repo)) - set(first)
+        assert phases["slice"] == sorted(unobserved), (
+            "Sec.3.2: the slice phase opens only the unobserved file; got "
+            f"{sorted(phases['slice'])}"
+        )
+        assert len(phases["confirm"]) == 32 and set(phases["confirm"]) == set(first), (
+            "Sec.2.2: the confirm pass opens the 32 reused hints; got "
+            f"{sorted(phases['confirm'])}"
         )
         links = page_links(repo, resumed["batch_id"])
         assert len(links) == 33, "the whole page commits atomically"
 
-        seen.clear()
+        phases["boundary"] = False
+        phases["slice"].clear()
+        phases["confirm"].clear()
         repo.accept_source_page(resumed["batch_id"], page, page_budget=budget)
-        assert seen == [], (
-            "Sec.1.4: an accepted page replays from its receipt with zero hashes"
+        assert phases["slice"] == [] and phases["confirm"] == [], (
+            "Sec.2.1: an accepted page replays from its receipt with zero hashes"
         )
         assert page_links(repo, resumed["batch_id"]) == links
 
@@ -655,7 +661,7 @@ def test_progress_events_are_reused_only_inside_the_health_window(tmp_path, monk
 
 
 def test_a_pause_between_slices_does_not_reobserve_the_finished_slice(tmp_path, monkeypatch):
-    """Sec.1.1/1.2: a pause persists the finished slice for the next run."""
+    """Sec.3.2/2.2: a pause persists the finished slice, which is then only confirmed."""
     import threading
 
     root = tmp_path / "library"
@@ -674,28 +680,32 @@ def test_a_pause_between_slices_does_not_reobserve_the_finished_slice(tmp_path, 
                 job["batch_id"], page, cancel=stop, page_budget=PageBudget()
             )
         assert caught.value.reason == "cancelled", (
-            "Sec.1.1: a pause is a control result, not a budget or file verdict"
+            "Sec.3.2: a pause is a control result, not a budget or file verdict"
         )
         first = list(seen)
         assert len(first) == 5
         assert checkpoint(repo, job) is None
 
         resumed = resume_job(repo, job, "resume-33-pause")
-        seen.clear()
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(resumed["batch_id"], page, page_budget=PageBudget())
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.2: the resumed run must continue from the paused slice, "
+                "Sec.3.2: the resumed run must continue from the paused slice, "
                 f"but it raised {exc.reason!r}"
             )
-        overlap = sorted(set(first) & set(seen))
-        assert not overlap, (
-            "Sec.1.2: the resumed run re-observed the paused slice: " + repr(overlap)
+        assert not set(phases["slice"]) & set(first), (
+            "Sec.2.2: the finished slice must not be opened during the slice "
+            f"phase; got {sorted(set(phases['slice']) & set(first))}"
         )
-        assert len(seen) == 28, (
-            "Sec.1.1: resume must observe only the 28 unfinished files, "
-            f"not {len(seen)}"
+        assert len(phases["slice"]) == 28, (
+            "Sec.3.2: resume must observe only the 28 unfinished files, "
+            f"not {len(phases['slice'])}"
+        )
+        assert len(phases["confirm"]) == 5 and set(phases["confirm"]) == set(first), (
+            "Sec.2.2: the five paused files are confirmed once each; got "
+            f"{sorted(phases['confirm'])}"
         )
 
 
@@ -799,7 +809,7 @@ def test_a_disk_identity_change_invalidates_the_progress_record(tmp_path, monkey
 
 
 def test_a_progress_record_without_an_identity_is_not_reused(tmp_path, monkeypatch):
-    """Sec.1.3.6: a record without an object identity is not current evidence."""
+    """Sec.2.2: an anonymous record is re-observed, then the rest is confirmed."""
     root = tmp_path / "library"
     root.mkdir()
     from core.observation_snapshot import PageBudget, PreflightCancelled
@@ -818,16 +828,22 @@ def test_a_progress_record_without_an_identity_is_not_reused(tmp_path, monkeypat
         }
         assert len(unobserved) == 1
 
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
         except PreflightCancelled as exc:
             pytest.fail(
-                "Sec.1.3.6: an anonymous record must be re-observed and the page "
+                "Sec.2.2: an anonymous record must be re-observed and the page "
                 f"must still commit, but it raised {exc.reason!r}"
             )
-        assert set(seen) == {anonymous} | unobserved, (
-            "Sec.1.3.6: only the anonymous record and the never-observed file may "
-            f"be opened again; got {sorted(seen)}"
+        assert set(phases["slice"]) == {anonymous} | unobserved, (
+            "Sec.2.2: the slice phase opens the anonymous record and the never "
+            f"observed file; got {sorted(phases['slice'])}"
+        )
+        rest = set(all_artifacts(repo)) - {anonymous} - unobserved
+        assert len(phases["confirm"]) == 31 and set(phases["confirm"]) == rest, (
+            "Sec.2.2: the 31 records with a matching identity are confirmed once "
+            f"each; got {sorted(phases['confirm'])}"
         )
         assert len(page_links(repo, job["batch_id"])) == 33
 
@@ -1618,8 +1634,9 @@ def negative_progress(repo, job, page, captured, *, age_seconds):
 def test_a_root_unavailable_page_is_not_relaxed_and_an_old_negative_record_is_reobserved(
     tmp_path, monkeypatch
 ):
-    """Sec.1.3.7 boundary: an offline root stops the page, the 120 s negative
-    window is honoured, and an older negative record is observed again."""
+    """Sec.3.2/2.2 boundary: an offline root stops the page, the 120 s negative
+    window is honoured, an older negative record is observed again, and the
+    positive hints are still confirmed once each."""
     from core.observation_snapshot import PageBudget, PreflightCancelled
     from core.preservation_policy import LocalState
 
@@ -1641,7 +1658,7 @@ def test_a_root_unavailable_page_is_not_relaxed_and_an_old_negative_record_is_re
                 f"volume, not hold it (attempt {attempt})"
             )
             assert checkpoint(repo, job) is None, (
-                "Sec.1.6.1: nothing may commit while the root is unavailable"
+                "Sec.2.3: nothing may commit while the root is unavailable"
             )
         with sqlite3.connect(repo.database_path) as conn:
             held = conn.execute(
@@ -1659,9 +1676,13 @@ def test_a_root_unavailable_page_is_not_relaxed_and_an_old_negative_record_is_re
             repo, recent_root, monkeypatch, request_id="reuse-33-recent-negative"
         )
         records = negative_progress(repo, job, page, captured, age_seconds=10)
+        negative_id = records[0]["artifact_id"]
+        positive = {record["artifact_id"] for record in records} - {negative_id}
+        assert len(positive) == 31
         unobserved = set(all_artifacts(repo)) - {
             record["artifact_id"] for record in records
         }
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
         except PreflightCancelled as exc:
@@ -1669,10 +1690,14 @@ def test_a_root_unavailable_page_is_not_relaxed_and_an_old_negative_record_is_re
                 "Sec.1.3.7: a recent negative record may be reused so the page "
                 f"commits, but the acceptance raised {exc.reason!r}"
             )
-        assert set(seen) == unobserved, (
+        assert phases["slice"] == sorted(unobserved), (
             "Sec.1.3.7: a 10 s old UNREADABLE record is inside the 120 s window "
-            "and must not be opened again; observed "
-            + repr(sorted(seen))
+            "and must not be opened in the slice phase; observed "
+            + repr(sorted(phases["slice"]))
+        )
+        assert len(phases["confirm"]) == 31 and set(phases["confirm"]) == positive, (
+            "Sec.2.2: the 31 positive hints are still confirmed once each; got "
+            + repr(sorted(phases["confirm"]))
         )
 
     # C: a 130 s old negative record is outside the window and is re-observed.
@@ -1684,9 +1709,11 @@ def test_a_root_unavailable_page_is_not_relaxed_and_an_old_negative_record_is_re
         )
         records = negative_progress(repo, job, page, captured, age_seconds=130)
         stale_id = records[0]["artifact_id"]
+        positive = {record["artifact_id"] for record in records} - {stale_id}
         unobserved = set(all_artifacts(repo)) - {
             record["artifact_id"] for record in records
         }
+        phases = instrument_phases(repo, monkeypatch)
         try:
             repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget())
         except PreflightCancelled as exc:
@@ -1694,12 +1721,15 @@ def test_a_root_unavailable_page_is_not_relaxed_and_an_old_negative_record_is_re
                 "Sec.1.3.7: a 130 s old negative record is outside the 120 s window "
                 f"and must be re-observed so the page commits; raised {exc.reason!r}"
             )
-        assert set(seen) == {stale_id} | unobserved, (
-            "Sec.1.3.7: only the stale negative record and the never-observed file "
-            f"may be opened again; got {sorted(seen)}"
+        assert set(phases["slice"]) == {stale_id} | unobserved, (
+            "Sec.1.3.7: the stale negative record and the never-observed file are "
+            "opened in the slice phase; got " + repr(sorted(phases["slice"]))
+        )
+        assert len(phases["confirm"]) == 31 and set(phases["confirm"]) == positive, (
+            "Sec.2.2: the 31 positive hints are confirmed once each; got "
+            + repr(sorted(phases["confirm"]))
         )
         assert len(page_links(repo, job["batch_id"])) == 33
-
 
 
 def test_a_refused_cancel_does_not_escape_a_storage_fault(tmp_path, monkeypatch):
