@@ -110,16 +110,21 @@
 
 ## 5. W6 规模与进程退出证据
 
-合成临时库：`E:\Zero9\JuiLiu\.runtime\u1a_scale_ilv7d16b`，仅 70 B 合成 PNG；不接触真实数据。
+独立规模代理完成两套冻结代码 pin：`d8de8dc`（旧）与 `d3c5cf8`（最终 core，HEAD 仅 docs 差异）。2,000 页 = 200 作品 × 10 页，合成 PNG，假 transport；结果、脚本、sha256 manifest 在 `E:\Zero9\JuiLiu\.runtime\jpgpng_u1a_w5_20261113_01\scale_probe`（[REPORT.md](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_w5_20261113_01/scale_probe/REPORT.md)、[summary.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_w5_20261113_01/scale_probe/results/summary.json)）。
 
-| 场景 | 结果 |
+| 场景 | d3c5cf8 结果 |
 | --- | --- |
-| 首批 2,000 页 | 2,000 个 artifact，`pages.completed=2000`；批次 03:42:17–03:47:25（约 308 s，含 2,000 次发布/fsync） |
-| 第二批 1 页删除 | `existing=1999, pending=1`，无新增 artifact；修复 0.176 s；结算 `completed`，`new_completed=1, existing=1999`，artifact 2,001 |
-| 第三批 2,000 页全在 | 预检/接受 17.909 s，`existing=2000, pending=0, needs_verification=0`，无可派发，批次 `completed` |
-| 进程退出 | 子进程接受 2,000 页后 `os._exit(99)`；重开 `existing=2000`，artifact 数不变（2,001），旧 artifact/delivery 逐字段不变，批次可正常结算 |
+| 首次 2,000 页 accept + 交付 | accept 0.837 s（预检 0.189 s）；交付 129.13 s，p50 63.8 ms/页；2,000 artifact/delivery；14,006 事务、4,000 fsync |
+| 第二批 6 种变更 | `existing=1994, pending=2, needs_verification=4`；404 页 failed 不落盘；第三批还原后重新链接原 artifact，不重下；artifact 2,002 |
+| 2,000 页健康预检 | 4.75 s，2,000 条完整 SHA-256；最大单次 accept 7.78 s，无 >20 s |
+| claim-only | 0.029 s，只接纳被认领作品 10 页，不灌入 2,000 页历史；单作品 2,000 页 claim 预检 5.44 s |
+| carry（F4 修复后） | 1,800 个完好页保持 completed/existing、NV 0、artifact 链接 1,800、新增 0 交付；单次写事务 10.62–10.84 s |
+| F3（EXCLUDED 跨批） | 旧批 suspended 被 job 级取消/claim 拒绝，无文件写入，旧批计数不变 |
+| 进程退出 | `os._exit(99)` 后重开旧 2,000 artifact/delivery/链接逐字段不变；崩溃交付 transferring、残留 1 个 `.part`；`recover_interrupted` + resume + claim 后 2,000 文件全部校验通过 |
+| 恢复 API | p08 的 hash_match/missing/changed/command_id 重放/批外页面 28 项断言全过 |
+| 网络隔离 | 20/20 页完成，0 次 socket/DNS 尝试 |
 
-证据：[scale_verify_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/scale_verify_result.json)、[crash_probe_result.json](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/crash_probe_result.json)。上述规模数字在 `3b63f9c` 核心树上测得；复核后的 claim/carry 健康门与 intent 单扫描改了恢复路径，最终提交需再跑一次同规模（未在本批完成）。这是 W6 的规模/退出子集，不等于完整 W5/W6 验收；未做真实迁移、备份演练、根不可用/链接/快速策略的 UI 接线。
+风险（REPORT.md §4）：R1 单作品页数 `_refresh_batch_item_result` 为 O(P²)（2,000 页单作品交付 294.5 s，是 200×10 形状的 2.1–2.3 倍）；R2 accept 预检线性，>20 s 阈值约 4.8k 页@1MB；R3 8 MiB 命令上限在 health 加入后可能先花 5 s 预检再失败；R4 carry 单次写事务 10.8 s（4,000 页外推约 21 s），所有写命令排队；R7 崩溃残留 `.part` 不清理；R8 每页 67 ms 中约 45 ms 未解释，建议 py-spy。W6 仍未覆盖真实迁移/备份、根不可用/链接/快速策略 UI；这是规模/AI 合成证据，不是生产验收。
 
 ## 6. 复核入口
 
