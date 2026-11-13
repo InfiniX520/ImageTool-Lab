@@ -20,14 +20,16 @@ from typing import Any, Callable
 
 from core.log_view import ViewDelta
 from gui.collection_theme import apply_collection_styles, scale_px
+from gui.verification_panel import VerificationPanel
 from core.source_settings import filter_description
 
-PAGE_KEYS = ("follow", "tasks", "sources", "records", "settings")
+PAGE_KEYS = ("follow", "tasks", "sources", "records", "verify", "settings")
 PAGE_LABELS = {
     "follow": "关注下载",
     "tasks": "下载任务",
     "sources": "其他来源",
     "records": "下载记录",
+    "verify": "核验",
     "settings": "设置",
 }
 TABLE_ROW_LIMIT = 200
@@ -360,6 +362,7 @@ class CollectionView(ttk.Frame):
         self._build_tasks_page(self._pages["tasks"])
         self._build_sources_page(self._pages["sources"])
         self._build_records_page(self._pages["records"])
+        self._build_verify_page(self._pages["verify"])
         self._build_settings_page(self._pages["settings"])
 
     # -- shared widgets -------------------------------------------------
@@ -777,6 +780,28 @@ class CollectionView(ttk.Frame):
 
     def _submit_record_query(self) -> None:
         self._run_action("record_query")
+
+    # -- verification page ----------------------------------------------
+
+    def _build_verify_page(self, page):
+        """Mount the pending-verification panel on its own page.
+
+        The panel owns its table, buttons and wording; this page only supplies
+        the heading and the geometry.  All data arrives through
+        set_verification_rows from the controller's poll, never from a worker.
+        """
+        s = lambda value: scale_px(self, value)  # noqa: E731
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(0, weight=1)
+        body = ttk.Frame(page, style="CollectionPage.TFrame")
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
+        body.configure(padding=(s(30), 0, s(30), s(24)))
+        self._page_heading(body, "核验与修复",
+            "已经记录、但当前磁盘找不到一致字节的图片页，在这里逐页核验。核验只读磁盘，不会删除或覆盖文件。")
+        self._verification_panel = VerificationPanel(body, on_action=self._emit)
+        self._verification_panel.grid(row=1, column=0, sticky="nsew")
 
     # -- settings page --------------------------------------------------
 
@@ -1365,6 +1390,33 @@ class CollectionView(ttk.Frame):
         self._fill_tree("records", rows)
         self.set_records_info(page_text)
 
+    @property
+    def verification_slot(self):
+        """The mounted verification panel, or None before construction."""
+        return getattr(self, "_verification_panel", None)
+
+    def set_verification_rows(self, rows, *, page_text: str = "") -> None:
+        if self._disposed:
+            return
+        panel = getattr(self, "_verification_panel", None)
+        if panel is not None:
+            panel.set_rows(rows, page_text=page_text)
+
+    def set_verification_result(self, text: Any, tone: str = "muted") -> None:
+        if self._disposed:
+            return
+        panel = getattr(self, "_verification_panel", None)
+        if panel is not None:
+            panel.set_result(text, tone=tone)
+
+    def set_verification_busy(self, busy: bool, *, text: str = "") -> None:
+        """Disable the panel actions while one recovery pass is running."""
+        if self._disposed:
+            return
+        panel = getattr(self, "_verification_panel", None)
+        if panel is not None:
+            panel.set_busy(bool(busy), text=text or None)
+
     def selected_id(self, kind: str) -> str | None:
         tree = self._trees.get(kind)
         if tree is None:
@@ -1631,6 +1683,9 @@ class CollectionView(ttk.Frame):
             return
         self._disposed = True
         self._on_action = None
+        panel = getattr(self, "_verification_panel", None)
+        if panel is not None:
+            panel.dispose()
         self._unbind_all()
         self._clear_widget_commands()
         self._release_variables()

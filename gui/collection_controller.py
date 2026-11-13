@@ -13,6 +13,7 @@ from core.library_queries import LibraryQuery
 from core.log_view import LogView, ViewDelta
 from core.task_contracts import PathRef
 from gui.collection_dialogs import NativeDialogs
+from gui.verification_panel import describe_result, row_key, summary_text
 
 _PHASE = {'queued':'等待开始','running':'收集中','cooling':'等待冷却','pausing':'正在暂停',
     'cancelling':'正在取消','settling':'正在收尾','paused':'已暂停','blocked':'需要处理',
@@ -79,6 +80,13 @@ def _display_time(value):
     except (TypeError,ValueError):return '—'
 
 
+# One verification list request and one recovery pass stay small on purpose:
+# the list is a bounded read, and a pass is a serial chain of single-page
+# commands so the single I/O owner is never flooded (its queue holds four).
+_VERIFY_PAGE_SIZE = 50
+_VERIFY_BATCH_LIMIT = 20
+
+
 def _scope_description(query):
     if query.get('source','follow')!='follow':
         from core.source_settings import source_description
@@ -122,6 +130,17 @@ class CollectionController:
         self._log_open = self._log_paused = False
         self._page = 'follow'
         self._busy = set()
+        # Verification page (W5). _verify_rows is the action table, keyed by
+        # the frozen page identity; _verify_display is what the panel shows.
+        self._verify_rows = {}
+        self._verify_display = []
+        self._verify_summary = {}
+        self._verify_truncated = False
+        self._verify_queue = []
+        self._verify_total = 0
+        self._verify_done = 0
+        self._verify_skipped = 0
+        self._verify_busy = False
 
     def _assert_ui(self):
         if threading.get_ident() != self._ui_thread:
@@ -177,7 +196,11 @@ class CollectionController:
                     callback(value)
             except Exception as error:
                 if not self._closing:
-                    self._show_error(error, notify=key not in {'overview','snapshot','artists','request','records'})
+                    verify = str(key).startswith('verify:')
+                    quiet = key not in {'overview','snapshot','artists','request','records'}
+                    self._show_error(error, notify=quiet and not verify)
+                    if verify:
+                        self._verification_failed(error)
                 if key in self._busy:
                     self._busy.discard(key); self.view.configure_action(key, enabled=True)
                 if key in {'verify_account','start_preferences','source_preferences'}:
@@ -545,6 +568,7 @@ class CollectionController:
             self._page=payload['page']
             self._refresh_output_label()
             if self._page=='records' and self.runtime:self._query_records(reset=True)
+            elif self._page=='verify' and self.runtime:self._refresh_verification()
             return
         if self.runtime is None:
             self.view.set_status('正在准备，请稍候'); return
@@ -590,6 +614,10 @@ class CollectionController:
                 self.view.set_record_form({'scope':'batch','search':'','result':'all'})
                 self.view.show_page('records'); self._page='records'; self._query_records(reset=True)
             elif action=='record_query':self._query_records(reset=True)
+            elif action=='verification_refresh':self._refresh_verification()
+            elif action=='verification_recover':self._recover_verification([payload.get('key')])
+            elif action=='verification_batch':
+                self._recover_verification(list(payload.get('keys') or ()))
             elif action=='record_next' and self._record_next:
                 self._record_cursors.append(self._record_next); self._record_version+=1; self._query_records()
             elif action=='record_previous' and len(self._record_cursors)>1:
@@ -625,6 +653,159 @@ class CollectionController:
                 key='start_source' if action=='start_source' else 'start'
                 self._busy.discard(key); self.view.configure_action(key,enabled=True)
 
+    # ------------------------------------------------------------------
+    # Verification page (W5): a bounded read plus an exactly-once recovery
+    # ------------------------------------------------------------------
+
+    def _refresh_verification(self):
+        """Read the summary and one bounded page of held rows.
+
+        Both requests run on the shared query owner.  The Tk thread only sees
+        finished Futures through _poll, so no widget is ever built or updated
+        from a query thread.
+        """
+        if self.runtime is None or self._verify_busy:
+            return
+        if 'verification_summary' not in self._pending:
+            self._watch('verification_summary',
+                self.runtime.verification_summary(batch_id=self._current_batch),
+                self._verification_summary)
+        if 'verification_pages' not in self._pending:
+            self._watch('verification_pages',
+                self.runtime.verification_pages(batch_id=self._current_batch,
+                    limit=_VERIFY_PAGE_SIZE),
+                self._verification_pages)
+
+    def _verification_summary(self, value):
+        self._verify_summary = value if isinstance(value, dict) else {}
+        self._render_verification()
+
+    def _verification_pages(self, value):
+        rows = value.get('rows') if isinstance(value, dict) else ()
+        self._verify_rows = {}
+        display = []
+        for row in rows or ():
+            if not isinstance(row, dict):
+                continue
+            key = row_key(row.get('batch_id'), row.get('illust_id'),
+                row.get('page_index'), row.get('delivery_id'))
+            if key is None:
+                continue
+            self._verify_rows[key] = row
+            display.append({
+                'key': key,
+                'batch_id': row.get('batch_id'),
+                'illust_id': row.get('illust_id'),
+                'page_index': row.get('page_index'),
+                'delivery_id': row.get('delivery_id'),
+                'state': row.get('state'),
+                'error_code': row.get('error_code'),
+                'blocked_reason': row.get('blocked_reason'),
+                'batch_phase': row.get('batch_phase'),
+                'attempts': row.get('attempts'),
+                'retry_at': row.get('retry_at'),
+                'output_key': row.get('output_key'),
+                'time': _display_time(row.get('updated_at') or row.get('retry_at')),
+                'recoverable': row.get('recoverable') is True,
+            })
+        self._verify_display = display
+        self._verify_truncated = bool(isinstance(value, dict) and value.get('truncated'))
+        self._render_verification()
+
+    def _render_verification(self):
+        parts = []
+        text = summary_text(self._verify_summary)
+        if text:
+            parts.append(text)
+        if self._verify_display:
+            parts.append('列出 %d 行' % len(self._verify_display))
+        if self._verify_truncated:
+            parts.append('还有更多未列出')
+        self.view.set_verification_rows(self._verify_display,
+            page_text=' · '.join(parts))
+
+    def _recover_verification(self, keys):
+        """Start one recovery pass over the frozen rows named by the panel."""
+        if self._verify_busy:
+            self.view.set_verification_result('正在核验，请等这一轮结束。', 'warning')
+            return
+        targets = []
+        skipped = 0
+        for key in keys:
+            row = self._verify_rows.get(key) if isinstance(key, str) else None
+            if row is None:
+                skipped += 1
+                continue
+            targets.append(row)
+        if not targets:
+            self.view.set_verification_result('这一页已不在待核验列表里，已刷新。', 'warning')
+            self._refresh_verification()
+            return
+        self._verify_queue = targets[:_VERIFY_BATCH_LIMIT]
+        self._verify_skipped = skipped + max(0, len(targets) - _VERIFY_BATCH_LIMIT)
+        self._verify_total = len(self._verify_queue)
+        self._verify_done = 0
+        self._verify_busy = True
+        self.view.set_verification_busy(True, text='已完成 0/%d' % self._verify_total)
+        self._verify_step()
+
+    def _verify_step(self):
+        """Dispatch exactly one page, then chain the next from its callback.
+
+        A serial chain keeps at most one recovery queued on the single I/O
+        owner, so a full queue cannot turn a batch into a partial mess.
+        """
+        if self._closed or self._closing:
+            self._verify_queue = []
+            self._verify_busy = False
+            return
+        if not self._verify_queue:
+            self._finish_verification()
+            return
+        row = self._verify_queue.pop(0)
+        key = 'verify:' + str(row_key(row.get('batch_id'), row.get('illust_id'),
+            row.get('page_index'), row.get('delivery_id')))
+        command_id = uuid.uuid4().hex
+        try:
+            future = self.session.recover_verification_page(row['batch_id'],
+                row['illust_id'], row['page_index'], command_id=command_id)
+        except Exception as error:
+            self._verification_failed(error)
+            return
+        self._watch(key, future, lambda value: self._verify_finished(row, value))
+
+    def _verify_finished(self, row, value):
+        self._verify_done += 1
+        text, tone = describe_result(value)
+        self.view.set_verification_result(text, tone)
+        if self._verify_total > 1:
+            self.view.set_verification_busy(True,
+                text='已完成 %d/%d' % (self._verify_done, self._verify_total))
+        self._verify_step()
+
+    def _finish_verification(self):
+        self._verify_busy = False
+        done, total, skipped = self._verify_done, self._verify_total, self._verify_skipped
+        self.view.set_verification_busy(False, text='')
+        text = '本轮核验完成：%d/%d 页。' % (done, total)
+        if skipped:
+            text += ' 另有 %d 页已不在列表里，已跳过。' % skipped
+        self.view.set_verification_result(text, 'success')
+        self._next_overview = 0
+        self._refresh_verification()
+
+    def _verification_failed(self, error):
+        """Stop the pass on the first failure; no file was touched."""
+        self._verify_queue = []
+        self._verify_busy = False
+        self.view.set_verification_busy(False, text='')
+        text = _ERROR.get(getattr(error, 'code', None)) or (
+            '核验没有完成。请刷新后重试；若持续出现，请查看诊断日志。')
+        if self._verify_total:
+            text += '（本轮已完成 %d/%d 页）' % (self._verify_done, self._verify_total)
+        self.view.set_verification_result(text, 'danger')
+        self._refresh_verification()
+
     def request_close(self):
         self._assert_ui()
         if self._closed or self._closing:return
@@ -651,6 +832,7 @@ class CollectionController:
 
     def dispose(self):
         self._assert_ui(); self._closed=True
+        self._verify_queue=[]; self._verify_busy=False; self._busy.clear()
         if self._after is not None:
             self.root.after_cancel(self._after); self._after=None
         for future,_,_ in self._pending.values():future.cancel()

@@ -104,6 +104,23 @@ class DesktopRuntime(CollectionRuntime):
     def artists(self, account_ref):
         return self._query_command(self._queries, self.repository.follow_artists, account_ref, limit=100)
 
+    def verification_pages(self, *, batch_id=None, states=None, after=None, limit=50):
+        """Bounded read of the pages parked for verification, on the query owner."""
+        return self._query_command(self._queries, self._verification_pages,
+            batch_id=batch_id, states=states, after=after, limit=limit)
+
+    def verification_summary(self, *, batch_id=None):
+        """Counts per delivery state for the panel header, on the query owner."""
+        return self._query_command(self._queries, self._verification_summary,
+            batch_id=batch_id)
+
+    def _verification_pages(self, *, batch_id=None, states=None, after=None, limit=50):
+        return self.repository.list_verification_pages(batch_id=batch_id,
+            states=states, after=after, limit=limit)
+
+    def _verification_summary(self, *, batch_id=None):
+        return self.repository.verification_summary(batch_id=batch_id)
+
     def _overview(self, *, after=None, limit=100):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('Invalid task page size')
@@ -253,6 +270,25 @@ class DesktopSession:
             return dict(identity)
         finally:
             api.requests.close()
+
+    def recover_verification_page(self, batch_id, illust_id, page_index, *,
+                                 command_id=None):
+        """Re-check one held page on the single I/O owner.
+
+        The recovery entry observes files and compare-and-sets rows; both run
+        on this owner so the Tk thread never hashes bytes or opens a database
+        transaction.  A repeated call with the same command_id replays the
+        first accepted result instead of reading the file again.
+        """
+        return self._command(self._recover_verification_page, batch_id, illust_id,
+            page_index, command_id)
+
+    def _recover_verification_page(self, batch_id, illust_id, page_index, command_id):
+        runtime = self.runtime
+        if runtime is None:
+            raise RuntimeClosed('Desktop is not ready')
+        return runtime.repository.recover_verification_page(batch_id, illust_id,
+            page_index, command_id=command_id)
 
     def save(self, preferences):
         return self._command(self._save, preferences)
