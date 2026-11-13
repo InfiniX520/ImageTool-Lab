@@ -286,8 +286,17 @@ def test_an_examine_budget_is_not_the_end_of_the_cleanup_queue(tmp_path, monkeyp
             "Sec.4: a bad prefix longer than the examine budget must not hide "
             f"the valid tail; visits={visits!r} cursors={cursors!r}"
         )
-        assert cursors[:3] == sorted(cursors[:3]) and len(set(cursors[:3])) == 3, (
-            "Sec.4: the cursor may wrap only at a proven EOF; got " + repr(cursors)
+        # A wrap is legal in the very scan that proved EOF, so the property is
+        # "strictly advancing until the first wrap", not "the wrap is late".
+        first_zero = cursors.index(0) if 0 in cursors else len(cursors)
+        prefix = cursors[:first_zero]
+        assert first_zero > 0, (
+            "Sec.4: the cursor must not wrap before a capped scan advanced it; "
+            f"got {cursors!r}"
+        )
+        assert all(a < b for a, b in zip(prefix, prefix[1:])), (
+            "Sec.4: every capped scan must advance the cursor, and a wrap is "
+            f"legal only after that scan proved EOF; got {cursors!r}"
         )
 
 
