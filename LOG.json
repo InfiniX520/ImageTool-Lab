@@ -1443,6 +1443,50 @@
       "product_ready": false,
       "next_step": "D0 pin regressions; D1 close completion/intent/root-state blockers; D2 unify recovery evidence/ownership; D3 intent durability and publication; D4 bounded cancellable I/O and linear carry; D5 UI/migration/final acceptance.",
       "summary": "独立复审固定 8b1c751；现有全量出现真实竞争失败，新增 14 项反例 12 红/2 绿。形成 UA-01..12 与 D0-D5，未改产品或部署。"
+    },
+    {
+      "session_date": "2026-11-13",
+      "batch": "JPGPNG-U1A-INDEP-FIX-20261113-01",
+      "branch": "fix/a1-u1a-indep-20261113",
+      "base": "8d8c62c",
+      "final_commit": "bff7c61",
+      "summary": "U1-A 独立审计 UA-01..UA-11 全部修复：预检快照与代次、全局意图、恢复证据与所有权、发布门、控制面、根守卫；全量 1,680 项 0 失败。",
+      "fixes": [
+        "UA-01 完成竞争不再伪造 artifact_unknown：快照绑定页/代次/交付/artifact，代次变化走 RetryPreflight",
+        "UA-02 意图全局作用域：记录 EXCLUDED 跨 job 取消可取消状态，claim/recovery 复查",
+        "UA-03 根守卫：root_state + 只在 available 建 .part；pending 不可用观察 PARK",
+        "UA-04 恢复决定/展示/事件统一使用选中的观察",
+        "UA-05 carry 外任务 hold 可被受控取代，记 recovery_owner_transfer",
+        "UA-06 reuse/repair/park 共用冻结观察闸门",
+        "UA-07 observer/control 独立线程，admitted_running 语义，settle 计入在途观察",
+        "UA-08 carry 每命令解析一次 health map",
+        "UA-09 同批 receipt 重放零哈希；不同 digest 仍 CursorConflict",
+        "UA-10 坏意图阻断 accept/claim/recovery/publish，claim 阻断批次并报错",
+        "UA-11 发布门在 os.link 前判定；排除取消未发布行，坏意图保留 .part"
+      ],
+      "verification": {
+        "non_tk": { "tests": 1671, "passed": 1667, "failed": 0, "errors": 0, "skipped": 4 },
+        "tk": { "tests": 9, "passed": 9, "failed": 0 },
+        "combined": { "tests": 1680, "passed": 1676, "failed": 0, "skipped": 4 },
+        "independent_regressions": { "tests": 14, "passed": 14 },
+        "evidence": "../.runtime/jpgpng_u1a_indep_fix_20261113_01/full03/full.xml"
+      },
+      "review": "只读 fork 逐行审 diff：1 P1 + 6 P2 + 11 P3；bff7c61 修复 P1-1、P2-1..6、P3-2/P3-10，其余记录为遗留",
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "product_ready": false,
+      "residuals": [
+        "意图投影/索引仍为全表扫描，需迁移门禁",
+        "carry 长写事务与可续窗口未拆",
+        "RetryPreflight 3 次/2 s 对超大单页可能偏紧",
+        "completed 页重新核验没有入口（W5 独立 API）",
+        "真实迁移/备份/外置卷演练未做",
+        "旧 record_manager 未接健康门",
+        "8 MiB 命令上限在快照后检查",
+        "UNKNOWN park 仍映射 artifact_unknown",
+        "W5 UI/CLI 未接"
+      ],
+      "next_step": "意图投影/迁移门禁；carry 可续窗口与规模实测；W5 UI/CLI；真实迁移与备份演练"
     }
   ]
 }
