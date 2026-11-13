@@ -2701,7 +2701,6 @@ class LibraryRepository(
                     budget=self._artifact_observation_budget(
                         budget, remaining_bytes(), remaining_seconds()
                     ),
-                    cancel=cancel,
                 )
             except (ContractError, OSError, ValueError):
                 flush()
@@ -2760,7 +2759,6 @@ class LibraryRepository(
                     budget=self._artifact_observation_budget(
                         budget, remaining_bytes(), remaining_seconds()
                     ),
-                    cancel=cancel,
                 )
                 records[artifact_id] = confirmed
                 if confirmed is None:
@@ -3021,19 +3019,17 @@ class LibraryRepository(
         run_id: str,
         quality_key: str,
         budget: ObservationBudget | None = None,
-        cancel: Any = None,
     ) -> ArtifactHealth | None:
         """Observe one candidate under the remaining page allowance.
 
         The page budget is clipped into the observer's own per-file limits so a
         file the page cannot pay for halts instead of being read silently past
-        the declared limit (RFB-06).  A control stop is checked here, before
-        this file is opened, and never inside the read: an already admitted
-        observation runs to its verdict (contract v3 §3.1, v4.1), so a pause
-        cannot turn an in-flight hash into a CANCELLED file verdict.
+        the declared limit (RFB-06).  Control stops are not this helper's job:
+        the caller checks them between files, and an already admitted
+        observation must reach its verdict (contract v3 §3.1, v4.1).  Checking
+        the flag here would let a pause turn an in-flight hash into a file
+        verdict, which is exactly what the admission contract forbids.
         """
-        if cancel is not None and cancel.is_set():
-            raise PreflightCancelled("cancelled")
         if not _artifact_is_valid(artifact):
             return None
         artifact_id = str(artifact["artifact_id"])
