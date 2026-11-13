@@ -564,16 +564,22 @@ def progress_from_event(
 
 @dataclass(frozen=True, slots=True)
 class PageBudget:
-    """One observation slice, independent of the per-file budget.
+    """Per-call slice limits plus the per-page hard budget (contract v4 §6).
 
-    A source page may hold more candidates than one slice can hash.  The budget
-    therefore bounds a *slice*, not the page: a page makes progress across
-    slices and across resumes instead of failing the same first N files forever.
+    max_files/max_slices bound one call: how many files a slice may open and
+    how many slices a call may take.  They are a courtesy that keeps a large
+    page interruptible, never the page's permanent limit.
+
+    max_bytes/max_seconds bound one *attempt* (one page acceptance, including
+    the strict confirmation pass that re-reads a reused candidate).  The
+    remaining allowance is clipped into every single-file observation, so a
+    file the page cannot pay for is refused before it is opened instead of
+    silently overrunning the declared limit.
     """
 
     max_files: int = 32
     max_bytes: int = 512 * 1024 * 1024
-    max_seconds: float = 30.0
+    max_seconds: float = 300.0
     max_slices: int = 8
 
     def __post_init__(self):
@@ -597,8 +603,22 @@ class PreflightCancelled(Exception):
     delivery, advance a cursor or be translated into MISSING/CHANGED.
     """
 
-    def __init__(self, reason: str = "cancelled"):
+    def __init__(
+        self,
+        reason: str = "cancelled",
+        details: Mapping[str, int] | None = None,
+    ):
         if _REASON_RE.fullmatch(reason) is None:
             raise SnapshotError("Invalid preflight cancellation reason")
+        if details is not None:
+            if not isinstance(details, Mapping) or not all(
+                isinstance(key, str) and type(value) is int and value >= 0
+                for key, value in details.items()
+            ):
+                raise SnapshotError("Invalid preflight cancellation details")
+            details = dict(details)
         self.reason = reason
+        # A budget result states its net progress; a control result leaves
+        # this empty (contract v4 §3.2).
+        self.details = details
         super().__init__(reason)

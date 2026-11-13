@@ -169,7 +169,9 @@ def test_a_33_image_work_advances_across_slice_limited_calls(tmp_path, monkeypat
             job = resume(repo, job, attempt)
 
         assert repo.accept_source_page(job["batch_id"], page, page_budget=budget) == ()
-        assert len(calls) == 33 and len(set(calls)) == 33
+        # 33 first observations plus the 32 candidates the earlier slices
+        # covered, each confirmed once before the commit (contract v4 §2.2).
+        assert len(calls) == 65 and len(set(calls)) == 33
         assert checkpoint(repo, job) is not None
         events = progress_events(repo)
         # Two full slices, then the single file the last slice could not hold.
@@ -260,9 +262,11 @@ def test_a_pause_at_a_slice_boundary_keeps_the_slice(tmp_path, monkeypatch):
         calls.clear()
         switch.value = False
         assert repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget(max_files=4)) == ()
-        # Only the five files no slice has observed yet are opened again.
-        assert len(calls) == 5
-        assert len(recorded_ids(progress_events(repo))) == 9
+        # Five files are observed for the first time; the four the paused slice
+        # already covered are confirmed once before the commit (contract v4 §2.2).
+        assert len(calls) == 9
+        assert len(set(calls)) == 9
+        assert len(set(recorded_ids(progress_events(repo)))) == 9
 
 
 def test_cancelling_before_the_first_file_leaves_no_trace(tmp_path, monkeypatch):
@@ -321,8 +325,9 @@ def test_a_candidate_that_appears_between_slices_is_observed(tmp_path, monkeypat
         calls.clear()
         repo.accept_source_page(job["batch_id"], page, page_budget=PageBudget(max_files=4))
         assert moved in calls
-        assert settled not in calls
-        assert len(calls) == 2
+        # The settled candidate is confirmed once, never re-sliced.
+        assert calls.count(settled) == 1
+        assert len(calls) == 3
 
 
 def test_a_file_replaced_between_slices_is_observed_again(tmp_path, monkeypatch):
@@ -351,8 +356,10 @@ def test_a_file_replaced_between_slices_is_observed_again(tmp_path, monkeypatch)
             job["batch_id"], page, page_budget=PageBudget(max_files=2)
         ) == ()
         assert first_page in calls
-        assert second_page not in calls
-        assert len(calls) == 2
+        # The untouched candidate is confirmed once; the replaced one is
+        # observed as evidence again because its identity moved.
+        assert calls.count(second_page) == 1
+        assert len(calls) == 3
 
 
 def test_a_matching_identity_costs_no_slice_slot(tmp_path, monkeypatch):
@@ -368,12 +375,14 @@ def test_a_matching_identity_costs_no_slice_slot(tmp_path, monkeypatch):
         settle(repo, job, complete=False)
         job = resume(repo, job, 0)
 
-        # Two stat rechecks plus one open still fit one file of budget.
+        # Two stat rechecks, one fresh open and the two confirmations still fit;
+        # the confirmations do not consume the single file of slice budget.
         calls.clear()
         assert repo.accept_source_page(
             job["batch_id"], page, page_budget=PageBudget(max_files=1)
         ) == ()
-        assert len(calls) == 1
+        assert len(calls) == 3
+        assert len(set(calls)) == 3
         assert checkpoint(repo, job) is not None
 
 
@@ -543,7 +552,7 @@ def negative_observer(state: LocalState):
     """Replace the file observation; every candidate reports the same state."""
     calls: list[str] = []
 
-    def observe(artifact, *, resolver, run_id, quality_key):
+    def observe(artifact, *, resolver, run_id, quality_key, budget=None, cancel=None):
         calls.append(str(artifact["artifact_id"]))
         return negative_health(artifact, state, quality_key)
 
