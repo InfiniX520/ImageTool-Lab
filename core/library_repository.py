@@ -85,6 +85,7 @@ _BUSY_TIMEOUT_MS = 30_000
 _MAX_DISPATCH_PAGE = 200
 _MAX_EXCLUDED_IDS = 200
 _MAX_EXCLUDE_ID_LEN = 512
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ARTIFACT_HEALTH_POLICY = ArtifactHealthPolicy()
 _ARTIFACT_OBSERVATION_BUDGET = ObservationBudget(
     max_bytes=4 * 1024 * 1024 * 1024,
@@ -1830,12 +1831,21 @@ class LibraryRepository(
         *,
         error_code: str,
         expected_state: str = "prepared",
+        expected_prepared_sha256: str | None = None,
+        expected_generation: int | None = None,
     ) -> None:
         """Cancel a prepared delivery whose final name was never created.
 
         The executor calls this only after it verified the final path does not
         exist and that the staged temp file belongs to this delivery (UA-11).
         A published file is never rewritten by this command.
+
+        ``expected_prepared_sha256`` and ``expected_generation`` bind the
+        cancellation to the exact evidence the caller observed.  The writer
+        refuses a row whose prepared digest or generation moved in the
+        meantime, so a staged file that was replaced while the command waited
+        is never deleted by guesswork (RFA-06).  Both stay optional: a caller
+        that observed nothing keeps the previous behaviour.
         """
         delivery_id = _validate_identifier(delivery_id, "delivery id")
         batch_id = _validate_identifier(batch_id, "batch id")
@@ -1844,6 +1854,19 @@ class LibraryRepository(
             raise LibraryError(
                 "cancel_unpublished_delivery supports prepared/recovery_needed"
             )
+        if expected_prepared_sha256 is not None:
+            if (
+                not isinstance(expected_prepared_sha256, str)
+                or _SHA256_RE.fullmatch(expected_prepared_sha256) is None
+            ):
+                raise LibraryError(
+                    "expected_prepared_sha256 must be a lowercase hex digest"
+                )
+        if expected_generation is not None:
+            if type(expected_generation) is not int or expected_generation < 1:
+                raise LibraryError(
+                    "expected_generation must be a positive integer"
+                )
         self._enqueue(
             "cancel_unpublished_delivery",
             {
@@ -1851,6 +1874,8 @@ class LibraryRepository(
                 "batch_id": batch_id,
                 "error_code": error_code,
                 "expected_state": expected_state,
+                "expected_prepared_sha256": expected_prepared_sha256,
+                "expected_generation": expected_generation,
             },
         )
 
@@ -3685,6 +3710,29 @@ class LibraryRepository(
                 raise InvalidStateError(
                     "Only the expected unpublished state can be cancelled"
                 )
+            expected_sha = payload.get("expected_prepared_sha256")
+            expected_generation = payload.get("expected_generation")
+            if expected_generation is not None:
+                if int(delivery["generation"]) != int(expected_generation):
+                    raise InvalidStateError(
+                        "Delivery generation changed before cancellation"
+                    )
+            if expected_sha is not None:
+                # The caller verified one exact staged file.  A row whose
+                # prepared evidence moved now describes a different file, so
+                # cancelling it would authorize deleting the replacement.
+                try:
+                    prepared_now = _parse_json_object(
+                        delivery["prepared_json"], "prepared evidence"
+                    )
+                except (CorruptDataError, KeyError, TypeError) as exc:
+                    raise InvalidStateError(
+                        "Prepared evidence is unreadable"
+                    ) from exc
+                if str(prepared_now.get("sha256")) != str(expected_sha):
+                    raise InvalidStateError(
+                        "Prepared evidence changed before cancellation"
+                    )
             now = _utcnow()
             updated = conn.execute(
                 "UPDATE deliveries SET state = 'cancelled', error_code = ?, "
@@ -3705,6 +3753,16 @@ class LibraryRepository(
                     "error_code": error_code,
                     "reason": "unpublished_intent",
                     "expected_state": expected_state,
+                    **(
+                        {"expected_prepared_sha256": str(expected_sha)}
+                        if expected_sha is not None
+                        else {}
+                    ),
+                    **(
+                        {"expected_generation": int(expected_generation)}
+                        if expected_generation is not None
+                        else {}
+                    ),
                 },
             )
             self._refresh_items_for_delivery(conn, delivery_id, now)
