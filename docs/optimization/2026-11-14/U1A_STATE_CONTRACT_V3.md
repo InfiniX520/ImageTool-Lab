@@ -66,6 +66,8 @@
 
 不满足任一条 → 丢弃该记录并重新观察。**禁止**把"未观察"写成健康，也禁止把过期观察当成当前证据。
 
+7. **负面记录可以短时复用（v3.3）**：状态为 `UNREADABLE` 或 `UNKNOWN` 的记录，在 `checked_at` 120 秒内、且第 1–4 条全部满足时，允许作为"观察结果"复用；它只用于让写者产生 `needs_verification` 的 hold（`artifact_unreadable`/`artifact_unknown`），**永远不能**被当成健康证据（`_find_reusable_artifact` 只认 HASH_MATCH/QUICK_MATCH）。`ROOT_UNAVAILABLE` 不在此列：根离线时正确行为是停下等重连，不是把整页标成 hold。
+
 > v3.1 修订（2026-11-14，T lane 验收发现）：第 6 条是新增的。没有它，"切片之间文件被替换、但记录仍在 900 秒窗口内"无法被发现，等于把旧结论当成当前证据。stat 复核不打开文件、不计入 `max_files`，但对同一 inode 的原地等长改写仍无法识别——那属于 `_verify_owned` 与发布门/确认门的职责，不在复用判据里重复哈希。
 
 ### 1.4 切面算法
@@ -146,8 +148,9 @@ def probe_ref(resolver: PathResolver, ref: PathRef) -> PresenceResult: ...
 * SQL 侧排除终态清理事实（同时覆盖新布尔与旧 `outcome=cleaned`），`d.state='cancelled'`、`prepared_json IS NOT NULL`；
 * `WHERE d.rowid > after_rowid ORDER BY d.rowid LIMIT ?`，单次最多检查 `min(limit*5, 2000)` 行，凑满 `limit` 个可解析事实即返回；
 * 坏 `prepared_json` 只跳过该行，不缩小后续窗口；
-* **窗口内排序（v3.2 冻结）**：先"从未尝试过"的行，再"已有 `failed` 事实"的行，各自按 rowid 升序。理由：新工作不能被重试churn 饿死，而失败行仍然必须在更宽的窗口里出现并被重试。
-* `after_rowid` = 本页**检查过的最大 rowid**（不是返回的最后一条），保证分层顺序不会让游标回退。
+* **窗口内排序（v3.2 冻结）**：先"从未尝试过"的行（tier 0），再"已有 `failed` 事实"的行（tier 1），各自按 rowid 升序。理由：新工作不能被重试 churn 饿死，而失败行仍然必须被重试。
+* **重试保留位与双游标（v3.4）**：`retry_reserve = 0 if limit < 8 else max(1, limit // 8)`。tier 0 填满窗口且有保留位时，用 tier 1 补进保留位（**只有真的查到才截短 tier 0**，因此没有失败行时 `limit=200` 仍是 199 条）。tier 1 查询返回空而它的游标 > 0 时，同一次调用内回绕到 0 再查一次。tier 0 未填满时用 tier 1 补足。
+* 游标：`after_rowid`（tier 0）与 `after_retry_rowid`（tier 1）相互独立，各自取"本路检查过的最大 rowid"，各自独立回绕。
 * `recover_local` 持有内存游标做公平轮转（用完回到 0），重启从 0 开始；不新增列、不加索引。
 
 ### 2.5 删除只有一条实现
@@ -173,6 +176,8 @@ except (_Fault, OSError, ContractError):
 ```
 
 `_settle_local_failure`：重读当前行；`completed` → 报告 completed；`cancelled` → cancelled；已是目标状态 → 直接报告；否则 `set_delivery_issue(expected_state=...)`，其 CAS 失败时再重读一次并按赢家状态收敛。真正"数据库不可读"才上抛 storage/trust fault，不得吞掉后谎称"仍可恢复"。
+
+`_refuse_cancel` 也必须走同一套分类：写者以 `InvalidStateError` 拒绝（例如另一处恢复已把它 confirm 成 completed）时，不得让 `_StorageFault` 逃出 `run`/`recover_local`。
 
 **账本可读但补偿写失败（v3.2 冻结）**：报告 `recovery_needed`（行保持原状、仍可恢复），原因保留在结果/日志里；不中止整个 `recover_local`、不谎称 `completed`。只有账本本身不可读才算 storage/trust fault。
 
@@ -220,6 +225,8 @@ def resolve_successor_ex(conn, delivery) -> LineageResult                       
 
 `resolve_successor` 实现为 `resolve_successor_ex(...).successor`，二者共用同一次遍历；三个调用点（`_read_recovery_page`、`_apply_recovery_successor`、`_resolve_carried_successor`）不得各自实现优先级。
 
+carry 的顺序修正（v3.4）：页链接分支之后**先**调用 `resolve_successor_ex`；只有当它返回 `reason == "none"` 时才允许退回"同页同质量最新 completed"扫描，否则 carry 会绕开显式 handover，与 recovery 读/写两端给出不同后继。
+
 ### 3.3 预算与缓存
 
 * 单次解析最多 `MAX_LINEAGE_QUERIES = 4` 条 SQL、`MAX_SUPERSEDE_NODES = 64` 个节点；超限返回 `budget_exhausted`（视为无可用后继，不猜）。
@@ -247,3 +254,11 @@ def resolve_successor_ex(conn, delivery) -> LineageResult                       
 * 不做 `finish_source` 的"最终结果查询"协议（已登记遗留）；本轮只保证切片状态与 `Future` 语义不冲突。
 * 不接 W5 UI/CLI，不做真实外置卷、备份或云端回读演练。
 * 不删除、不重算既有 artifacts/completed/旧 batch links。
+
+## 6. 已知边界（v3.4 记录，不在本轮修）
+
+1. **写者侧没有 stat 身份复核**：预检与写事务之间（毫秒级、同一次受理内）文件被替换时，写者只按 `_health_is_current`（时间/根版本/策略）接受复用结论；"切片之间"的长窗口已由 §1.3 第 6 条覆盖。
+2. **`root_state` 只判 `is_dir()`**：同一路径换成另一块盘（或 Linux 空挂载点）仍会被判 AVAILABLE，随后 final ABSENT 可能触发取消。Windows 目标下概率低；v3.1 的 stat 身份校验只作用于复用、不作用于取消。
+3. **观察进度的读取上限**：每个 job 只读最近 200 条 progress 事件、最多 4096 条记录；事件很多时老页的进度读不到，只是重新哈希，不影响正确性。
+4. **补偿标签**：`_settle_local_failure` 在两次 CAS 都失败时返回 `recovery_needed` 作为结果标签，行本身没有被改写；真实状态以行内为准。
+5. **取消成功且 temp 已被删除**时不立即写终态事实，等下一次 sweep 看到 ABSENT 才写 `cleaned/already_absent`（多一轮、正确）。
