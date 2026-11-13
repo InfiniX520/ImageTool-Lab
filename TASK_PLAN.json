@@ -691,6 +691,15 @@
       "product_source_changed": false,
       "product_ready": false,
       "next_step": "W0 freeze red tests; W1 artifact health contract; W2 preflight I/O; W3 integrate three reuse paths; W4 intent-aware repair; W5 UI/recovery; W6 acceptance."
+    },
+    "repository_identity": {
+      "name": "PixivKeep",
+      "url": "https://github.com/InfiniX520/PixivKeep",
+      "visibility": "public",
+      "visibility_changed_by": "user",
+      "updated_date": "2026-11-13",
+      "local_project_directory": "JpgPng",
+      "scope": "Repository identity and documentation only; no product rename or functional change."
     }
   }
 }
