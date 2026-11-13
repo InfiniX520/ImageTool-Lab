@@ -591,6 +591,8 @@ def test_progress_events_are_reused_only_inside_the_health_window(tmp_path, monk
         )
 
         # A slice older than max_age_seconds is history, never current evidence.
+        # The previous batch must settle first: one active batch at a time.
+        settle(repo, job)
         job = h.submit(repo, request_id="reuse-33-aged")
         write_progress_event(repo, job, page, records, age_seconds=1200)
         seen.clear()
@@ -693,7 +695,7 @@ def test_a_newer_artifact_row_invalidates_its_stale_progress_record(tmp_path, mo
                 "Sec.1.3.1: the one unobserved file must be observed so the page "
                 f"can commit, but the acceptance raised {exc.reason!r}"
             )
-        expected = {moved, observed[-1]}
+        expected = {moved} | (set(all_artifacts(repo)) - set(observed))
         assert set(seen) == expected, (
             "Sec.1.3.1: only the artifact whose row identity moved and the file "
             "that was never observed may be opened again; got " + repr(sorted(seen))
