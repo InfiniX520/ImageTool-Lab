@@ -11,7 +11,7 @@
 - 第二轮红队 F1–F8 已修复：resume/claim/carry 回灌、EXCLUDED 跨批、完整 carry 健康门、未绑定 resolver、needs_verification 出口。
 - W5 恢复入口 `recover_verification_page` 已完成仓库层与 41 项测试；UI/CLI 与“批量恢复/全库巡检”仍未接线。
 - W6 的 2,000 文件整链、第二批缺失修复、进程退出后重开子集在 `d8de8dc` 上通过合成证据（见第 6 节）；新提交 `dc3acbc` 的最终规模复跑由独立代理进行。
-- 全量（不含 Tk）1,589 项、0 失败、1 个 Tk 环境错误、4 跳过；Tk 展示文件单独 4/4。
+- 全量（不含 Tk 展示文件）1,590 项、0 失败、0 错误、4 跳过；Tk 展示文件单独运行通过（collection 4/4、source 5/5）。
 - **W5 的 UI/CLI/全库巡检、W6 的根不可用/链接/快速策略边界与迁移演练仍未完成。本批不是生产发布声明。**
 
 ## 2. 实现
@@ -42,14 +42,14 @@
 | [W1 健康契约](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w1_contract.xml) | 20 项全过 |
 | [W2/W3 复用门](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w2_gate_tests.xml) | 6 项基线全过；复核后扩到 10 项 |
 | [J-01 独立文件](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w4_j01.xml) | 16 过、1 跳过（W 阶段边界） |
-| [复核后全量（不含 Tk）](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w17_full_no_tk.xml) | **1,589 项、0 失败、1 Tk 环境错误、4 跳过**，249.92 s |
+| [最终全量（不含 Tk 展示文件）](file:///E:/Zero9/JuiLiu/.runtime/jpgpng_u1a_fix_20261113_01/w18_full_no_tk.xml) | **1,590 项、0 失败、0 错误、4 跳过**，230.52 s |
 | Tk 展示文件单独运行 | 4 项全过（当前环境；全量中 Tk/Tcl 初始化偶发环境错误，单独运行排除） |
 
 新增/激活的 U1-A 测试：
 
 - `tests/test_u1a_j01_health.py`：17 项，16 过、1 跳过；7 个原红全部转绿，8 个守卫保持绿。
 - `tests/test_u1a_artifact_health.py`：20 项，状态机、payload、过期、根 revision、快速策略不升级。
-- `tests/test_u1a_reuse_gate.py`：11 项，无根绑定 fail-closed、根绑定冲突、过期/伪造策略、I/O 不在 writer 线程、缺失/变化预算、同 job resume、claim-only 回灌、旧 needs_verification 解除、carry 完好页保持 existing。
+- `tests/test_u1a_reuse_gate.py`：12 项，无根绑定 fail-closed、根绑定冲突、过期/伪造策略、I/O 不在 writer 线程、缺失/变化预算、同 job resume、claim-only 回灌、旧 needs_verification 解除、carry 完好页保持 existing、carried hold 无外来 checkpoint。
 - `tests/test_u1a_removal_intent.py`：6 项，EXCLUDED 抑制/撤销、接受后取消 pending、同 job 撤销、跨批 suspended 取消、结算后记录/重放、OFFLOADED 不虚假宣传。
 - `tests/test_u1a_recovery.py`：41 项，显式恢复 API 的状态机、hash_match/missing/changed/root_unavailable、pending 幂等/park、command_id 重放、事务/线程边界。
 
@@ -87,6 +87,7 @@
 | F6 | `enforce_health=False` 可关闭健康门 | 公共 carry 只接受 True，False 直接拒绝 |
 | F7 | needs_verification 无出口，永久 partial/占槽 | 新增 `repo.recover_verification_page(batch_id, illust_id, page_index, *, command_id=None)`：hash_match 复用、missing 生成 pending 修复、changed/root_unavailable 保持 hold、旧行保留；预检在写事务外 |
 | F8 | intent 事件按全局最新再比 revision，其他 revision 会遮蔽当前 EXCLUDED | 最新映射键加入 root_revision；当前 revision 查询不再被其他 revision 遮蔽 |
+| F16 | carried NV 复制源 delivery 的 checkpoint_json，内嵌旧 delivery_id；`get_delivery` 读 hold 抛 CorruptDataError | carried NV 的 `checkpoint_json` 置 NULL；新 delivery 不再携带别的 .part 证据；新增读取回归 |
 
 恢复 API 设计/契约见 [U1A_W5_RECOVERY_ENTRY.md](../optimization/2026-11-13/U1A_W5_RECOVERY_ENTRY.md)，41 项测试全过。F9（transferring 中记录 EXCLUDED）、F13（intent 全表扫描）、F14（损坏事件跳过）仍作为已知残余，不在本轮扩大。
 
