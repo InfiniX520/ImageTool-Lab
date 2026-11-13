@@ -1,7 +1,7 @@
 {
-  "project": "PiDL/ImageTool-Lab",
-  "description": "Python+Tkinter Pixiv 原图下载器",
-  "last_updated": "2026-11-12",
+  "project": "PixivKeep",
+  "description": "Pixiv 原图收藏与整理工具；长期归档与恢复开发中",
+  "last_updated": "2026-11-13",
   "sessions": [
     {
       "session_date": "2026-07-30",
@@ -1167,6 +1167,15 @@
       "evidence": "docs/maintenance/2026-11-12_version_checkpoint.md",
       "next_step": "A1 repair R0/R1 on a new work branch; follow docs/audits/2026-11-12-a1/DEVELOPMENT_GUIDE.md",
       "working_copy_tag": "checkpoint-2026-11-12-a1-wip"
+    },
+    {
+      "session_date": "2026-11-13",
+      "id": "JPGPNG-REPOSITORY-IDENTITY-20261113-01",
+      "summary": "按用户要求将 GitHub 仓库命名为 PixivKeep，更新实际用途介绍；用户已自行公开仓库。同步 README、当前远端和版本约定，本地目录/产品源码/业务资料不变。",
+      "repository": "https://github.com/InfiniX520/PixivKeep",
+      "visibility": "public",
+      "scope": "documentation_and_repository_metadata",
+      "functional_change": false
     }
   ]
 }

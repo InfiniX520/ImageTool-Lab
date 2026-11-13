@@ -507,6 +507,15 @@
       "unreviewed_since_audit": [
         "core/archive_schema.py: schema 2 -> 3; existing edits preserved, not validated by this backup task"
       ]
+    },
+    "repository_identity": {
+      "name": "PixivKeep",
+      "url": "https://github.com/InfiniX520/PixivKeep",
+      "visibility": "public",
+      "visibility_changed_by": "user",
+      "updated_date": "2026-11-13",
+      "local_project_directory": "JpgPng",
+      "scope": "Repository identity and documentation only; no product rename or functional change."
     }
   }
 }
