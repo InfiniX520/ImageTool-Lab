@@ -2165,6 +2165,11 @@ def _parser() -> argparse.ArgumentParser:
         "plan", parents=[_COMMON], help="输出切换与回退顺序，不做任何写操作"
     )
     plan.add_argument("database", type=Path)
+    restore = commands.add_parser(
+        "restore-check", parents=[_COMMON],
+        help="恢复前检查这份文件组是不是一个一致状态（回滚库旁边留着非空 -wal 就是混合组）",
+    )
+    restore.add_argument("database", type=Path)
     scan = commands.add_parser(
         "scan", parents=[_COMMON], help="只读巡检已交付的文件是否还和记录一致"
     )
@@ -2244,6 +2249,26 @@ _SCAN_FINDINGS = (
     "root_unavailable",
     "changed_during_check",
 )
+
+
+def _restore_lines(report: dict[str, object]) -> list[str]:
+    """Say what the file group is, and never suggest deleting the log."""
+    lines = [
+        "库: %s" % report["path"],
+        "状态: %s" % report["state"],
+        "journal_mode: %s  header: %s"
+        % (report["journal_mode"], report["header_journal"]),
+        "WAL: %d 字节%s"
+        % (report["wal_bytes"], "（WAL 模式）" if report["wal_mode"] else ""),
+    ]
+    if report["state"] == "orphan_wal":
+        lines.append(
+            "这是混合文件组：回滚日志库旁边留着非空 -wal，SQLite 会忽略它，"
+            "磁盘上已经不是同一个状态。按 runbook 第 5 步整组替换。"
+        )
+    elif report["state"] == "library_missing":
+        lines.append("库文件不存在；不要在这里新建空库。")
+    return lines
 
 
 def _scan_coverage(report: dict[str, object]) -> str:
@@ -2480,7 +2505,7 @@ def _verify_lines(result: dict[str, object]) -> list[str]:
     evidence = result.get("evidence") or {}
     if evidence.get("scope") == "isolated_copy":
         lines.append(
-            "证据: 隔离副本（%s）已复制 %d 字节，复制 %.3f 秒 / 回读哈希 %.3f 秒 / 读取 %.3f 秒"
+            "证据: 隔离副本（%s）已复制 %d 字节，复制 %.4f 秒 / 回读哈希 %.4f 秒 / 读取 %.4f 秒"
             % (
                 "同级目录" if evidence.get("workspace") == "sibling" else "系统临时目录",
                 int(evidence.get("copy_bytes") or 0),
@@ -2676,6 +2701,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             _emit(report, as_json, lines)
             return code
+        if arguments.command == "restore-check":
+            report = restore_check(arguments.database)
+            _emit(report, as_json, _restore_lines(report))
+            return 0 if report["state"] == "ok" else 2
+
         plan = switch_plan(arguments.database)
         _emit(
             plan,

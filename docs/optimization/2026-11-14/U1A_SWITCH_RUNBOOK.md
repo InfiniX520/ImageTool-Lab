@@ -52,6 +52,8 @@ cd E:\Zero9\JuiLiu\JpgPng
 - 四项事实来自**同一份隔离副本**：核验先在备份目录同级（不可写时回退系统临时目录）建一个唯一私有目录，把成员文件组边复制边哈希，复制前后比对 `(卷身份, 文件 ID, 大小, mtime)`；复制期间被改写判 `changed_during_check`（退出 2）。逻辑指纹与健康检查在这份副本上共用一个只读连接、一个读事务。副本用完即删，删不掉会报 `verify_cleanup_failed` 并保留路径。
 - **证明作用域**：报告描述的是那份副本；核验返回之后源目录再被改写，不在本次保证内。要回答「源现在还是不是这个内容」，用 `--source`（`source_equivalent`），它是独立问题，不影响 `ok`。
 - **代价**：`verify` 需要一次完整复制（峰值占用 ≤ 备份目录大小，结束时释放）。这是换取「四项事实同一代次」的显式代价，不要去关掉它。
+- **残留**：副本目录建在备份目录的同级（名字形如 `<备份名>.verify-<hex>`），父目录不可写时回退系统临时目录。正常结束会删掉它；进程被强杀会留下这个目录（我们绝不删不认识的目录），确认它属于本工具后再手工删除。
+- `sealed` 的状态除 `ok`/`mismatch`/`missing` 外还有 `changed`（复制期间或之后文件被动过），对应原因 `changed_during_check`；四项里任一项不是 `ok` 都使 `ok=False`。
 - `compare <源> <副本>` 回答另一个问题：`sealed` 与 `source_equivalent` 明确 `not_checked`，`ok` 只表示两侧对象定义与内容相同、健康、当前版本可打开。
 - 旧写法 `verify <源> <副本>` 仍可用，等价于 `compare`，会打印弃用提示。
 
@@ -90,7 +92,7 @@ git checkout daily/u1a-w5-w6-20261114
 3. **准备暂存组**：把备份成员复制到同卷的暂存目录（例如 `record_backups\restore_stage_<时间戳>`），在暂存目录里再验一次（`verify` 或 `compare` 对照备份的封存指纹）。`online` 备份是自包含单文件；`file_group` 备份是整组，必须整组准备。
 4. **保留当前组**：把当前 `library.sqlite3`、`library.sqlite3-wal`、`library.sqlite3-shm`（存在哪个算哪个）**整组移入**同卷独立保留目录 `record_backups\restore_rollback_<时间戳>`。是移动，不删除、不覆盖、不改名混放。
 5. **放入匹配组**：把暂存组放进 `download_logs`。`online` 的不要带任何 `-wal`/`-shm`；`file_group` 的整组一起放。**禁止新主库配旧 WAL**——那是把两个不同状态拼在一起，比不恢复更糟。
-6. **重开对照**：`maintain.cmd inspect`（必须 `compatible`）+ `maintain.cmd compare <恢复后的库> <备份目录里的库>`（`内容一致=True`）。再开界面确认任务/批次/交付记录可读。
+6. **重开对照**：`maintain.cmd inspect`（必须 `compatible`）+ `maintain.cmd compare <恢复后的库> <备份目录里的库>`（`内容一致=True`）+ `maintain.cmd restore-check <恢复后的库>`（必须 `状态: ok`；`orphan_wal` 说明放回了新主库却留着旧 `-wal`）。再开界面确认任务/批次/交付记录可读。
 7. **失败退回**：任一步失败，把第 4 步的保留组整组移回原位，删掉第 5 步放入的组（只删本次放入的），并保留报告。不要在未退回的情况下继续试。
 
 只有合成副本演练通过（WAL 残留、两种模式、连接未关被检出、恢复后逻辑指纹相等、保留组未被删除、非法组合被拒）才谈真实库恢复；真实库恢复仍需用户明确指令并另批执行。
