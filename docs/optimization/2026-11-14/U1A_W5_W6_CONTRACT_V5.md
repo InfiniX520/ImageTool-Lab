@@ -161,3 +161,23 @@ result["ledger"] = {"state": "ok" | "error", "code": None | "ledger_unreadable" 
 ## 8. 本轮不做
 
 新数据库架构、新前端框架、默认自动补下载、真实资料释放、恢复 runbook 的自动化、密码学签名。日常目录保持当前版本，修复只在独立分支；切换是之后一个明确动作。
+## 9. 修订记录（实现期确认，均经审计反例验证）
+
+**A1（compare 与 verify 的 ok 语义分开）**：
+- `verify_backup(dir)` 的 `ok` = `sealed`+`logical`(对清单)+`healthy`+`compatible` 四者皆执行皆通过；给了 `--source` 才额外算 `source_equivalent`，且**不**影响 `ok`。
+- `compare_library(source, copy)` 回答的是它自己的问题，因此两侧的内容比较落在 `logical` 这一项；`sealed` 与 `source_equivalent` 明确 `not_checked`，并返回 `question="same_content_as_source"`。`ok` = 对象定义相同 + 逻辑内容相同 + 健康 + 当前版本可打开。
+- 理由：`test_control_online_snapshot_wal_is_valid` 要求 compare 在正常 WAL 快照上 `ok=True`；把 compare 的 `ok` 也绑到 `sealed` 会让它永远 False。
+
+**A2（-shm 不是封存成员）**：`-shm` 每次被任何连接开关都会改内容，纳入封存会让同一备份第二次 verify 必失败。成员项带 `sealed: true/false`；`files` 仍列出它供还原参考。
+
+**A3（coverage 第 6 个值）**：`coverage` 增加 `error`（账本读不出来时），`stopped_at` 增加 `ledger_error` 与 `max_files`。没有 `error` 时「账本读不出来」只能伪装成 page/budget 之一。
+
+**A4（坏行 reason 词表）**：`reason` 仍用既有稳定词 `artifact_record_invalid`，细码放 `reason_detail`（`record_size_invalid` / `record_digest_invalid` / `record_page_invalid`），因为红基线断言的是 `reason`。
+
+**A5（library_rows 与 empty）**：`library_rows` 只在首屏（`after is None`）统计；`coverage=empty` 只表示「本次一页都没核验」（空库或游标已在末尾），只有 `library_rows == 0` 才表示「库里没有 artifact」。
+
+**A6（scan 文本格式）**：unknown 原因逐条打印 `code: count`；「库里没有已登记的成品可核验」只在 `library_rows == 0` 时出现。
+
+**A7（WC-06 的表现）**：新增 `existing_pages` 与 `unstarted_pages`；删除旧文案「已登记 N 页」（它是 WC-06 的误读来源）。`unstarted_pages` 在当前 CHECK 约束下结构性恒为 0，仍按计算字段实现并保留恒等式 `total = linked + existing + unstarted`。
+
+**A8（作废只摘 watcher）**：作用域作废时摘掉 pending 的 watcher，**不** cancel 生产者的 Future（取消不是顺序保证，且 UI 无权取消后端工作）；正确性只依赖 epoch + 批次双校验。
