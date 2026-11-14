@@ -2018,6 +2018,34 @@
         "账本错误在 --json 下有两种形状（N1），下一批统一"
       ],
       "history_errata": "上一轮维护记录把 verify 描述成「同一行内容」的证明，实际只比对象名集合与计数；本轮已按行为修正并重新生成封存 v2 备份。"
+    },
+    {
+      "id": "JPGPNG-WORKSPACE-TIDY-20261114-01",
+      "session_date": "2026-11-14",
+      "status": "organization_completed_no_product_fix",
+      "summary": "续接并完成工作区历史开发资料归档、目录导航和文档留档",
+      "verification": {
+        "workspace_batches": 53,
+        "project_local_batches": 5,
+        "worktrees": 73,
+        "dirty_worktrees": 7,
+        "resume_batches": 18,
+        "resume_files": 600447,
+        "resume_bytes": 20221053327,
+        "resume_junctions": 428,
+        "source_test_entry_dependency_files": 257
+      },
+      "evidence": "../docs/maintenance/2026-11-14_workspace_tidy.md",
+      "local_evidence": "../.runtime/workspace_tidy_20261114_01/resume_01/validation.json",
+      "changes": [
+        "53 workspace + 5 project-local batches archived",
+        "73 worktrees and 7 dirty states preserved",
+        "Current navigation, path maps, documentation and logs updated; production code unchanged"
+      ],
+      "remaining": [
+        "WR-01..07 / WG-01..04 remain open",
+        "Other product plans and protected data unchanged"
+      ]
     }
   ]
 }

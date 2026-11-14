@@ -1,6 +1,6 @@
 # 版本留档与恢复
 
-**当前（2026-11-14）**：U1-A 的 W5/W6 审计修复在 `fix/a1-u1a-w5w6-proof-20261114` 完成并打 `checkpoint-2026-11-14-u1a-w5w6-proof`——备份从此证明内容（清单 v2 + 逻辑指纹），巡检与界面按契约 v5 说真话。日常目录 `JpgPng` 跟踪 `daily/u1a-w5-w6-20261114`，已快进到本批分支头；封存 v2 备份在 `record_backups/pre-w5w6-proof`；回退是一条 `git checkout fix/a1-ar3-20261112`。main 仍未合并这些分支，勿把 default main 当作最新功能树。详见[证明修复记录](maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md)与[W5/W6 交付记录](maintenance/2026-11-14_jpgpng_u1a_w5_w6.md)。
+**当前（2026-11-14）**：最新独立审计针对产品基线 `e4eb6ce`，WR-01..07 与 WG-01..04 仍待后续工作。本轮只整理历史开发资料和当前文档，日常分支名与产品源码保持；文档保存后 HEAD 可以前进，不能把旧短提交号当作永久工作区状态。main 和检查点标签未移动。**先不要照旧 runbook 恢复真实库**；源码 checkout 不代替数据库兼容性检查和独立备份。见[最新审计](audits/2026-11-14-u1a-w5w6-proof-independent/README.md)与[工作区整理记录](../../docs/maintenance/2026-11-14_workspace_tidy.md)。
 
 **上一轮审计基线（2026-11-13）**：功能分支 `fix/a1-u1a-j01-20261113` 的 `8b1c751` 已作[独立复审](audits/2026-11-13-u1a-independent/README.md)，发现待修问题；报告分支 `audit/u1a-independent-20261113` 只保存文档与反例。
 
@@ -10,7 +10,7 @@
 
 ## 当前检查点
 
-当前保留七个标签（后三个是 2026-11-14 的三轮）：
+以下列出主要历史检查点；完整标签以 `git tag --list` 为准，不因归档删除或移动：
 
 - `checkpoint-2026-11-12-a1-audit`：与审计基线一致的 173 个 Python 文件，archive_schema 为 schema 2。
 - `checkpoint-2026-11-12-a1-wip`：开始留档时实际工作树，保留 archive_schema 已有的 schema 3 未验收草稿。

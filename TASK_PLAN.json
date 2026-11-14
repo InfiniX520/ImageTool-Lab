@@ -315,7 +315,7 @@
       "date": "2026-11-11",
       "status": "completed_findings_unfixed_no_migration",
       "report": "docs/audits/2026-11-11/README.md",
-      "evidence": "../.runtime/jpgpng_audit_20261111_01/audit_result.json",
+      "evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_audit_20261111_01/audit_result.json",
       "next_candidates": [
         "Receipt disk revalidation",
         "Shared dependency maintenance",
@@ -330,7 +330,7 @@
       "overview": "docs/optimization/2026-11-11/README.md",
       "design": "docs/optimization/2026-11-11/DESIGN.md",
       "validation_and_rollout": "docs/optimization/2026-11-11/VALIDATION_AND_ROLLOUT.md",
-      "evidence": "../.runtime/jpgpng_optimization_design_20261111_01/validation.json",
+      "evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_optimization_design_20261111_01/validation.json",
       "next_step": "U1-A scoped artifact verification/repair implementation design; U1-B shared environment maintenance separately",
       "engine_decision": "No engine selected or migrated; prefer bounded extraction comparison before adoption",
       "yt_dlp": "Official documentation applicability review only; architecture reference, no installation or security audit",
@@ -354,15 +354,15 @@
       "started_jobs": [],
       "latest_batch": "JPGPNG-U1A-W5W6-PROOF-INDEPENDENT-AUDIT-20261114-01",
       "foundation": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6.md",
-      "evidence": "docs/audits/2026-11-14-u1a-w5w6-proof-independent/README.md",
-      "previous_completed_batch": "JPGPNG-U1A-W5W6-PROOF-20261114-01",
-      "unfinished_draft": "WR-01..07 and WG-01..04 open; 75 worktrees and 8 dirty trees registered, no cleanup performed; restore runbook not approved for real data.",
+      "evidence": "../.runtime/jpgpng_e4_audit_20261114_01/README.md",
+      "previous_completed_batch": "JPGPNG-U1A-W5W6-PROOF-INDEPENDENT-AUDIT-20261114-01",
+      "unfinished_draft": "WR-01..07 and WG-01..04 remain product work. Organization-only archive is separately recorded under workspace_tidy; no deployment, schema or protected data change.",
       "latest_repair_evidence": null,
       "latest_overview": "docs/audits/2026-11-14-u1a-w5w6-proof-independent/README.md",
       "latest_evidence": "../.runtime/jpgpng_e4_audit_20261114_01/runs/non_tk_exact.xml",
       "audited_commit": "e4eb6cee79c5b85e1d124e54b086f52b81a453e4",
       "fixed_commit": null,
-      "runtime_checkout_note": "Daily JpgPng remains on daily/u1a-w5-w6-20261114 at e4eb6ce; audit branch audit/u1a-w5w6-proof-independent-20261114 changes only reports/navigation. Preserve the existing sealed v2 backup; do not follow the old restore instructions."
+      "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114; product source baseline is e4eb6ce. Documentation-only commits may advance HEAD. No product deployment or database restore; preserve the sealed v2 backup and follow the latest audit restrictions."
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -373,7 +373,7 @@
       "acceptance": "docs/archiving/ACCEPTANCE.md",
       "implementation_log": "docs/archiving/IMPLEMENTATION_LOG.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_archive_design.md",
-      "evidence": "../.runtime/jpgpng_archive_design_20261111_01/validation.json",
+      "evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_archive_design_20261111_01/validation.json",
       "user_facts": {
         "provider": "Quark SVIP",
         "library_approx_GB": 500,
@@ -415,10 +415,10 @@
       ],
       "scope_note": "Schema 5 / plan 3 / receipt 2; AR4-01..08 closed; v4 drafts refused; no production or real archive/readback/release.",
       "current_foundation": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
-      "current_evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
+      "current_evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
       "latest_batch": "JPGPNG-A1-AR4-20261113-01",
       "latest_overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
-      "latest_evidence": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml"
+      "latest_evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_ar4_20261113_01/full_r4_main.xml"
     },
     "unified_implementation": {
       "id": "JPGPNG-UNIFIED-IMPLEMENTATION-20261111-01",
@@ -426,7 +426,7 @@
       "status": "audit_completed_findings_open_not_production_ready",
       "overview": "docs/optimization/IMPLEMENTATION.md",
       "maintenance": "../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md",
-      "evidence": "../.runtime/jpgpng_unified_implementation_20261111_01/validation.json",
+      "evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_unified_implementation_20261111_01/validation.json",
       "implemented": [
         "core/preservation_policy.py",
         "tests/test_preservation_policy.py"
@@ -439,7 +439,7 @@
           "tests.test_preservation_policy": 44,
           "tests.test_task_contracts": 49
         },
-        "report": "../.runtime/jpgpng_unified_implementation_20261111_01/tests02.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_unified_implementation_20261111_01/tests02.xml"
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
@@ -485,7 +485,7 @@
         "passed": 250,
         "failed": 5,
         "skipped": 3,
-        "report": "../.runtime/jpgpng_a1_audit_20261111_01/existing_tests.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_audit_20261111_01/existing_tests.xml"
       },
       "failure_attribution": {
         "transaction_conflict": 4,
@@ -494,7 +494,7 @@
       "probes": {
         "executed": 13,
         "meaning": "Audit counterexamples, NOT acceptance passes",
-        "report": "../.runtime/jpgpng_a1_audit_20261111_01/probe_results.json"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_audit_20261111_01/probe_results.json"
       },
       "product_ready": false,
       "production_source_changes": false,
@@ -516,7 +516,7 @@
       "state": "source_checkpoint_remote_result_in_external_receipt",
       "guide": "docs/VERSION_CONTROL.md",
       "record": "docs/maintenance/2026-11-12_version_checkpoint.md",
-      "push_receipt": "../.runtime/jpgpng_git_checkpoint_20261112_01/result.json",
+      "push_receipt": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_git_checkpoint_20261112_01/result.json",
       "scope_note": "Audit tag matches audited Python sources; WIP tag preserves existing schema-3 draft. Audit counts do not certify the WIP tree.",
       "current_working_tag": "checkpoint-2026-11-12-a1-wip",
       "unreviewed_since_audit": [
@@ -541,7 +541,7 @@
         "failed": 0,
         "errors": 0,
         "skipped": 3,
-        "report": "../.runtime/jpgpng_a1_reaudit_20261112_01/focused.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_reaudit_20261112_01/focused.xml"
       },
       "full": {
         "total": 1313,
@@ -549,7 +549,7 @@
         "failed": 0,
         "errors": 0,
         "skipped": 3,
-        "report": "../.runtime/jpgpng_a1_reaudit_20261112_01/full.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_reaudit_20261112_01/full.xml"
       },
       "source_files_frozen": 174,
       "product_source_changed": false,
@@ -564,14 +564,14 @@
       "overview": "docs/audits/2026-11-12-a1-final/README.md",
       "findings": "docs/audits/2026-11-12-a1-final/FINDINGS.md",
       "guide": "docs/audits/2026-11-12-a1-final/DEVELOPMENT_GUIDE.md",
-      "evidence": "../.runtime/jpgpng_a1_finalaudit_20261112_01/validation.json",
+      "evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_finalaudit_20261112_01/validation.json",
       "full": {
         "total": 1391,
         "passed": 1388,
         "failed": 0,
         "errors": 0,
         "skipped": 3,
-        "report": "../.runtime/jpgpng_a1_finalaudit_20261112_01/latest_full02.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_finalaudit_20261112_01/latest_full02.xml"
       },
       "earlier_attempt": {
         "passed": 1387,
@@ -603,7 +603,7 @@
       "overview": "docs/audits/2026-11-13-a1-acceptance/README.md",
       "findings": "docs/audits/2026-11-13-a1-acceptance/FINDINGS.md",
       "guide": "docs/audits/2026-11-13-a1-acceptance/DEVELOPMENT_GUIDE.md",
-      "evidence": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
+      "evidence": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_acceptance_audit_20261112_01/validation.json",
       "full": {
         "total": 1415,
         "passed": 1412,
@@ -611,7 +611,7 @@
         "errors": 0,
         "skipped": 3,
         "seconds": 181.309,
-        "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/full01.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_acceptance_audit_20261112_01/full01.xml"
       },
       "independent_unmerged": {
         "total": 23,
@@ -620,7 +620,7 @@
         "errors": 0,
         "skipped": 0,
         "seconds": 4.719,
-        "report": "../.runtime/jpgpng_a1_acceptance_audit_20261112_01/independent01.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_acceptance_audit_20261112_01/independent01.xml"
       },
       "findings_open": {
         "P1": 2,
@@ -663,7 +663,7 @@
         "errors": 0,
         "skipped": 3,
         "seconds": 218.137,
-        "report": "../.runtime/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_ar4_20261113_01/full_r4_main.xml",
         "note": "tests/test_collection_presentation.py ignored (Tk environment); that file separately 4/4 passed"
       },
       "independent": {
@@ -678,8 +678,8 @@
           "failed": 0
         }
       },
-      "scale": "../.runtime/jpgpng_a1_ar4_20261113_01/scale_atomic02/result.json",
-      "crash": "../.runtime/jpgpng_a1_ar4_20261113_01/crash_atomic01/results.json",
+      "scale": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_ar4_20261113_01/scale_atomic02/result.json",
+      "crash": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_a1_ar4_20261113_01/crash_atomic01/results.json",
       "report": "docs/maintenance/2026-11-13_jpgpng_a1_ar4_fix.md",
       "product_ready": false,
       "next_step": "A1 offline interface may enter production wiring review (U1-A/J-01); real gallery, cloud readback, release and production migration remain separate gates."
@@ -702,14 +702,14 @@
         "total": 17,
         "failed_expected": 7,
         "skipped": 2,
-        "report": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_baseline.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_u1a_wiring_20261113_01/tests_baseline.xml"
       },
       "full_with_red_tests": {
         "total": 1515,
         "failed_expected": 7,
         "errors": 0,
         "skipped": 5,
-        "report": "../.runtime/jpgpng_u1a_wiring_20261113_01/tests_full_suite.xml"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_u1a_wiring_20261113_01/tests_full_suite.xml"
       },
       "product_source_changed": false,
       "product_ready": false,
@@ -888,8 +888,17 @@
         "P1": 2,
         "P2": 5,
         "total": 7,
-        "audit_followups_fixed": ["P2-1 cleanup retry reachable", "P2-2 negative observation window", "P3-1 carry uses the shared resolver", "P3-2 refused cancel is classified"],
-        "recorded_boundaries": ["P3-3 writer-side millisecond TOCTOU", "P3-4 root_state only checks is_dir", "P3-5 progress read caps and labels"]
+        "audit_followups_fixed": [
+          "P2-1 cleanup retry reachable",
+          "P2-2 negative observation window",
+          "P3-1 carry uses the shared resolver",
+          "P3-2 refused cancel is classified"
+        ],
+        "recorded_boundaries": [
+          "P3-3 writer-side millisecond TOCTOU",
+          "P3-4 root_state only checks is_dir",
+          "P3-5 progress read caps and labels"
+        ]
       },
       "audit_probes": {
         "tests": 12,
@@ -996,7 +1005,7 @@
         "P2": 2,
         "P3": 6,
         "result": "P2 fixed (scan argument exit code, invalid evidence XML); P3 handled or recorded",
-        "report": "../.runtime/jpgpng_u1a_w5_w6_20261114_01/audit/REPORT.md"
+        "report": "../_archives/jpgpng_development_20261114/2026-11/jpgpng_u1a_w5_w6_20261114_01/audit/REPORT.md"
       },
       "schema_changed": false,
       "dependencies_added": false,
@@ -1022,7 +1031,14 @@
         "P1": 1,
         "P2": 4,
         "P3": 1,
-        "codes": ["WC-01", "WC-02", "WC-03", "WC-04", "WC-05", "WC-06"],
+        "codes": [
+          "WC-01",
+          "WC-02",
+          "WC-03",
+          "WC-04",
+          "WC-05",
+          "WC-06"
+        ],
         "method": "every code closed by behaviour, judged by the audit probes, not by lane self-reports"
       },
       "red_baseline": {
@@ -1037,7 +1053,16 @@
         "verification_panel": 60,
         "boundaries": 12
       },
-      "contract_amendments": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"],
+      "contract_amendments": [
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7",
+        "A8"
+      ],
       "rehearsal": {
         "inspect_real": "compatible/healthy, 49 of 49 objects, main bytes and sha256 unchanged",
         "backup_v2": "sealed v2 manifest, verified, source group unchanged",
@@ -1126,8 +1151,16 @@
         "P1": 1,
         "P2": 5,
         "total": 6,
-        "audit_followups_fixed": ["P2-1 single-page byte ceiling raised to 8 GiB", "P2-2 truncated handover batch reports budget_exhausted", "P3-1 a full progress event window counts as truncated"],
-        "recorded_boundaries": ["P3-2 one scenario assertion covered elsewhere", "P3-3 unknown artifact size degrades the precheck", "P3-4 MAX_LINEAGE_QUERIES has no headroom"]
+        "audit_followups_fixed": [
+          "P2-1 single-page byte ceiling raised to 8 GiB",
+          "P2-2 truncated handover batch reports budget_exhausted",
+          "P3-1 a full progress event window counts as truncated"
+        ],
+        "recorded_boundaries": [
+          "P3-2 one scenario assertion covered elsewhere",
+          "P3-3 unknown artifact size degrades the precheck",
+          "P3-4 MAX_LINEAGE_QUERIES has no headroom"
+        ]
       },
       "audit_probes": {
         "tests": 12,
@@ -1182,6 +1215,28 @@
       "business_data_changed": false,
       "deployed": false,
       "next_step": "W5 wiring and registered gaps; real migration/backup/external-volume rehearsal remains a separate gate."
+    },
+    "workspace_tidy": {
+      "id": "JPGPNG-WORKSPACE-TIDY-20261114-01",
+      "date": "2026-11-14",
+      "status": "completed_no_product_change",
+      "navigation": "../docs/CURRENT_WORKSPACE.md",
+      "archive": "../_archives/jpgpng_development_20261114/INDEX.md",
+      "evidence": "../.runtime/workspace_tidy_20261114_01/resume_01/validation.json",
+      "maintenance": "../docs/maintenance/2026-11-14_workspace_tidy.md",
+      "counts": {
+        "workspace_batches": 53,
+        "project_local_batches": 5,
+        "worktrees": 73,
+        "dirty_worktrees": 7,
+        "resume_batches": 18,
+        "resume_files": 600447,
+        "resume_bytes": 20221053327,
+        "resume_junctions": 428,
+        "source_test_entry_dependency_files": 257
+      },
+      "product_fixes": false,
+      "pending_product_work_unchanged": "WR-01..07 / WG-01..04; U1-B; A2-A6; E1-3/E1-4"
     }
   }
 }
