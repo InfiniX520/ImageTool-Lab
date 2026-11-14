@@ -1,6 +1,6 @@
 # 项目目录说明
 
-**当前入口**：版本与排期见[联合实施总入口](optimization/IMPLEMENTATION.md)、[最新 RFA 修复复审](audits/2026-11-14-u1a-rfa-recheck/README.md)；本页说明目录/归档边界，历史验收不替代当前审计。
+**当前入口**：版本与排期见[联合实施](optimization/IMPLEMENTATION.md)、[W5/W6 最新独立审计](audits/2026-11-14-u1a-w5-w6/README.md)。本轮证据集中在单一审计包，临时库/日志留在工作区 `.runtime/jpgpng_u1a_w5w6_audit_20261114_01/`，旧基线与业务资料保留。
 
 **前置 A1 阶段（2026-11-13，历史）**：dda6fc1：AR4-01..08 已关闭；schema 5；全量 1,494 项 1,491 通过/3 跳过（Tk 文件单独 4/4），独立 29/29；A1 离线验收完成，尚未接生产。历史问题见[接受事务复审](audits/2026-11-13-a1-acceptance/README.md)与[修复记录](maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)；原轮次证据保留。
 

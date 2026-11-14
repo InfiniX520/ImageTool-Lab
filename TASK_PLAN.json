@@ -297,7 +297,7 @@
   ],
   "current_plan": {
     "id": "JPGPNG-REFACTOR-20261023",
-    "updated_at": "2026-11-13",
+    "updated_at": "2026-11-14",
     "mainline": "P0-P8 completed",
     "cleanup": "completed",
     "progress": "docs/refactor/REFACTOR_PROGRESS.md",
@@ -346,23 +346,23 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "W5/W6 delivered on fix/a1-u1a-w5-w6-20261114; RFB-01..06 plus the W5 surfaces and the W6 preflight/backup are closed; not merged to main",
-      "status": "batch_completed_offline_rehearsed_daily_checkout_switched",
+      "phase": "W5/W6 independently audited at 52e6936; RFB original probes pass; WC-01..06 open",
+      "status": "audit_complete_findings_open_daily_unchanged",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "User keeps or rolls back the switched daily checkout (docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md). Registered gaps stay open: finish_source final-result query, intent projection/index, carry long transaction, claim statement count, per-install page ceiling, legacy record_manager health wiring, real external-volume drill.",
+      "next_step": "S0 freeze backup proof, scan verdict, UI epochs and malformed-row contracts; then S1 maintenance/CLI, S2 audit reader, S3 GUI/summary in owned worktrees; full regression and read-only contextual review.",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-W5-W6-20261114-01",
+      "latest_batch": "JPGPNG-U1A-W5-W6-AUDIT-20261114-01",
       "foundation": "docs/optimization/2026-11-14/U1A_W5_W6_SCOPE.md",
-      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
-      "previous_completed_batch": "JPGPNG-U1A-RFB-FIX-20261114-01",
-      "unfinished_draft": "W5 list, read-only audit, panel and the maintain CLI shipped; the panel lists 50 rows without paging and offers no batch redownload on purpose.",
+      "evidence": "docs/audits/2026-11-14-u1a-w5-w6/evidence/results.json",
+      "previous_completed_batch": "JPGPNG-U1A-W5-W6-20261114-01",
+      "unfinished_draft": "WC-01..05 must be fixed and reviewed; WC-06 is a presentation-design gap; historical infrastructure gaps remain separately open.",
       "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
-      "latest_overview": "docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md",
-      "latest_evidence": "../.runtime/jpgpng_u1a_w5_w6_20261114_01/verify2/final_nontk.xml",
-      "audited_commit": "de50f805c3ab0610edf20c6a21a21d42790c2024",
+      "latest_overview": "docs/audits/2026-11-14-u1a-w5-w6/README.md",
+      "latest_evidence": "docs/audits/2026-11-14-u1a-w5-w6/evidence/results.json",
+      "audited_commit": "52e69365d78aac3acda77cbb093ba9e07b74bece",
       "fixed_commit": "01b91c3",
-      "runtime_checkout_note": "Daily JpgPng checkout tracks daily/u1a-w5-w6-20261114 at 01b91c3; library preflight is compatible/healthy and 11/11 artifacts match; rollback is git checkout fix/a1-ar3-20261112."
+      "runtime_checkout_note": "Observed daily/u1a-w5-w6-20261114 at 52e6936, clean; no runtime checkout or business data changed by this audit."
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -443,7 +443,7 @@
       },
       "scope": "Pure local/archive evidence binding and next-step decisions; existing production call sites unchanged",
       "remaining": {
-        "U1-A_A1": "AR4 preserved; old RFA 12, RF 15 and UA 14 pass at f7c389b. RFB-01..06 open; not deployed.",
+        "U1-A_A1": "RFB original 12 and older RFA/RF/UA probes pass at 52e6936; W5/W6 is on the daily checkout; WC-01..06 open (1 P1, 4 P2, 1 P3); archive release remains gated.",
         "U1-B": "Shared dependency maintenance pending; separate governed environment change",
         "U1-C": "Quality evidence and deep decoder capability/resource validation pending",
         "U2-A": "Coverage and pending-reason summaries pending",
@@ -456,12 +456,12 @@
       },
       "research_status": "Sufficient to implement defined offline work; external-tool and real-data hypotheses require experiments",
       "user_action_now": "No retrieval, passwords, installations or account operations needed",
-      "latest_batch": "JPGPNG-U1A-RFA-AUDIT-20261114-01",
-      "latest_overview": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md",
-      "latest_evidence": "docs/audits/2026-11-14-u1a-rfa-recheck/evidence/results.json",
-      "historical_tests_note": "tests/implemented above describe the original pure-policy batch; current results/open findings are in u1a_rfa_reaudit.",
-      "next_step": "S0 align evidence/progress, cleanup EOF, lineage edges and recovery faults; S1 fix RFB-01/02/06 together; S2 RFB-03/05; S3 RFB-04; integrated re-audit before W5/production.",
-      "latest_audit": "docs/audits/2026-11-14-u1a-rfa-recheck/README.md"
+      "latest_batch": "JPGPNG-U1A-W5-W6-AUDIT-20261114-01",
+      "latest_overview": "docs/audits/2026-11-14-u1a-w5-w6/README.md",
+      "latest_evidence": "docs/audits/2026-11-14-u1a-w5-w6/evidence/results.json",
+      "historical_tests_note": "tests/implemented describe original pure-policy work; current independent audit results are in u1a_w5_w6_audit.",
+      "next_step": "S0 freeze backup proof, scan verdict, UI epochs and malformed-row contracts; then S1 maintenance/CLI, S2 audit reader, S3 GUI/summary in owned worktrees; full regression and read-only contextual review.",
+      "latest_audit": "docs/audits/2026-11-14-u1a-w5-w6/README.md"
     },
     "a1_implementation_audit": {
       "id": "JPGPNG-A1-AUDIT-20261111-01",
@@ -1125,6 +1125,53 @@
       "business_data_changed": false,
       "deployed": false,
       "next_step": "W5 wiring and registered gaps; real migration/backup/external-volume rehearsal remains a separate gate."
+    },
+    "u1a_w5_w6_audit": {
+      "id": "JPGPNG-U1A-W5-W6-AUDIT-20261114-01",
+      "date": "2026-11-14",
+      "status": "audit_complete_findings_open",
+      "audited_commit": "52e69365d78aac3acda77cbb093ba9e07b74bece",
+      "product_commit": "01b91c3",
+      "branch": "audit/u1a-w5-w6-20261114",
+      "report": "docs/audits/2026-11-14-u1a-w5-w6/README.md",
+      "findings": "docs/audits/2026-11-14-u1a-w5-w6/FINDINGS.md",
+      "guide": "docs/audits/2026-11-14-u1a-w5-w6/DEVELOPMENT_GUIDE.md",
+      "evidence": "docs/audits/2026-11-14-u1a-w5-w6/evidence/results.json",
+      "priority_counts": {
+        "P1": 1,
+        "P2": 4,
+        "P3": 1
+      },
+      "existing_tests": {
+        "tests": 2077,
+        "passed": 2073,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 4
+      },
+      "independent_probes": {
+        "tests": 12,
+        "passed": 3,
+        "failed": 9,
+        "errors": 0,
+        "skipped": 0
+      },
+      "open_ids": [
+        "WC-01",
+        "WC-02",
+        "WC-03",
+        "WC-04",
+        "WC-05",
+        "WC-06"
+      ],
+      "daily_observed": {
+        "branch": "daily/u1a-w5-w6-20261114",
+        "commit": "52e69365d78aac3acda77cbb093ba9e07b74bece",
+        "clean": true
+      },
+      "product_changed": false,
+      "real_data_accessed": false,
+      "next_step": "S0 freeze backup proof, scan verdict, UI epochs and malformed-row contracts; then S1 maintenance/CLI, S2 audit reader, S3 GUI/summary in owned worktrees; full regression and read-only contextual review."
     }
   }
 }

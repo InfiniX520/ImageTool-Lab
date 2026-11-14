@@ -1942,6 +1942,84 @@
         "真实外置卷掉线仍用目录改名模拟"
       ],
       "history_errata": "full/wp2_after_merge.xml 因 basetemp 被删而含 112 个 setup error，不能作为证据；以审计重跑的 recomputed_combo.xml（152 通过）与最终矩阵 verify2/ 为准。"
+    },
+    {
+      "session_date": "2026-11-14",
+      "id": "JPGPNG-U1A-W5-W6-AUDIT-20261114-01",
+      "summary": "W5/W6 独立审计：固定52e6936，确认1 P1/4 P2/1 P3，统一当前导航并给出分包开发指导。",
+      "audit": {
+        "id": "JPGPNG-U1A-W5-W6-AUDIT-20261114-01",
+        "date": "2026-11-14",
+        "status": "audit_complete_findings_open",
+        "audited_commit": "52e69365d78aac3acda77cbb093ba9e07b74bece",
+        "product_commit": "01b91c3",
+        "branch": "audit/u1a-w5-w6-20261114",
+        "report": "docs/audits/2026-11-14-u1a-w5-w6/README.md",
+        "findings": "docs/audits/2026-11-14-u1a-w5-w6/FINDINGS.md",
+        "guide": "docs/audits/2026-11-14-u1a-w5-w6/DEVELOPMENT_GUIDE.md",
+        "evidence": "docs/audits/2026-11-14-u1a-w5-w6/evidence/results.json",
+        "priority_counts": {
+          "P1": 1,
+          "P2": 4,
+          "P3": 1
+        },
+        "existing_tests": {
+          "tests": 2077,
+          "passed": 2073,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "independent_probes": {
+          "tests": 12,
+          "passed": 3,
+          "failed": 9,
+          "errors": 0,
+          "skipped": 0
+        },
+        "open_ids": [
+          "WC-01",
+          "WC-02",
+          "WC-03",
+          "WC-04",
+          "WC-05",
+          "WC-06"
+        ],
+        "daily_observed": {
+          "branch": "daily/u1a-w5-w6-20261114",
+          "commit": "52e69365d78aac3acda77cbb093ba9e07b74bece",
+          "clean": true
+        },
+        "product_changed": false,
+        "real_data_accessed": false,
+        "next_step": "S0 freeze backup proof, scan verdict, UI epochs and malformed-row contracts; then S1 maintenance/CLI, S2 audit reader, S3 GUI/summary in owned worktrees; full regression and read-only contextual review."
+      },
+      "organization": "Only one new audit bundle plus one maintenance record. Existing 40 sessions and historical audit bytes preserved; runtime evidence stays outside public source; no deletion/moving of worktrees or business data.",
+      "validation": {
+        "compile": 242,
+        "existing": {
+          "tests": 2077,
+          "passed": 2073,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 4
+        },
+        "new_probes": {
+          "tests": 12,
+          "passed": 3,
+          "failed": 9,
+          "errors": 0,
+          "skipped": 0
+        },
+        "rfb_original_ast_equal": true,
+        "gitnexus_index": "pixivkeep-u1a-w5w6-audit-20261114"
+      },
+      "limits": [
+        "No real library/gallery/account operations",
+        "No physical external volume or power-loss drill",
+        "WC-06 is a presentation-design gap, not proven downloader corruption",
+        "Historical deferred performance and archive items remain open"
+      ]
     }
   ]
 }

@@ -1,0 +1,551 @@
+{
+  "id": "JPGPNG-U1A-W5-W6-AUDIT-20261114-01",
+  "date": "2026-11-14",
+  "audited_commit": "52e69365d78aac3acda77cbb093ba9e07b74bece",
+  "product_commit": "01b91c3",
+  "branch": "audit/u1a-w5-w6-20261114",
+  "findings": {
+    "WC-01": {
+      "priority": "P1",
+      "status": "open"
+    },
+    "WC-02": {
+      "priority": "P2",
+      "status": "open"
+    },
+    "WC-03": {
+      "priority": "P2",
+      "status": "open"
+    },
+    "WC-04": {
+      "priority": "P2",
+      "status": "open"
+    },
+    "WC-05": {
+      "priority": "P2",
+      "status": "open"
+    },
+    "WC-06": {
+      "priority": "P3",
+      "status": "open"
+    }
+  },
+  "counts": {
+    "P1": 1,
+    "P2": 4,
+    "P3": 1
+  },
+  "full_suite_excluding_two_legacy_tk_files": {
+    "tests": 2068,
+    "passed": 2064,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 4,
+    "seconds": 584.763,
+    "raw_file": "full01.xml",
+    "raw_sha256": "3565a4dc2a648a6828b4914bd9fc79e94dc1c76089bef3098be175b707d3d0d7"
+  },
+  "isolated_legacy_tk": [
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.753,
+      "raw_file": "tk01.xml",
+      "raw_sha256": "88ced3f5b78acee5d4956a3231adadf1ea5f254b4c29130701cebf64b4f70a11"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.424,
+      "raw_file": "tk02.xml",
+      "raw_sha256": "84d0a327436b9eb409513de350a74fef48cdcfdaecc9a0c90e946f887bb1b4db"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.452,
+      "raw_file": "tk03.xml",
+      "raw_sha256": "d8685fe23d533389d6dfd425888ef97aca6090000ef4a84a8faa1a370184eb14"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.423,
+      "raw_file": "tk04.xml",
+      "raw_sha256": "df8192de36dc30278b285006cb9d16ba16d7f5d79377bff26b72f5e2ea8a18cf"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.796,
+      "raw_file": "tk05.xml",
+      "raw_sha256": "17e1913cd367a6198094b17991be21faffcec3eb47817eae420a5de6d54d11f2"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.829,
+      "raw_file": "tk06.xml",
+      "raw_sha256": "c332023770d75bb3be447529b0772f18046b2385d2422996ced2250d92b8086e"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.714,
+      "raw_file": "tk07.xml",
+      "raw_sha256": "0b13dfa26a2809ece459ccab659dc2b24aa20063fa1fea658de889e8d43bd5d1"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.916,
+      "raw_file": "tk08.xml",
+      "raw_sha256": "8767999f5621bcbfa523bd84bf959d741dc80a26b4283ee514744b91a8ba5e76"
+    },
+    {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.607,
+      "raw_file": "tk09.xml",
+      "raw_sha256": "fb4d2bbbc5c4e1d9769f4fcd89a777e03de7a6f2a068d6651f6de5d80689a80d"
+    }
+  ],
+  "existing_combined": {
+    "tests": 2077,
+    "passed": 2073,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 4
+  },
+  "new_independent_probes": {
+    "tests": 12,
+    "passed": 3,
+    "failed": 9,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 2.263,
+    "raw_file": "probe03.xml",
+    "raw_sha256": "66faf7e239d8ecfc66b10a4aeb61acf20587c375423e2256c2bfc646b24e1c24"
+  },
+  "probe_cases": [
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc01_same_counts_changed_backup_is_rejected",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc01_same_object_names_different_ddl_is_rejected",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_control_online_snapshot_wal_is_valid",
+      "status": "passed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_control_restore_file_group_does_not_replay_destination_wal",
+      "status": "passed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc02_scan_budget_unknown_is_not_all_verified",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc03_ui_final_result_preserves_non_success[value0]",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc03_ui_final_result_preserves_non_success[value1]",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc03_ui_final_result_preserves_non_success[value2]",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_control_ui_reused_can_report_success",
+      "status": "passed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc04_ui_ignores_rows_for_previous_selected_batch",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc05_scan_malformed_numeric_row_is_reported_not_traceback",
+      "status": "failed"
+    },
+    {
+      "module": "test_w5w6_recheck",
+      "name": "test_wc06_summary_accounts_for_artifact_only_pages",
+      "status": "failed"
+    }
+  ],
+  "probe_history": {
+    "probe01": "6 failed / 3 passed, provisional numbering",
+    "probe02": "9 failed / 3 passed, provisional numbering",
+    "probe03": "9 failed / 3 passed, final WC-01..06; WC-06 is a presentation-design gap"
+  },
+  "old_audit_cases": [
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_foreign_handover_does_not_strand_original_owner[reuse]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_foreign_handover_does_not_strand_original_owner[repair]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_pending_with_unobservable_artifact_is_not_dispatchable",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_pending_without_bound_resolver_is_not_dispatchable",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_negative_recovery_binds_the_recorded_artifact[artifact_id]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_negative_recovery_binds_the_recorded_artifact[sha256]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_negative_recovery_binds_the_recorded_artifact[size_bytes]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_fatal_owner_stops_the_new_service_threads",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_pause_admission_cannot_be_based_on_a_stale_database_read",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_accept_corruption_stops_activation_of_later_jobs",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_pause_cancels_remaining_file_observation",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_publication_gate_wins_over_a_later_exclusion_boundary_probe",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_intact_reuse_and_history_still_work",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_excluded_recovery_needed_can_finish_local_recovery",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_fix_boundaries",
+      "name": "test_cancelled_owned_temp_can_be_cleaned_after_transient_unlink_failure",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_excluded_from_historical_task_stops_other_task_pending_repair",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_excluded_from_historical_task_prevents_recovery_repair",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_recovery_uses_matching_older_artifact_when_latest_version_differs",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_recovery_rejects_stale_missing_evidence",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_carried_foreign_hold_can_be_recovered_by_its_current_batch",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_pending_recovery_with_root_offline_is_really_held",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_same_page_receipt_replay_does_not_hash_again",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_intact_recovery_preserves_original_receipt",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_changed_recovery_preserves_foreign_bytes",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_corrupt_intent_does_not_silently_allow_automatic_repair",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_exclusion_during_transfer_prevents_publication",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_hash_preflight_does_not_block_coordinator_control_commands",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_completion_between_preflight_and_accept_does_not_create_a_false_hold",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_independent_regressions",
+      "name": "test_carry_parses_the_batch_health_map_once",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_cleanup_fact_written_by_real_executor_is_excluded_from_candidates",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_cleanup_window_advances_past_a_cleaned_delivery",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_default_page_budget_can_progress_a_33_image_work_after_resume",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_explicit_handover_is_authoritative_over_a_new_unrelated_pending",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_cancel_preserves_temp_replaced_while_waiting_for_writer",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_offline_root_does_not_prove_an_unpublished_delivery",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_cleanup_offline_root_does_not_claim_completion",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_lineage_resolves_each_candidate_at_most_once_per_operation",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_foreign_temp_present_before_verification_is_preserved",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_already_published_file_is_not_cancelled_when_root_goes_offline",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_gate_wins_and_history_controls_still_pass",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfa_boundaries",
+      "name": "test_local_recovery_fault_handler_tolerates_another_recovery_winner",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[False]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_cached_hash_cannot_approve_an_in_place_equal_size_edit[True]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[cache_cap]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_missing_progress_cannot_turn_a_large_page_into_an_endless_retry[progress_write]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_cleanup_sweep_does_not_treat_examine_budget_as_end_of_queue[1]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_cleanup_sweep_does_not_treat_examine_budget_as_end_of_queue[200]",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_superseded_intermediate_event_can_lead_to_an_older_completed_artifact",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_unreadable_ledger_is_not_reported_as_a_recovery_classification",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_recover_local_surfaces_an_unreadable_publication_ledger",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_a_single_file_cannot_silently_exceed_the_declared_slice_byte_budget",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_restored_missing_cache_does_not_overwrite_a_real_file",
+      "status": "passed"
+    },
+    {
+      "module": "tests.test_u1a_rfb_boundaries",
+      "name": "test_original_twelve_rfa_regressions_are_not_weakened",
+      "status": "passed"
+    }
+  ],
+  "skipped_cases": [
+    {
+      "module": "tests.test_local_observation",
+      "name": "test_real_symlink_file_is_rejected_when_platform_supports_it",
+      "status": "skipped"
+    },
+    {
+      "module": "tests.test_local_observation",
+      "name": "test_real_symlink_ancestor_is_rejected_even_when_target_is_inside_root",
+      "status": "skipped"
+    },
+    {
+      "module": "tests.test_local_observation",
+      "name": "test_real_symlink_root_is_rejected",
+      "status": "skipped"
+    },
+    {
+      "module": "tests.test_u1a_j01_health",
+      "name": "test_w_phase_local_boundaries_are_not_wired_into_reuse_yet",
+      "status": "skipped"
+    }
+  ],
+  "compiled_tracked_python": 242,
+  "rfb_audit_functions_ast_unchanged": true,
+  "suite_note": "The 2068 suite includes 45 verification panel tests, some using real Tk. Not a purely non-Tk suite.",
+  "runtime_evidence": "../.runtime/jpgpng_u1a_w5w6_audit_20261114_01/",
+  "product_changed": false,
+  "existing_tests_changed": false,
+  "real_data_accessed": false,
+  "daily_checkout_changed_by_audit": false,
+  "dependencies_added": false,
+  "tooling": "Existing shared Python/pytest and GitNexus; SQLite official documentation only for external research.",
+  "documentation_validation": {
+    "links_checked": 32,
+    "unchanged_tracked_files_verified": 369,
+    "historical_sessions_preserved": 40,
+    "daily_head_unchanged": true,
+    "product_and_existing_tests_unchanged": true,
+    "utf8_no_bom_lf": true,
+    "public_sensitive_pattern_check": true
+  },
+  "gitnexus_review": {
+    "summaries": [
+      {
+        "scope": "staged_audit_only",
+        "changed_count": 31,
+        "affected_count": 0,
+        "changed_files": 18,
+        "risk_level": "low"
+      },
+      {
+        "scope": "compare_main_cumulative",
+        "changed_count": 3720,
+        "affected_count": 175,
+        "changed_files": 170,
+        "risk_level": "critical"
+      }
+    ],
+    "note": "Staged Git diff is authoritative: README-basename symbol overmatching is present; no product functions changed. compare-main is the cumulative feature branch history, not this audit's delta."
+  }
+}

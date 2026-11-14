@@ -1,6 +1,6 @@
 # 版本留档与恢复
 
-**当前（2026-11-14）**：U1-A 的 W5/W6 已在 `fix/a1-u1a-w5-w6-20261114` 交付并打 `checkpoint-2026-11-14-u1a-w5-w6`；日常目录 `JpgPng` 当天切到 `daily/u1a-w5-w6-20261114`（库预检 compatible/healthy、11 个 artifact 全部 match），回退是一条 `git checkout fix/a1-ar3-20261112`。main 仍未合并这些分支，勿把 default main 当作最新功能树。详见[维护记录](maintenance/2026-11-14_jpgpng_u1a_w5_w6.md)。
+**当前（2026-11-14）**：日常目录为 `daily/u1a-w5-w6-20261114` @ `52e6936`，main 未合入这些功能分支；最新[独立审计](audits/2026-11-14-u1a-w5-w6/README.md)发现 WC-01..06（1 P1、4 P2、1 P3）。历史检查点继续保全，不能把标签或现有 `verify ok=True` 当作完整业务备份证明。审计分支仅含文档/合成反例，本轮未切换日常目录。
 
 **上一轮审计基线（2026-11-13）**：功能分支 `fix/a1-u1a-j01-20261113` 的 `8b1c751` 已作[独立复审](audits/2026-11-13-u1a-independent/README.md)，发现待修问题；报告分支 `audit/u1a-independent-20261113` 只保存文档与反例。
 

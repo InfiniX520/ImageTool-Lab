@@ -1,6 +1,6 @@
 # 图库归档与空间释放
 
-**当前入口**：版本与排期见[联合实施总入口](../optimization/IMPLEMENTATION.md)、[最新 RFA 修复复审](../audits/2026-11-14-u1a-rfa-recheck/README.md)；本页说明目录/归档边界，历史验收不替代当前审计。
+**当前入口**：版本与排期见[联合实施](../optimization/IMPLEMENTATION.md)、[W5/W6 最新独立审计](../audits/2026-11-14-u1a-w5-w6/README.md)。WC-01 的备份忠实性先修；当前 `verify ok=True` 不足以授权还原或释放原件。归档 A2–A6 仍按原计划，历史记录不改写。
 
 **前置 A1 阶段（2026-11-13，历史）**：dda6fc1：AR4-01..08 已关闭；schema 5；全量 1,494 项 1,491 通过/3 跳过（Tk 文件单独 4/4），独立 29/29；A1 离线验收完成，尚未接生产。见[修复记录](../maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)；原轮次证据保留。
 
