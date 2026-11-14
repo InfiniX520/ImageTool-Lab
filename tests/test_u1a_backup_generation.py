@@ -299,6 +299,31 @@ def test_an_interrupted_copy_removes_the_workspace(tmp_path, monkeypatch):
     assert not seen["workspace"].exists()
 
 
+def test_the_measured_copy_cost_is_a_real_number(tmp_path):
+    """A real copy must report a non-zero cost.
+
+    Windows' time.monotonic() has a ~15.6 ms tick, so copying a small member
+    quantised to 0.000 seconds and the evidence said nothing at all.
+    perf_counter (QPC, ~100 ns) is the measurement clock for these fields; the
+    numbers below come straight from it, with no sleep and no padding.
+    """
+    source = helper.make_library(tmp_path / "lib" / "library.sqlite3", jobs=2)
+    payload = b"P" * (2 * 1024 * 1024)
+    with sqlite3.connect(source, isolation_level=None) as connection:
+        connection.execute("CREATE TABLE payload (body BLOB)")
+        connection.execute("INSERT INTO payload VALUES (?)", (payload,))
+    manifest = m.backup_library(source, tmp_path / "backups", label="cost")
+    directory = Path(manifest["manifest_path"]).parent
+    result = m.verify_backup(directory)
+    evidence = result["evidence"]
+    assert result["ok"] is True
+    assert int(evidence["copy_bytes"]) >= 2 * 1024 * 1024
+    assert float(evidence["copy_seconds"]) > 0.0
+    assert float(evidence["hash_seconds"]) > 0.0
+    assert float(evidence["read_seconds"]) > 0.0
+    assert float(evidence["seconds"]) > 0.0
+
+
 def test_the_text_report_names_the_copy_and_its_boundary(tmp_path):
     directory = sealed_backup(tmp_path)
     result = m.verify_backup(directory)

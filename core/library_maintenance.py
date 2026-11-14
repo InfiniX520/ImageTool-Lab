@@ -1507,7 +1507,10 @@ def _seal_members(
             facts.append(fact)
             states.append("missing")
             continue
-        started = time.monotonic()
+        # perf_counter is the measurement clock: the Windows monotonic clock
+        # has a ~15.6 ms tick, which quantises a small copy into 0.0 and makes
+        # the evidence unreadable.
+        started = time.perf_counter()
         try:
             copied = _copy_and_hash(path, workspace / name)
         except FileNotFoundError:
@@ -1522,12 +1525,12 @@ def _seal_members(
             raise LibraryMaintenanceError(
                 "library_unavailable", "%s: %s" % (name, error)
             ) from None
-        copy_seconds += time.monotonic() - started
+        copy_seconds += time.perf_counter() - started
         copy_bytes += int(copied["bytes"])
         after[name] = copied["path_now"]
-        started = time.monotonic()
+        started = time.perf_counter()
         readback = _readback_digest(workspace / name)
-        hash_seconds += time.monotonic() - started
+        hash_seconds += time.perf_counter() - started
         fact["bytes_actual"] = int(copied["bytes"])
         fact["sha256_actual"] = copied["sha256"]
         if (
@@ -1635,7 +1638,8 @@ def verify_backup(
     if not root.is_dir():
         raise BackupError("backup_not_a_directory", str(root))
     root = root.resolve()
-    started = time.monotonic()
+    # Measurement only; nothing here decides a timeout.
+    started = time.perf_counter()
     manifest = _load_manifest(root)
     version = int(manifest["manifest_version"])
     reasons: list[str] = []
@@ -1721,7 +1725,7 @@ def verify_backup(
             evidence["scope"] = "isolated_copy"
             isolated = workspace / library_name
             if isolated.is_file():
-                read_started = time.monotonic()
+                read_started = time.perf_counter()
                 try:
                     with contextlib.closing(_connect_readonly(isolated)) as opened:
                         # One connection and one read transaction: the object
@@ -1736,7 +1740,7 @@ def verify_backup(
                 except LibraryMaintenanceError as error:
                     logical_error = str(getattr(error, "code", "library_unreadable"))
                     warnings.append("copy_logical_unreadable")
-                evidence["read_seconds"] = round(time.monotonic() - read_started, 6)
+                evidence["read_seconds"] = round(time.perf_counter() - read_started, 6)
             else:
                 warnings.append("copy_missing")
             # The last look comes after every read, so a member rewritten at any
@@ -1880,7 +1884,7 @@ def verify_backup(
         and compatible_ok
         and stability == "stable"
     )
-    evidence["seconds"] = round(time.monotonic() - started, 6)
+    evidence["seconds"] = round(time.perf_counter() - started, 6)
     evidence["checked_at"] = _now_utc()
     return {
         "mode": "manifest",
