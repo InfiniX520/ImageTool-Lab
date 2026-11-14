@@ -1697,7 +1697,7 @@ def _scan_coverage(report: dict[str, object]) -> str:
     return "page" if report.get("truncated") else "complete"
 
 
-def _scan_is_empty(report: dict[str, object]) -> bool:
+def _scan_is_empty(report: dict[str, object], *, continuation: bool = False) -> bool:
     """True only when the ledger itself holds no delivered artifact.
 
     Coverage 'empty' can also mean "the cursor sits at the end", so the row
@@ -1707,7 +1707,9 @@ def _scan_is_empty(report: dict[str, object]) -> bool:
     library_rows = stats.get("library_rows")
     if type(library_rows) is int:
         return library_rows == 0
-    return _scan_coverage(report) == "empty"
+    # On a continuation page the row count is not computed, so an empty
+    # page only means "the cursor is at the end", never "the library is empty".
+    return _scan_coverage(report) == "empty" and not continuation
 
 
 def _scan_findings(report: dict[str, object]) -> list[dict[str, object]]:
@@ -1744,7 +1746,7 @@ def _scan_unknown_reasons(report: dict[str, object]) -> dict[str, int]:
     return counts
 
 
-def _scan_lines(report: dict[str, object]) -> list[str]:
+def _scan_lines(report: dict[str, object], *, continuation: bool = False) -> list[str]:
     """Report exactly what was verified; never upgrade unknown into a match."""
     stats = report.get("stats") or {}
     coverage = _scan_coverage(report)
@@ -1763,8 +1765,10 @@ def _scan_lines(report: dict[str, object]) -> list[str]:
             % ("%s,%s" % (cursor[0], cursor[1]) if cursor else "-"),
             "本次没有给出任何核验结论。",
         ]
-    if _scan_is_empty(report):
+    if _scan_is_empty(report, continuation=continuation):
         return ["库里没有已登记的成品可核验。"]
+    if _scan_coverage(report) == "empty" and continuation:
+        return ["游标已在末尾，本次没有可核验的行。"]
     lines = [
         "核验: 覆盖 %d 行（匹配 %d，排除 %d，无法核验 %d）"
         % (examined, matched, excluded, unknown),
@@ -2017,6 +2021,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print("巡检失败: 账本读不出来（%s）" % error, file=sys.stderr)
                 return 3
+            continuation = arguments.after is not None
             code, findings = _scan_outcome(report, allow_unknown=arguments.allow_unknown)
             report["exit_code"] = code
             report["findings"] = len(findings)
@@ -2026,14 +2031,14 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(
                     report,
                     as_json,
-                    _scan_lines(report)
+                    _scan_lines(report, continuation=continuation)
                     + [
                         "提示: 已按 --allow-unknown 跳过 %d 行无摘要旧行。"
                         % int((report.get("stats") or {}).get("unknown") or 0)
                     ],
                 )
             else:
-                _emit(report, as_json, _scan_lines(report))
+                _emit(report, as_json, _scan_lines(report, continuation=continuation))
             return code
         plan = switch_plan(arguments.database)
         _emit(

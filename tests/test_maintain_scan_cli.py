@@ -197,6 +197,31 @@ def test_unverifiable_rows_are_counted_out_loud(tmp_path, capsys):
     assert "旧行或缺摘要" not in printed
 
 
+def test_a_continuation_past_the_end_is_not_an_empty_library(tmp_path, capsys):
+    """A cursor at the end says "nothing left", never "no delivered work" here."""
+    database = _empty_library(tmp_path)
+    data = b"\xff\xd8only row\xff\xd9"
+    _write_file(tmp_path, "downl_Pixiv/artist/7_p0.jpg", data)
+    _insert_artifact(database, "downl_Pixiv/artist/7_p0.jpg", data)
+    connection = sqlite3.connect(str(database))
+    try:
+        completed_at, artifact_id = connection.execute(
+            "SELECT completed_at, artifact_id FROM artifacts").fetchone()
+    finally:
+        connection.close()
+    cursor = "%s,%s" % (completed_at, artifact_id)
+
+    assert main(["scan", str(database)]) == 0
+    capsys.readouterr()
+
+    code = main(["scan", str(database), "--after", cursor])
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "游标已在末尾" in printed
+    assert "库里没有已登记的成品" not in printed
+
+
 def test_an_unreadable_ledger_exits_three(tmp_path, capsys):
     database = _empty_library(tmp_path)
     database.write_bytes(b"not a database at all")
