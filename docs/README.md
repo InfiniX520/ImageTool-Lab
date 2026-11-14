@@ -1,6 +1,6 @@
 # JpgPng 文档导航
 
-**当前接续（2026-11-14）**：`fix/a1-u1a-w5w6-proof-20261114` 修复了 W5/W6 审计的 1 P1 + 4 P2 + 1 P3——**备份从此证明内容**（清单 v2 + 逻辑指纹，`sealed`/`logical`/`healthy`/`compatible` 四项分开报，未执行的一项不再默认为真），巡检结论改由引擎事实驱动（新增退出码 5，unknown 不再被说成「一致」），核验面板按批次 epoch 定作用域、结果不再被绿色「完成」覆盖，已有页有了独立统计。判据（审计 12 条反例）从 9 红 3 绿转 **12/12**；只读复审 **P1=0、P2=0**。先读[维护记录](maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md)、[契约 v5](optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md)与[切换 runbook](optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)；W5/W6 交付轮记录（`52e6936`）与 RFB 轮（`482eb03`，12 探针 12/12）保留原文。未合并 main；日常目录跟踪 `daily/u1a-w5-w6-20261114`，切换与回退都是一条命令。
+**当前接续（2026-11-14）**：`e4eb6ce` 的交付后独立审计发现 WR-01..07（1 P1、6 P2）及 WG-01..04。旧的备份逐行内容指纹、观察与恢复 CAS 保持；新缺口是外部根、跨页扫描、备份晚期失败、核验列表与恢复文档。先读[独立审计](audits/2026-11-14-u1a-w5w6-proof-independent/README.md)、[开发指导](audits/2026-11-14-u1a-w5w6-proof-independent/DEVELOPMENT_GUIDE.md)与[契约 v6](optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6.md)。**不要照旧 runbook 恢复真实库。** 日常目录跟踪 `daily/u1a-w5-w6-20261114`；本审计未改产品，历史 WC/RFB 记录保留原文。
 
 下载器 P0—P8、独立整理 CLI E1-2 已交付；E1-3 分类小样、E1-4 分批整理待实施。2026-11-11 三项目审计另发现需修复的库完整性和依赖风险，详见下方审计报告；历史交付不代表已消除这些问题。日常使用从根目录的说明进入，这里集中索引计划、当前进度和历史材料。
 

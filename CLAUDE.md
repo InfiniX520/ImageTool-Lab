@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **ImageTool-Lab** (6236 symbols, 15032 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **PixivKeep** (10382 symbols, 26888 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -24,10 +24,10 @@ This project is indexed by GitNexus as **ImageTool-Lab** (6236 symbols, 15032 re
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/ImageTool-Lab/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/ImageTool-Lab/clusters` | All functional areas |
-| `gitnexus://repo/ImageTool-Lab/processes` | All execution flows |
-| `gitnexus://repo/ImageTool-Lab/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/PixivKeep/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/PixivKeep/clusters` | All functional areas |
+| `gitnexus://repo/PixivKeep/processes` | All execution flows |
+| `gitnexus://repo/PixivKeep/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

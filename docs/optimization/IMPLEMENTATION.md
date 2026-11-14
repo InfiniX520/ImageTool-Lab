@@ -1,6 +1,6 @@
 # JpgPng 优化、功能与归档联合实施
 
-**当前接续（2026-11-14）**：f7c389b（产品 48a6968）独立复审：现有非 Tk 1,827 通过/4 跳过，Tk 首轮同进程 9/9；新增 12 项边界为 10 失败/2 通过，确认 RFB-01..06（1 P1、5 P2）。旧 RFA 12/RF 15/UA 14 仍通过。未改产品、未部署，日常目录保持 5465e0c。 以[本轮审计](../audits/2026-11-14-u1a-rfa-recheck/README.md)及[开发指导](../audits/2026-11-14-u1a-rfa-recheck/DEVELOPMENT_GUIDE.md)接续。修复记录的“RFA 全部关闭”仅覆盖原用例，新增边界仍需处理；第 4I 节作为当时记录保留，第 4J 节是最新复审。
+**当前接续（2026-11-14）**：`e4eb6ce` 的交付后独立审计确认 **WR-01..07（1 P1、6 P2）与 WG-01..04**，重点为扫描外部根/全程分页、备份异常协议、核验列表作用域及恢复说明。现有主体回归 2,149 项中 2,145 通过/4 跳过、Tk 9/9，但新边界不能用全绿报告替代。日常目录仍跟踪 `daily/u1a-w5-w6-20261114`；本审计未改产品、未部署、未合并 main。以[独立审计](../audits/2026-11-14-u1a-w5w6-proof-independent/README.md)、[开发指导](../audits/2026-11-14-u1a-w5w6-proof-independent/DEVELOPMENT_GUIDE.md)及[契约 v6](2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6.md)接续；第 4M 及更早记录是历史，不代表新 WR 已修。
 
 前置阶段记录（2026-11-13）：**dda6fc1：AR4-01..08 已关闭；schema 5 / plan 3 / receipt 2；全量 1,494 项 1,491 通过/3 跳过（Tk 文件单独 4/4），独立 29/29；A1 离线验收完成，尚未接生产。**[修复记录](../maintenance/2026-11-13_jpgpng_a1_ar4_fix.md)、[历史复审](../audits/2026-11-13-a1-acceptance/README.md)。
 
