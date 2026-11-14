@@ -1942,6 +1942,82 @@
         "真实外置卷掉线仍用目录改名模拟"
       ],
       "history_errata": "full/wp2_after_merge.xml 因 basetemp 被删而含 112 个 setup error，不能作为证据；以审计重跑的 recomputed_combo.xml（152 通过）与最终矩阵 verify2/ 为准。"
+    },
+    {
+      "session_date": "2026-11-14",
+      "batch": "JPGPNG-U1A-W5W6-PROOF-20261114-01",
+      "branch": "fix/a1-u1a-w5w6-proof-20261114",
+      "summary": "修复 W5/W6 审计的 1 P1 + 4 P2 + 1 P3：备份改为封存 + 逻辑指纹（清单 v2，sealed/logical/healthy/compatible 分开报，未检查不默认通过），巡检结论改由引擎事实驱动并新增退出码 5，核验面板按 epoch 定作用域且结果不再被绿色完成覆盖，巡检坏行不再整次崩溃，已有页独立统计。判据（审计 12 条反例）从 9 红 3 绿转 12/12；只读复审 P1=0、P2=0，1 项 P3 已修。真实库副本演练：同计数改一行 → sealed+logical 双 mismatch、退出 2；还原后 ok；原库字节与 sha256 前后不变。",
+      "w5_w6_proof": {
+        "id": "JPGPNG-U1A-W5W6-PROOF-20261114-01",
+        "base": "52e6936",
+        "product_before_fix": "01b91c3",
+        "audit_commit": "0c11b1a",
+        "fixed_head": "3ff949d",
+        "closed": {
+          "P1": 1,
+          "P2": 4,
+          "P3": 1,
+          "codes": [
+            "WC-01",
+            "WC-02",
+            "WC-03",
+            "WC-04",
+            "WC-05",
+            "WC-06"
+          ]
+        },
+        "red_baseline": {
+          "file": "tests/test_u1a_w5w6_boundaries.py",
+          "before": "9 failed / 3 passed",
+          "after": "12 passed"
+        },
+        "lane_tests": {
+          "library_maintenance": 82,
+          "maintain_scan_cli": 24,
+          "library_audit": 48,
+          "verification_panel": 60,
+          "boundaries": 12
+        },
+        "contract_amendments": [
+          "A1",
+          "A2",
+          "A3",
+          "A4",
+          "A5",
+          "A6",
+          "A7",
+          "A8"
+        ],
+        "rehearsal": {
+          "backup_v2": "sealed manifest, verified, source unchanged",
+          "same_count_edit": "sealed+logical mismatch, ok=False, exit 2, tables_differing=[jobs]",
+          "restore_member": "ok=True again",
+          "compare": "logical ok, sealed not_checked, question=same_content_as_source",
+          "scan_cli": "11 of 11 match, exit 0",
+          "real_library_untouched": "4435968 bytes / sha256 0cba55b8... unchanged"
+        },
+        "readonly_audit": {
+          "object": "87fdc2a",
+          "P1": 0,
+          "P2": 0,
+          "P3": 1,
+          "p3_fixed_in": "3ff949d",
+          "own_probes": "33/33"
+        },
+        "schema_changed": false,
+        "dependencies_added": false,
+        "business_data_changed": false,
+        "deployed": false
+      },
+      "organization": "三条 lane 并行（backup/scan/ui），文件归属互斥；主线程先固定红基线 9 红 3 绿再 fork，合流顺序 S2→S1→S3；复审 P3 由主线程修复并补回归测试。",
+      "limitations": [
+        "清单是完整性摘要，不是签名；不抗同时篡改库与清单",
+        "unstarted_pages 在当前 CHECK 约束下结构性恒为 0",
+        "面板仍只列前 50 行、不分页",
+        "账本错误在 --json 下有两种形状（N1），下一批统一"
+      ],
+      "history_errata": "上一轮维护记录把 verify 描述成「同一行内容」的证明，实际只比对象名集合与计数；本轮已按行为修正并重新生成封存 v2 备份。"
     }
   ]
 }

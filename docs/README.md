@@ -1,6 +1,6 @@
 # JpgPng 文档导航
 
-**当前接续（2026-11-14）**：`fix/a1-u1a-w5-w6-20261114` 在 RFB 修复轮之后交付 U1-A 的 W5/W6：待核验页面只读列表、全库巡检（只报告）、白蓝界面「核验」面板、库预检/备份/副本校验 CLI（`maintain.py`）。开工实测真实库与新代码声明**逐条相同**（49 对象、quick/integrity ok、WAL 0 字节），因此**不需要 schema 迁移**；`inspect` 前后主库字节与 sha256 不变，`scan` 11 个 artifact 全部 `match`。先读[维护记录](maintenance/2026-11-14_jpgpng_u1a_w5_w6.md)、[范围冻结稿](optimization/2026-11-14/U1A_W5_W6_SCOPE.md)与[切换 runbook](optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)；RFB 轮记录（`482eb03`，12 探针 12/12）与[契约 v4](optimization/2026-11-14/U1A_STATE_CONTRACT_V4.md)保留原文。未合并 main、未部署、未触碰真实图库/账号/网络，日常目录保持 `5465e0c`。
+**当前接续（2026-11-14）**：`fix/a1-u1a-w5w6-proof-20261114` 修复了 W5/W6 审计的 1 P1 + 4 P2 + 1 P3——**备份从此证明内容**（清单 v2 + 逻辑指纹，`sealed`/`logical`/`healthy`/`compatible` 四项分开报，未执行的一项不再默认为真），巡检结论改由引擎事实驱动（新增退出码 5，unknown 不再被说成「一致」），核验面板按批次 epoch 定作用域、结果不再被绿色「完成」覆盖，已有页有了独立统计。判据（审计 12 条反例）从 9 红 3 绿转 **12/12**；只读复审 **P1=0、P2=0**。先读[维护记录](maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md)、[契约 v5](optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md)与[切换 runbook](optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)；W5/W6 交付轮记录（`52e6936`）与 RFB 轮（`482eb03`，12 探针 12/12）保留原文。未合并 main；日常目录跟踪 `daily/u1a-w5-w6-20261114`，切换与回退都是一条命令。
 
 下载器 P0—P8、独立整理 CLI E1-2 已交付；E1-3 分类小样、E1-4 分批整理待实施。2026-11-11 三项目审计另发现需修复的库完整性和依赖风险，详见下方审计报告；历史交付不代表已消除这些问题。日常使用从根目录的说明进入，这里集中索引计划、当前进度和历史材料。
 
@@ -19,7 +19,9 @@
 
 ## 当前进度与计划
 
-- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：RFB-01..06 已按行为关闭（第 4K 节），W5/W6 已在本批交付（第 4L 节）；剩余为已登记遗留。
+- [优化、功能与归档联合实施：当前总入口](optimization/IMPLEMENTATION.md)：RFB-01..06（第 4K 节）、W5/W6 交付（第 4L 节）与 W5/W6 证明修复（第 4M 节，WC-01..06）均已按行为关闭；剩余为已登记遗留。
+- [W5/W6 审计与逐项发现](audits/2026-11-14-u1a-w5-w6/README.md)：1 P1 + 4 P2 + 1 P3，12 条独立反例（9 红 3 绿）与修复后的 12/12。
+- [W5/W6 证明与作用域契约 v5](optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md)：五类备份事实、逻辑指纹算法、退出码、epoch 作用域与 A1..A8 修订。
 - [U1-A W5/W6 范围与冻结接口](optimization/2026-11-14/U1A_W5_W6_SCOPE.md)：四个工作包、文件归属、接口契约与"不做"清单。
 - [切换与回退 runbook](optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)：预检、备份、副本演练、切换与回退命令，含退出码与副作用说明。
 - [前置接受事务复审与开发指导](audits/2026-11-13-a1-acceptance/README.md)：AR4、修复复核、R0–R6 和版本证据。
@@ -37,6 +39,7 @@
 
 ## 最近交付与整理
 
+- [2026-11-14 U1-A W5/W6 证明修复记录](maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md)：WC-01..06 逐条根因与修法、契约修订、真实库副本演练与复审结论。
 - [2026-11-14 U1-A W5/W6 维护记录](maintenance/2026-11-14_jpgpng_u1a_w5_w6.md)：待核验列表、全库巡检、W5 界面、库预检/备份、真实库只读演练、偏离登记与审计结论。
 - [2026-11-14 U1-A RFB 修复记录](maintenance/2026-11-14_jpgpng_u1a_rfb_fix.md)：RFB-01..06 关闭（确认 pass、进度推进、清理 EOF、中间 handover、账本故障、每页预算），1,897 项全量与合成测量数字。
 - [2026-11-14 U1-A RFA 修复记录](maintenance/2026-11-14_jpgpng_u1a_rfa_fix.md)：RFA-01..07 关闭、审计追加 P2 修复、1,831 项全量与合成测量数字。

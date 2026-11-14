@@ -346,23 +346,23 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "W5/W6 delivered on fix/a1-u1a-w5-w6-20261114; RFB-01..06 plus the W5 surfaces and the W6 preflight/backup are closed; not merged to main",
-      "status": "batch_completed_offline_rehearsed_daily_checkout_switched",
+      "phase": "W5/W6 proof fix merged on fix/a1-u1a-w5w6-proof-20261114; WC-01..06 closed; read-only audit P1=0 P2=0; not merged to main",
+      "status": "findings_closed_offline_rehearsed_readonly_audit_clean",
       "resume": "docs/optimization/IMPLEMENTATION.md",
-      "next_step": "User keeps or rolls back the switched daily checkout (docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md). Registered gaps stay open: finish_source final-result query, intent projection/index, carry long transaction, claim statement count, per-install page ceiling, legacy record_manager health wiring, real external-volume drill.",
+      "next_step": "Fast-forward the daily branch onto this head and keep the sealed v2 backup; then the registered gaps (finish_source query, intent projection, carry transaction, page ceiling config, legacy health gate, external-volume drill).",
       "supersedes": "Archive-only scheduling; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-W5-W6-20261114-01",
-      "foundation": "docs/optimization/2026-11-14/U1A_W5_W6_SCOPE.md",
-      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
-      "previous_completed_batch": "JPGPNG-U1A-RFB-FIX-20261114-01",
-      "unfinished_draft": "W5 list, read-only audit, panel and the maintain CLI shipped; the panel lists 50 rows without paging and offers no batch redownload on purpose.",
-      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5_w6.md",
-      "latest_overview": "docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md",
-      "latest_evidence": "../.runtime/jpgpng_u1a_w5_w6_20261114_01/verify2/final_nontk.xml",
+      "latest_batch": "JPGPNG-U1A-W5W6-PROOF-20261114-01",
+      "foundation": "docs/optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md",
+      "evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md",
+      "previous_completed_batch": "JPGPNG-U1A-W5-W6-20261114-01",
+      "unfinished_draft": "WC-01..06 closed by behaviour; the panel still lists 50 rows without paging, unstarted_pages is structurally zero, and the manifest is an integrity digest rather than a signature.",
+      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md",
+      "latest_overview": "docs/audits/2026-11-14-u1a-w5-w6/README.md",
+      "latest_evidence": "../.runtime/jpgpng_u1a_w5w6_fix_20261114_01/verify/final_nontk.xml",
       "audited_commit": "de50f805c3ab0610edf20c6a21a21d42790c2024",
-      "fixed_commit": "01b91c3",
-      "runtime_checkout_note": "Daily JpgPng checkout tracks daily/u1a-w5-w6-20261114 at 01b91c3; library preflight is compatible/healthy and 11/11 artifacts match; rollback is git checkout fix/a1-ar3-20261112."
+      "fixed_commit": "3ff949d",
+      "runtime_checkout_note": "Daily JpgPng checkout tracks daily/u1a-w5-w6-20261114, fast-forwarded to this batch head; a sealed v2 backup lives in record_backups/pre-w5w6-proof; rollback is git checkout fix/a1-ar3-20261112."
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -1005,6 +1005,63 @@
       "deployed": true,
       "deployed_scope": "daily checkout switched to daily/u1a-w5-w6-20261114; no download or resume was started by the tools",
       "next_step": "User keeps or rolls back the switch; then the registered gaps (finish_source query, intent projection, carry transaction, page ceiling config, legacy health gate, external-volume drill)."
+    },
+    "u1a_w5w6_proof": {
+      "id": "JPGPNG-U1A-W5W6-PROOF-20261114-01",
+      "date": "2026-11-14",
+      "status": "findings_closed_offline_rehearsed_readonly_audit_clean",
+      "base": "52e6936",
+      "product_before_fix": "01b91c3",
+      "branch": "fix/a1-u1a-w5w6-proof-20261114",
+      "audit_report": "docs/audits/2026-11-14-u1a-w5-w6/README.md",
+      "audit_commit": "0c11b1a",
+      "contract": "docs/optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md",
+      "record": "docs/maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md",
+      "runbook": "docs/optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md",
+      "closed": {
+        "P1": 1,
+        "P2": 4,
+        "P3": 1,
+        "codes": ["WC-01", "WC-02", "WC-03", "WC-04", "WC-05", "WC-06"],
+        "method": "every code closed by behaviour, judged by the audit probes, not by lane self-reports"
+      },
+      "red_baseline": {
+        "file": "tests/test_u1a_w5w6_boundaries.py",
+        "before": "9 failed / 3 passed",
+        "after": "12 passed"
+      },
+      "lane_tests": {
+        "library_maintenance": 82,
+        "maintain_scan_cli": 24,
+        "library_audit": 48,
+        "verification_panel": 60,
+        "boundaries": 12
+      },
+      "contract_amendments": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"],
+      "rehearsal": {
+        "inspect_real": "compatible/healthy, 49 of 49 objects, main bytes and sha256 unchanged",
+        "backup_v2": "sealed v2 manifest, verified, source group unchanged",
+        "verify_clean": "sealed/logical/healthy/compatible all ok",
+        "same_count_edit": "sealed and logical both mismatch, ok=False, exit 2, tables_differing=[jobs]",
+        "restore_member": "ok=True again",
+        "compare": "logical ok, sealed not_checked, question=same_content_as_source",
+        "scan_cli": "11 of 11 match, exit 0",
+        "real_library_untouched": "4435968 bytes / sha256 0cba55b8... unchanged"
+      },
+      "readonly_audit": {
+        "object": "87fdc2a",
+        "P1": 0,
+        "P2": 0,
+        "P3": 1,
+        "P3_fixed_in": "3ff949d",
+        "own_probes": "33/33",
+        "verdict": "this tree can replace the daily entry point"
+      },
+      "schema_changed": false,
+      "dependencies_added": false,
+      "business_data_changed": false,
+      "deployed": false,
+      "next_step": "Tag and fast-forward the daily branch; then the registered gaps (finish_source query, intent projection, carry transaction, page ceiling config, legacy health gate, external-volume drill)."
     },
     "u1a_rfa_reaudit": {
       "id": "JPGPNG-U1A-RFA-AUDIT-20261114-01",

@@ -180,6 +180,21 @@ MISSING 短缓存只允许调度/hold，不变成健康证据；不盲目重复�
 
 验证：非 Tk 全量 **2,068 项 2,064 通过/4 跳过/0 失败/0 错误**（上一轮 1,897 + 本批 171），Tk 逐条隔离 9/9。只读独立审计：**0 P1**，2 项 P2（scan 参数越界未捕获、一份证据 XML 无效）已修，6 项 P3 已处理或记录。详见[维护记录](../maintenance/2026-11-14_jpgpng_u1a_w5_w6.md)与[范围冻结稿](../optimization/2026-11-14/U1A_W5_W6_SCOPE.md)。未合并 main、未部署、未触碰真实图库/账号/网络。
 
+## 4M. 本轮：JPGPNG-U1A-W5W6-PROOF-20261114-01（WC-01..06 关闭）
+
+从 `52e6936`（产品 `01b91c3`）建立 `fix/a1-u1a-w5w6-proof-20261114`。审计 [WC-01..06](../audits/2026-11-14-u1a-w5-w6/README.md) 提出 1 项 P1、4 项 P2、1 项 P3，全部按行为关闭：
+
+- **WC-01 P1**：`verify` 声称比较「同样的行」却从未比较内容（`sealed`/`logical` 都不存在）。改为清单 v2 + 逻辑指纹（对象定义 + 每表逐行内容，类型标签/长度前缀/流式哈希），`verify_backup` 逐项校验 `sealed`/`logical`/`healthy`/`compatible`，未执行的一项一律 `not_checked` 且 `ok=False`；`compare_library` 回答「这两个库现在是否同内容」。
+- **WC-02**：结论改由引擎事实驱动（`coverage`/`unknown_reasons`/`ledger`），新增退出码 5，禁止把 unknown 说成「一致」。
+- **WC-03**：核验结果按最严重 outcome 收尾，绿色「完成」不再覆盖 held/refused/未知。
+- **WC-04**：新增 `_verification_epoch` + 批次身份，四个作废点与行级二次闸门，A 的迟到结果不能驱动 B。
+- **WC-05**：巡检先验后转，坏尺寸/坏身份只影响该行或结构化停止，不再整次崩溃。
+- **WC-06**：新增 `existing_pages`/`unstarted_pages`，面板显示「已有 M 页」并保持 `total = linked + existing + unstarted`。
+
+契约修订 A1..A8 与判据见[契约 v5](../optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md)；红基线（审计 12 条反例）从 9 红 3 绿转 12/12。只读复审：**P1=0、P2=0**，1 项 P3（续跑页误判空库）已修并补回归测试。
+
+详见[维护记录](../maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md)。未合并 main；日常目录仍跟踪 `daily/u1a-w5-w6-20261114`，切换是用户的一条明确动作。
+
 ## 5. 接续记录规则
 
 机器当前入口：[TASK_PLAN.json](../../TASK_PLAN.json) 的 `current_plan.active_workstream` 和 `current_plan.unified_implementation`；追加历史：[LOG.json](../../LOG.json)；维护记录：[本批实施说明](../../../docs/maintenance/2026-11-11_jpgpng_unified_implementation.md)。归档专项阶段继续在[归档实施日志](../archiving/IMPLEMENTATION_LOG.md)记细节，并链接回本页。
