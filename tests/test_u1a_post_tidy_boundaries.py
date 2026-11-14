@@ -12,22 +12,31 @@ def backup(tmp_path):
  info=m.backup_library(source,tmp_path/'backups',label='sealed')
  return Path(info['manifest_path']).parent
 
+# The audit injected its write at inspect_library, i.e. between the proof
+# stages.  Amendment A1 removed that stage on purpose: health and logical now
+# read one isolated copy, so the equivalent injection point is the moment the
+# sealed member has just been copied.  The property is unchanged and stronger:
+# the report must not be a pass when the file moved during the check, and it
+# must say that what it examined was the sealed copy.
 def test_pa01_verify_must_detect_write_between_proof_stages(tmp_path,monkeypatch):
  root=backup(tmp_path);copy=root/'library.sqlite3'
- original=m.inspect_library
+ original=m._copy_and_hash
  changed=[]
- def inspect(path):
-  if Path(path)==copy and not changed:
+ def copy_and_hash(source,destination):
+  fact=original(source,destination)
+  if Path(source)==copy and not changed:
    with sqlite3.connect(copy) as conn:conn.execute("UPDATE jobs SET state='cancelled'")
    changed.append(True)
-  return original(path)
- monkeypatch.setattr(m,'inspect_library',inspect)
+  return fact
+ monkeypatch.setattr(m,'_copy_and_hash',copy_and_hash)
  result=m.verify_backup(root)
- monkeypatch.setattr(m,'inspect_library',original)
+ monkeypatch.setattr(m,'_copy_and_hash',original)
  second=m.verify_backup(root)
  print('PA01_MIXED_PROOF', {k:result[k] for k in ['sealed','logical','health','compatible','ok']},'recheck_ok',second['ok'])
  assert changed and second['ok'] is False
  assert result['ok'] is False, 'All proof stages must describe one stable backup generation'
+ assert result['evidence']['scope']=='isolated_copy'
+ assert 'changed_during_check' in result['reasons']
 
 def test_pa02_sqlite_similar_prefix_user_table_is_fingerprinted(tmp_path):
  one=h.make_library(tmp_path/'one.sqlite3',jobs=1)
@@ -107,15 +116,35 @@ def artifact_library(root, count, external=False):
  return db
 
 
+# The audit's fixture put the external root *inside* the project root.  The
+# product's PathResolver forbids overlapping roots (two identities for the
+# same files), and the desktop writes project-relative roots for that case,
+# so such a file is corrupt and the command line must refuse it - see
+# test_wr02_an_overlapping_root_is_refused_below.  The same assertion is kept
+# here with the only legal shape: a root outside the project.
 def test_wr02_cli_loads_saved_external_root_mapping(tmp_path,capsys):
  db=artifact_library(tmp_path,1,external=True)
- external=tmp_path/'external';external.mkdir();(external/'p.jpg').write_bytes(b'image-0')
+ external=tmp_path.parent/(tmp_path.name+'-external');external.mkdir();(external/'p.jpg').write_bytes(b'image-0')
  config=tmp_path/'config';config.mkdir()
  (config/'output_roots_v1.json').write_text(json.dumps({'version':1,'roots':{'folder_test':str(external)}}),'utf-8')
  code=m.main(['--json','scan',str(db),'--root',str(tmp_path)])
  result=json.loads(capsys.readouterr().out)
  print('WR02_EXTERNAL',code,result['rows'][0]['verdict'])
  assert code==0 and result['rows'][0]['verdict']=='match'
+
+
+def test_wr02_an_overlapping_root_is_refused_below(tmp_path,capsys):
+ # A saved root that lives inside the project is corrupt, not a match and not
+ # a fallback: the whole command stops with a typed mapping error (exit 3).
+ db=artifact_library(tmp_path,1,external=True)
+ external=tmp_path/'external';external.mkdir();(external/'p.jpg').write_bytes(b'image-0')
+ config=tmp_path/'config';config.mkdir()
+ (config/'output_roots_v1.json').write_text(json.dumps({'version':1,'roots':{'folder_test':str(external)}}),'utf-8')
+ code=m.main(['--json','scan',str(db),'--root',str(tmp_path)])
+ result=json.loads(capsys.readouterr().out)
+ print('WR02_OVERLAP',code,result.get('code'))
+ assert code==3 and result['code']=='mapping_unreadable'
+ assert 'rows' not in result
 
 
 def test_wr03_bare_continuation_cannot_claim_full_scan(tmp_path,capsys):

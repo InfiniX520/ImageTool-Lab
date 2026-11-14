@@ -87,7 +87,12 @@ def test_a_matching_file_is_reported_and_exits_zero(tmp_path, capsys):
     assert [row["verdict"] for row in report["rows"]] == ["match"]
     assert report["rows"][0]["reason"] == "full_sha256_match"
     assert report["stats"]["matched"] == 1
-    assert report["truncated"] is False
+    # Contract v6 section 3.2 replaced the page-level "truncated" with the
+    # walk vocabulary: coverage is the answer and resume says whether the
+    # prefix is complete.
+    assert report["coverage"] == "complete"
+    assert report["scope"] == "full_walk"
+    assert report["resume"]["complete_prefix"] is True
 
 
 def test_a_missing_file_is_a_finding_and_exits_two(tmp_path, capsys):
@@ -217,8 +222,11 @@ def test_a_continuation_past_the_end_is_not_an_empty_library(tmp_path, capsys):
     code = main(["scan", str(database), "--after", cursor])
 
     printed = capsys.readouterr().out
-    assert code == 0
+    # Contract v6 section 3.2 / amendment A5: a bare cursor is a continuation,
+    # so even a cursor that sits at the very end cannot produce 0.
+    assert code == 5
     assert "游标已在末尾" in printed
+    assert "范围内" not in printed
     assert "库里没有已登记的成品" not in printed
 
 

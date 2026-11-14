@@ -56,12 +56,13 @@
 
 ## A5 扫描全程与外部根（WR-02/WR-03）
 
-- 新建 `core/library_scan.py`：`scan_library_report(source, *, project_root=None, after=None, limit=200, budget=None, cancel=None, kind="full_walk"|"continuation")` → `coverage / scope / pages_examined / library_rows / stats / findings / unknown_reasons / next_cursor / resume / exit_code`。
-- 引擎 `scan_library_artifacts` 的 API 与逐页语义一字不改，聚合层只在外层循环。
+- 新建 `core/library_scan.py`：`scan_library_report(source, *, project_root=None, roots=None, after=None, limit=200, budget=None, cancel=None, kind="full_walk"|"continuation"|"page", allow_unknown=False)` → `coverage / scope / pages_examined / library_rows / stats / findings / unknown_reasons / next_cursor / resume / exit_code / roots / mapping`。
+- 引擎 `scan_library_artifacts` 的 API 与逐页语义一字不改，聚合层只在外层循环；每页计数以引擎 `stats` 为准，聚合层不重数行。
 - 默认 `maintain scan` 走全程；显式 `--page` 才走单页；`--limit` 是页大小，不是全库总量。
 - 只有到 EOF、未被预算/取消/错误停止才是 `complete`；中途任一页确定异常必须进入最终退出码，末页不得覆盖。
-- 裸 `--after`：`scope=continuation`、`coverage=partial`、退出 5，即使已在 EOF。
-- 根映射只读加载 `config/output_roots_v1.json`：不存在 = 无外部根；存在却读不了/JSON 坏/版本未知/根非法 → `mapping_unreadable`、退出 3；不猜根、不 mkdir、未知 id 不回退项目根。`--root` 只指项目根。
+- 裸 `--after`：`scope=continuation`、`coverage=partial`、退出 5，即使已在 EOF。`scope` 因此有三个值：`full_walk`/`continuation`/`page`（单页是显式的第三种，不是"全程的一页"）。
+- 根映射只读加载 `config/output_roots_v1.json`：不存在 = 无外部根；**定义非法**（相对路径、与项目根或彼此重叠、链接、版本未知、JSON 坏、文件存在却读不了）→ `mapping_unreadable`、退出 3；**定义合法但该目录此刻不在**（拔盘、换机）→ 合法映射，逐行 `root_unavailable`、退出 2，绝不因此让整条命令失败，也绝不回退项目根。`--root` 只指项目根。
+- 报告里的行清单有上限（`findings`/`rows` 各留 5000 条，超出用 `findings_omitted`/`rows_omitted` 计数），计数器精确、清单有界；不落盘报告，`resume.complete_prefix` 在有前缀链证明之前恒为 false。
 
 ## A6 归档采集器身份（PA-03）
 

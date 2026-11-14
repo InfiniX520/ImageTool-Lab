@@ -1608,16 +1608,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("database", type=Path)
     scan.add_argument(
-        "--root", type=Path, default=None, help="输出图库根目录；默认取库文件所在项目的根"
+        "--root", type=Path, default=None,
+        help="项目根目录；外部根从 <root>/config/output_roots_v1.json 只读加载。默认取库文件所在项目的根",
     )
     scan.add_argument(
-        "--limit", type=int, default=200, help="本次最多核验多少行（1-200，默认 200）"
+        "--page", action="store_true", default=False,
+        help="只检查一页（默认走全程）；单页不声明全库结论",
+    )
+    scan.add_argument(
+        "--limit", type=int, default=200, help="每页大小（1-200，默认 200），不是全库总量"
     )
     scan.add_argument(
         "--after", default=None, help="续跑游标：上一次输出的 next_cursor（completed_at,artifact_id）"
     )
-    scan.add_argument("--max-bytes", type=int, default=None, help="本轮最多读多少字节")
-    scan.add_argument("--max-seconds", type=float, default=None, help="本轮最多用多少秒")
+    scan.add_argument("--max-bytes", type=int, default=None, help="整趟最多读多少字节")
+    scan.add_argument("--max-seconds", type=float, default=None, help="整趟最多用多少秒")
     scan.add_argument(
         "--allow-unknown",
         action="store_true",
@@ -1759,12 +1764,28 @@ def _scan_lines(report: dict[str, object], *, continuation: bool = False) -> lis
     ledger = report.get("ledger")
     if isinstance(ledger, dict) and ledger.get("state") == "error":
         cursor = ledger.get("last_safe_cursor")
-        return [
+        lines_out = [
             "巡检失败: 账本读不出来（%s）。" % (ledger.get("code") or "ledger_error"),
             "最后安全游标: %s"
             % ("%s,%s" % (cursor[0], cursor[1]) if cursor else "-"),
-            "本次没有给出任何核验结论。",
         ]
+        if findings:
+            # Earlier pages did produce findings; a ledger that dies later
+            # does not erase them, and the exit code still reports the failure.
+            lines_out.append(
+                "账本中断前已核验的部分里有 %d 行与记录不一致。" % len(findings)
+            )
+            for row in findings[:20]:
+                lines_out.append(
+                    "  %s p%s  %s  %s"
+                    % (row["illust_id"], row["page_index"], row["verdict"], row["reason"])
+                )
+            if len(findings) > 20:
+                lines_out.append("  … 还有 %d 行未列出" % (len(findings) - 20))
+            lines_out.append("结论: 本次未能覆盖全库，退出码按账本失败处理。")
+        else:
+            lines_out.append("本次没有给出任何核验结论。")
+        return lines_out
     if _scan_is_empty(report, continuation=continuation):
         return ["库里没有已登记的成品可核验。"]
     if _scan_coverage(report) == "empty" and continuation:
@@ -1833,6 +1854,29 @@ def _scan_outcome(
         if reasons and reasons <= _LEGACY_UNKNOWN_REASONS:
             return 0, findings
     return _EXIT_INCOMPLETE, findings
+
+
+def _report_scan_error(as_json: bool, code: str, detail: str) -> None:
+    """One error shape for the whole scan command, text and JSON alike."""
+    if as_json:
+        print(json.dumps({"status": "error", "code": code, "detail": detail},
+                         ensure_ascii=False, indent=2))
+    else:
+        print("巡检失败: %s（%s）" % (code, detail), file=sys.stderr)
+
+
+def _scan_scope_lines(report: dict[str, object]) -> list[str]:
+    """Name the scope and every external root, so a page is never the library."""
+    scope = {"full_walk": "全程", "continuation": "续跑（--after）", "page": "单页（--page）"}
+    raw = report.get("scope")
+    lines = ["范围: " + scope.get(str(raw), str(raw))]
+    roots = report.get("roots")
+    if isinstance(roots, dict):
+        for key in sorted(roots):
+            item = roots[key] if isinstance(roots[key], dict) else {}
+            state = "正常" if item.get("state") == "ok" else "目录暂不可用"
+            lines.append("外部根: %s → %s（%s）" % (key, item.get("path"), state))
+    return lines
 
 
 def _verify_lines(result: dict[str, object]) -> list[str]:
@@ -1974,11 +2018,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result["ok"] else 2
         if arguments.command == "scan":
             from core.app_paths import AppPaths
-            from core.library_audit import LibraryAuditError, ScanBudget, scan_library_artifacts
+            from core.library_audit import LibraryAuditError, ScanBudget
             from core.library_paths import PathResolver
+            from core.library_scan import ScanMappingError, scan_library_report
 
             database = Path(arguments.database).expanduser().resolve()
             raw_root = arguments.root if arguments.root is not None else database.parent.parent
+            # --root names the project root only; recorded external roots come
+            # from <root>/config/output_roots_v1.json and are never rebound.
             root = Path(raw_root).expanduser().resolve()
             budget = ScanBudget(
                 **{
@@ -1998,47 +2045,55 @@ def main(argv: list[str] | None = None) -> int:
                         "scan_cursor_invalid", "游标格式应为 completed_at,artifact_id"
                     )
                 cursor = (parts[0].strip(), parts[1].strip())
+            if cursor is not None:
+                # A cursor is a continuation, never a statement about the library.
+                kind = "continuation"
+            elif arguments.page:
+                kind = "page"
+            else:
+                kind = "full_walk"
             try:
-                report = scan_library_artifacts(
+                report = scan_library_report(
                     (database, PathResolver(AppPaths(root))),
+                    project_root=root,
                     after=cursor,
                     limit=arguments.limit,
                     budget=budget,
+                    kind=kind,
+                    allow_unknown=arguments.allow_unknown,
                 )
-            except LibraryAuditError as error:
-                if as_json:
-                    print(
-                        json.dumps(
-                            {
-                                "status": "error",
-                                "code": "scan_ledger_unreadable",
-                                "detail": str(error),
-                            },
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                else:
-                    print("巡检失败: 账本读不出来（%s）" % error, file=sys.stderr)
+            except ScanMappingError as error:
+                _report_scan_error(as_json, "mapping_unreadable", error.detail)
                 return 3
-            continuation = arguments.after is not None
-            code, findings = _scan_outcome(report, allow_unknown=arguments.allow_unknown)
-            report["exit_code"] = code
-            report["findings"] = len(findings)
-            if code == 0 and arguments.allow_unknown and int(
-                (report.get("stats") or {}).get("unknown") or 0
+            except LibraryAuditError as error:
+                _report_scan_error(as_json, "scan_ledger_unreadable", str(error))
+                return 3
+            if (
+                report["coverage"] == "error"
+                and report["pages_examined"] == 0
+                and not report["rows"]
             ):
-                _emit(
-                    report,
+                # Nothing was examined at all, so this is not a scan report
+                # with a bad ending: the ledger could not be opened.
+                ledger = report.get("ledger") or {}
+                _report_scan_error(
                     as_json,
-                    _scan_lines(report, continuation=continuation)
-                    + [
-                        "提示: 已按 --allow-unknown 跳过 %d 行无摘要旧行。"
-                        % int((report.get("stats") or {}).get("unknown") or 0)
-                    ],
+                    "scan_ledger_unreadable",
+                    str(ledger.get("code") or "ledger_unreadable"),
                 )
-            else:
-                _emit(report, as_json, _scan_lines(report, continuation=continuation))
+                return 3
+            # The walk owns the answer; _scan_outcome must not re-derive it
+            # (a continuation at the end would come back as 0).
+            code = int(report["exit_code"])
+            lines = _scan_scope_lines(report) + _scan_lines(
+                report, continuation=cursor is not None
+            )
+            if code == 0 and arguments.allow_unknown and report["stats"]["unknown"]:
+                lines.append(
+                    "提示: 已按 --allow-unknown 跳过 %d 行无摘要旧行。"
+                    % report["stats"]["unknown"]
+                )
+            _emit(report, as_json, lines)
             return code
         plan = switch_plan(arguments.database)
         _emit(
