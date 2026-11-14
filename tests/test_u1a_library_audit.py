@@ -46,11 +46,16 @@ FROZEN_ROW_KEYS = {
     "artifact_id", "delivery_id", "illust_id", "page_index", "verdict", "reason",
     "size_recorded", "size_observed", "sha256_recorded", "observed_sha256",
     "checked_at", "output_key",
+    # contract v5 section 2: which stored value made a row unusable, and the
+    # type it was stored as.  Both are always present, None when not applicable.
+    "reason_detail", "size_recorded_raw_type",
 }
 FROZEN_STATS_KEYS = {
     "examined", "matched", "missing", "changed", "unreadable", "root_unavailable",
     "changed_during_check", "unknown", "excluded", "bytes_hashed", "seconds",
     "budget_exhausted_reason",
+    # contract v5 section 2: how much of the ledger this pass covered.
+    "considered", "library_rows", "unknown_reasons", "stopped_at",
 }
 
 
@@ -466,8 +471,13 @@ def test_the_vocabulary_and_row_shape_are_frozen(library, tmp_path):
 
     result = scan(repo)
 
-    assert set(result) == {"rows", "next_cursor", "truncated", "stats"}
+    assert set(result) == {
+        "rows", "next_cursor", "truncated", "coverage", "ledger", "stats",
+    }
     assert set(result["stats"]) == FROZEN_STATS_KEYS
+    assert result["coverage"] in audit.COVERAGES
+    assert set(result["ledger"]) == {"state", "code", "last_safe_cursor"}
+    assert result["ledger"]["state"] == "ok" and result["ledger"]["code"] is None
     assert audit.VERDICTS == {
         "match", "missing", "changed", "unreadable", "root_unavailable",
         "changed_during_check", "unknown", "excluded",
@@ -847,3 +857,339 @@ def test_two_thousand_rows_use_a_bounded_number_of_statements(library, monkeypat
     assert pages == 11
     assert len(selects) <= 2 * pages + 2, (len(selects), pages)
     assert len(selects) < 40, "the ledger must not be read row by row"
+
+# ---------------------------------------------------------------------------
+# Contract v5 section 2: broken recorded values and honest coverage
+# ---------------------------------------------------------------------------
+
+
+def ordered_rows(repo, ids):
+    """The artifacts in the order the scan walks them."""
+    rows = [artifact_row(repo, delivery_id) for delivery_id in ids]
+    return sorted(rows, key=lambda item: (item["completed_at"], item["artifact_id"]))
+
+
+def test_a_text_size_is_reported_on_its_row_and_never_stops_the_pass(library):
+    repo, root = library
+    _, ids = publish(repo, root, "101", "102")
+    rows = ordered_rows(repo, ids)
+    sql(
+        repo,
+        "UPDATE artifacts SET size = 'broken-size' WHERE artifact_id = ?",
+        (rows[1]["artifact_id"],),
+    )
+
+    result = scan(repo)
+
+    facts = {fact["artifact_id"]: fact for fact in result["rows"]}
+    good, bad = rows[0]["artifact_id"], rows[1]["artifact_id"]
+    assert facts[good]["verdict"] == "match"
+    assert facts[bad]["verdict"] == "unknown"
+    assert facts[bad]["reason"] == "artifact_record_invalid"
+    assert facts[bad]["reason_detail"] == "record_size_invalid"
+    assert facts[bad]["size_recorded"] is None
+    assert facts[bad]["size_recorded_raw_type"] == "text"
+    assert facts[bad]["size_observed"] is None
+    assert result["coverage"] == "complete"
+    assert result["ledger"]["state"] == "ok"
+    assert result["stats"]["unknown_reasons"] == {"artifact_record_invalid": 1}
+
+
+def test_a_blob_or_real_size_is_reported_with_the_stored_type(library):
+    repo, root = library
+    _, ids = publish(repo, root, "101", "102")
+    rows = ordered_rows(repo, ids)
+    sql(
+        repo,
+        "UPDATE artifacts SET size = ? WHERE artifact_id = ?",
+        (b"blob-size", rows[0]["artifact_id"]),
+    )
+    sql(
+        repo,
+        "UPDATE artifacts SET size = 1.5 WHERE artifact_id = ?",
+        (rows[1]["artifact_id"],),
+    )
+
+    result = scan(repo)
+
+    facts = {fact["artifact_id"]: fact for fact in result["rows"]}
+    assert facts[rows[0]["artifact_id"]]["size_recorded_raw_type"] == "blob"
+    assert facts[rows[1]["artifact_id"]]["size_recorded_raw_type"] == "real"
+    assert {fact["reason_detail"] for fact in result["rows"]} == {"record_size_invalid"}
+
+
+def test_the_row_reader_reports_a_non_positive_size_without_coercing_it():
+    # The shipped DDL forbids a non-positive integer size, so this branch only
+    # fires on a drifted or foreign ledger; it is proved here directly.
+    base = {
+        "artifact_id": "artifact-1",
+        "completed_at": "2026-11-14T00:00:00+00:00",
+        "delivery_id": "delivery-1",
+        "illust_id": "101",
+        "page_index": 0,
+        "output_key": "key-1",
+        "size": -5,
+        "sha256": None,
+    }
+
+    fields, detail = audit._row_fields(base)
+    assert detail == "record_size_invalid"
+    assert fields["size_recorded"] is None
+    assert fields["size_recorded_raw_type"] == "negative"
+    for value, raw in ((0, "negative"), (1.25, "real"), (b"x", "blob"), ("9", "text")):
+        fields, detail = audit._row_fields(dict(base, size=value))
+        assert detail == "record_size_invalid"
+        assert fields["size_recorded_raw_type"] == raw
+
+
+def test_a_null_size_stays_the_legacy_reason(library):
+    repo, root = library
+    _, ids = publish(repo, root, ARTWORK)
+    row = artifact_row(repo, ids[0])
+    sql(
+        repo,
+        "UPDATE artifacts SET size = NULL WHERE artifact_id = ?",
+        (row["artifact_id"],),
+    )
+
+    fact = only_row(scan(repo))
+
+    assert fact["verdict"] == "unknown"
+    assert fact["reason"] == "no_recorded_size"
+    assert fact["reason_detail"] is None
+    assert fact["size_recorded_raw_type"] == "null"
+
+
+def test_the_row_reader_flags_a_digest_that_is_not_a_digest():
+    # Same reason as the size case: the DDL check keeps a malformed digest out
+    # of a well-formed ledger, so the reader is exercised directly.
+    base = {
+        "artifact_id": "artifact-1",
+        "completed_at": "2026-11-14T00:00:00+00:00",
+        "delivery_id": "delivery-1",
+        "illust_id": "101",
+        "page_index": 0,
+        "output_key": "key-1",
+        "size": 70,
+        "sha256": "A" * 64,
+    }
+    for digest in ("A" * 64, "abc", "", 123, b"x" * 64):
+        fields, detail = audit._row_fields(dict(base, sha256=digest))
+        assert detail == "record_digest_invalid", digest
+        assert fields["sha256_recorded"] is None
+
+
+def test_a_broken_page_index_is_a_record_finding_not_a_crash(library):
+    # artifacts.page_index is INTEGER NOT NULL with a 0..9999 CHECK, so no
+    # value written through this schema can be out of range: the shipped DDL
+    # already prevents it.  The reader still has to survive a drifted ledger,
+    # so the refusal is proved through the reader itself and the pass is proved
+    # to keep its other rows and its cursor.
+    base = {
+        "artifact_id": "artifact-1",
+        "completed_at": "2026-11-14T00:00:00+00:00",
+        "delivery_id": "delivery-1",
+        "illust_id": "101",
+        "page_index": 10000,
+        "output_key": "key-1",
+        "size": 70,
+        "sha256": None,
+    }
+    for value in (10000, -1, "0", 1.0, None):
+        fields, detail = audit._row_fields(dict(base, page_index=value))
+        assert detail == "record_page_invalid", value
+        assert fields["page_index"] is None
+    repo, root = library
+    publish(repo, root, "101", "102")
+    assert len(scan(repo)["rows"]) == 2
+
+
+def test_the_row_reader_keeps_a_valid_page_index():
+    base = {
+        "artifact_id": "artifact-1",
+        "completed_at": "2026-11-14T00:00:00+00:00",
+        "delivery_id": "delivery-1",
+        "illust_id": "101",
+        "page_index": 0,
+        "output_key": "key-1",
+        "size": 70,
+        "sha256": None,
+    }
+    for value in (0, 1, 9999):
+        fields, detail = audit._row_fields(dict(base, page_index=value))
+        assert detail is None, value
+        assert fields["page_index"] == value
+
+
+def test_the_row_reader_refuses_a_row_without_a_resume_key():
+    base = {
+        "artifact_id": "artifact-1",
+        "completed_at": "2026-11-14T00:00:00+00:00",
+        "delivery_id": "delivery-1",
+        "illust_id": "101",
+        "page_index": 0,
+        "output_key": "key-1",
+        "size": 70,
+        "sha256": None,
+    }
+    assert audit._row_fields(base)[1] is None
+    for broken in (
+        dict(base, artifact_id=None),
+        dict(base, artifact_id=""),
+        dict(base, artifact_id="x" * 129),
+        dict(base, artifact_id=7),
+        dict(base, completed_at=""),
+        dict(base, completed_at=None),
+    ):
+        with pytest.raises(audit._CursorUnavailable):
+            audit._row_fields(broken)
+
+
+@pytest.mark.parametrize("broken_id", [None, ""])
+def test_an_unnameable_row_stops_with_the_last_safe_cursor(library, broken_id):
+    repo, root = library
+    _, ids = publish(repo, root, "101", "102")
+    rows = ordered_rows(repo, ids)
+    # The catalog order stays completed_at first, so the broken row still
+    # sorts last even when its id becomes the empty string.
+    sql(
+        repo,
+        "UPDATE artifacts SET artifact_id = ? WHERE artifact_id = ?",
+        (broken_id, rows[1]["artifact_id"]),
+    )
+
+    result = scan(repo)
+
+    assert result["coverage"] == "error"
+    assert result["ledger"]["state"] == "error"
+    assert result["ledger"]["code"] == "cursor_unavailable"
+    assert result["stats"]["stopped_at"] == "ledger_error"
+    assert result["stats"]["budget_exhausted_reason"] is None
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["artifact_id"] == rows[0]["artifact_id"]
+    expected = (rows[0]["completed_at"], rows[0]["artifact_id"])
+    assert result["next_cursor"] == expected
+    assert result["ledger"]["last_safe_cursor"] == list(expected)
+    assert result["truncated"] is True
+
+
+def test_a_ledger_that_fails_mid_pass_reports_error_coverage(library, monkeypatch):
+    repo, root = library
+    publish(repo, root, ARTWORK)
+
+    def blow_up(self, after, fetch):
+        raise audit.LibraryAuditError("the ledger went away")
+
+    monkeypatch.setattr(audit._RepositoryPages, "read", blow_up, raising=True)
+
+    result = scan(repo)
+
+    assert result["coverage"] == "error"
+    assert result["ledger"]["code"] == "ledger_unreadable"
+    assert result["rows"] == []
+    assert result["stats"]["stopped_at"] == "ledger_error"
+    assert result["truncated"] is True
+
+
+def test_an_empty_ledger_is_empty_and_not_complete(tmp_path):
+    root = tmp_path / "empty-root"
+    root.mkdir()
+    with LibraryRepository(tmp_path / "empty.sqlite3") as repo:
+        repo.bind_path_resolver(PathResolver(AppPaths(root)))
+
+        result = audit.scan_library_artifacts(repo)
+
+    assert result["rows"] == []
+    assert result["coverage"] == "empty"
+    assert result["stats"]["library_rows"] == 0
+    assert result["stats"]["considered"] == 0
+    assert result["stats"]["examined"] == 0
+    assert result["truncated"] is False
+
+
+def test_a_page_limit_stop_says_page_and_names_the_cursor(library):
+    repo, root = library
+    publish(repo, root, "101", "102", "103")
+
+    result = scan(repo, limit=1)
+
+    assert result["coverage"] == "page"
+    assert result["stats"]["stopped_at"] == "page_limit"
+    assert result["stats"]["library_rows"] == 3
+    assert result["stats"]["considered"] == 1
+    assert result["truncated"] is True
+    assert len(result["rows"]) == 1
+
+
+def test_a_byte_budget_stop_says_budget(library):
+    repo, root = library
+    publish(repo, root, "101", "102")
+
+    result = scan(repo, budget=audit.ScanBudget(max_bytes=100))
+
+    assert result["coverage"] == "budget"
+    assert result["stats"]["stopped_at"] == "max_bytes"
+    assert result["stats"]["budget_exhausted_reason"] == "max_bytes"
+    assert result["rows"][-1]["reason"] == "byte_budget_exhausted"
+    assert result["truncated"] is True
+
+
+def test_a_cancel_says_cancelled(library):
+    repo, root = library
+    publish(repo, root, "101", "102")
+    cancel = Cancel(after=1)
+
+    result = scan(repo, cancel=cancel)
+
+    assert result["coverage"] == "cancelled"
+    assert result["stats"]["stopped_at"] == "cancel"
+    assert result["stats"]["budget_exhausted_reason"] == "cancel_requested"
+    assert len(result["rows"]) == 1
+
+
+def test_unknown_reasons_count_every_unknown_row(library):
+    repo, root = library
+    _, ids = publish(repo, root, "101", "102")
+    rows = ordered_rows(repo, ids)
+    sql(
+        repo,
+        "UPDATE artifacts SET sha256 = NULL WHERE artifact_id = ?",
+        (rows[0]["artifact_id"],),
+    )
+
+    result = scan(repo, budget=audit.ScanBudget(max_bytes=1))
+
+    assert result["stats"]["unknown"] == 2
+    assert result["stats"]["matched"] == 0
+    assert result["stats"]["unknown_reasons"] == {
+        "file_exceeds_budget": 1,
+        "no_recorded_digest": 1,
+    }
+    assert "每一行都与记录一致" not in json.dumps(result["stats"])
+
+
+def test_a_resumed_page_at_the_end_is_empty_and_does_not_count(library):
+    repo, root = library
+    publish(repo, root, ARTWORK)
+    first = scan(repo, limit=1)
+    assert first["coverage"] == "complete"
+
+    result = scan(repo, after=first["next_cursor"], limit=1)
+
+    assert result["coverage"] == "empty"
+    assert result["stats"]["library_rows"] is None
+    assert result["rows"] == []
+    assert result["next_cursor"] == first["next_cursor"]
+    assert result["truncated"] is False
+
+
+def test_every_row_carries_the_detail_slots_and_stays_json_safe(library):
+    repo, root = library
+    publish(repo, root, ARTWORK)
+
+    result = scan(repo)
+    fact = only_row(result)
+
+    assert fact["reason_detail"] is None
+    assert fact["size_recorded_raw_type"] is None
+    assert json.loads(json.dumps(result))["coverage"] == result["coverage"]

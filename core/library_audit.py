@@ -32,6 +32,24 @@ with a stable reason code.  Those rows deliberately do not travel through
 a legal digest, so they never produce an ``ArtifactHealth`` payload: there is no
 comparison to make and inventing one would be a guess.
 
+A broken recorded value is a finding, not a crash.  `artifact_id` and
+`completed_at` are the resume key: when either cannot be read there is no safe
+place to continue, so the pass stops with `ledger.code = "cursor_unavailable"`
+and the cursor of the last row that really reached a verdict.  Every other
+broken value (page index, size, digest) stays visible on its own row as
+`unknown` + `artifact_record_invalid`, with `reason_detail` naming the field
+(`record_page_invalid` / `record_size_invalid` / `record_digest_invalid`) and
+`size_recorded_raw_type` naming the stored type.  A value is never coerced to
+0 and a broken size never becomes "missing".
+
+The result says how much of the library one pass actually covered:
+`coverage` is `complete` / `page` / `budget` / `cancelled` / `empty` /
+`error`, `stats["stopped_at"]` names the stop, `stats["unknown_reasons"]`
+counts why rows stayed unknown, and `ledger` carries the read failure and the
+last safe cursor.  `empty` means this pass examined nothing; the
+`library_rows` stat is `0` only when the whole ledger holds no artifact, and
+`None` when the pass resumed from a cursor and therefore did not count.
+
 Signatures are frozen by ``docs/optimization/2026-11-14/U1A_W5_W6_SCOPE.md``::
 
     scan_library_artifacts(source, *, after=None, limit=200, budget=None,
@@ -45,6 +63,7 @@ is used) or a ``(db_path, resolver)`` pair.  Verdicts are a closed vocabulary:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -108,9 +127,32 @@ _AFTER = " WHERE (a.completed_at, a.artifact_id) > (?, ?)"
 
 _BUDGET_REASONS = frozenset({"max_files", "max_bytes", "max_seconds", "cancel_requested"})
 
+# What one pass actually covered.  "empty" means nothing was examined (an empty
+# ledger, or a cursor already past its end); "complete" means the pass reached
+# the end of the library from the beginning with no stop.  The two are not
+# interchangeable: only the caller knows which cursor it passed in.
+COVERAGES = frozenset({"complete", "page", "budget", "cancelled", "empty", "error"})
+_STOPPED_AT = {
+    "cancel_requested": "cancel",
+    "max_bytes": "max_bytes",
+    "max_seconds": "max_seconds",
+    "max_files": "max_files",
+}
+_LEDGER_ERROR = "ledger_error"
+_ROW_INVALID = "artifact_record_invalid"
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+
 
 class LibraryAuditError(RuntimeError):
     """The ledger needed by one audit pass cannot be read."""
+
+
+class _CursorUnavailable(Exception):
+    """A row's own resume key cannot be read, so no safe cursor exists.
+
+    Raised before any judgement: the pass must stop where it is instead of
+    skipping a range it cannot name.
+    """
 
 
 class _Cancellation(Protocol):
@@ -191,12 +233,33 @@ def scan_library_artifacts(
     reason: str | None = None
     last_examined = None
 
-    page, projection = audit_source.read(cursor, page_limit + 1)
-    has_more = len(page) > page_limit
-    facts = page[:page_limit]
+    considered = 0
+    library_rows: int | None = None
+    ledger_error: str | None = None
+    unknown_reasons: dict[str, int] = {}
+    facts: list[Any] = []
+    has_more = False
+    projection: Any = None
+
+    if cursor is None:
+        # One statement for the library total, and only when this pass really
+        # starts at the head: a resumed page would pay for a number it cannot
+        # report (it would describe the whole ledger, not this page).  A ledger
+        # that cannot be opened at all is not a finding about any row, so that
+        # failure still raises instead of being dressed up as coverage.
+        library_rows = audit_source.count()
+    if library_rows != 0:
+        try:
+            page, projection = audit_source.read(cursor, page_limit + 1)
+        except LibraryAuditError:
+            ledger_error = "ledger_unreadable"
+        else:
+            has_more = len(page) > page_limit
+            facts = page[:page_limit]
     observers: dict[tuple[str, str, int], LocalObserver] = {}
 
     for index, row in enumerate(facts):
+        considered += 1
         if gates():
             reason = "cancel_requested"
             break
@@ -211,41 +274,74 @@ def scan_library_artifacts(
         if remaining_bytes <= 0:
             reason = "max_bytes"
             break
-        fact, stop, bytes_read = _audit_row(
-            row,
-            resolver=audit_source.resolver,
-            projection=projection,
-            observers=observers,
-            run_id=run_id,
-            index=index,
-            remaining_bytes=remaining_bytes,
-            remaining_seconds=remaining_seconds,
-            budget=scan_budget,
-        )
+        try:
+            fact, stop, bytes_read = _audit_row(
+                row,
+                resolver=audit_source.resolver,
+                projection=projection,
+                observers=observers,
+                run_id=run_id,
+                index=index,
+                remaining_bytes=remaining_bytes,
+                remaining_seconds=remaining_seconds,
+                budget=scan_budget,
+            )
+        except _CursorUnavailable:
+            # The row cannot be named, so no next pass could continue from it.
+            # Stop here instead of skipping a range whose position is unknown.
+            ledger_error = "cursor_unavailable"
+            break
         rows.append(fact)
         bytes_hashed += bytes_read
         counters[fact["verdict"]] += 1
+        if fact["verdict"] == "unknown":
+            key = fact["reason"]
+            unknown_reasons[key] = unknown_reasons.get(key, 0) + 1
         if stop is not None:
             reason = stop
             break
         last_examined = row
 
-    if reason is not None:
-        # The pass stopped before (or inside) a row that was not examined to a
-        # verdict, so the cursor stays on the last row that really was.
-        next_cursor: tuple[str, str] | None = (
-            cursor if last_examined is None else _row_cursor(last_examined)
+    next_cursor: tuple[str, str] | None
+    if ledger_error is not None:
+        next_cursor = (
+            _row_cursor(last_examined) if last_examined is not None else cursor
         )
         truncated = True
-    elif facts:
+        stopped_at: str | None = _LEDGER_ERROR
+        coverage = "error"
+    elif reason is not None:
+        # The pass stopped before (or inside) a row that was not examined to a
+        # verdict, so the cursor stays on the last row that really was.
+        next_cursor = cursor if last_examined is None else _row_cursor(last_examined)
+        truncated = True
+        stopped_at = _STOPPED_AT.get(reason, "budget")
+        coverage = "cancelled" if reason == "cancel_requested" else "budget"
+    elif has_more:
+        next_cursor = _row_cursor(facts[len(rows) - 1]) if rows else cursor
+        truncated = True
+        stopped_at = "page_limit"
+        coverage = "page"
+    elif rows:
         next_cursor = _row_cursor(facts[len(rows) - 1])
-        truncated = has_more
+        truncated = False
+        stopped_at = None
+        coverage = "complete"
     else:
         next_cursor = cursor
         truncated = False
+        stopped_at = None
+        coverage = "empty"
 
+    ledger = {
+        "state": "ok" if ledger_error is None else "error",
+        "code": ledger_error,
+        "last_safe_cursor": list(next_cursor) if next_cursor is not None else None,
+    }
     summary = {
         "examined": len(rows),
+        "considered": considered,
+        "library_rows": library_rows,
         "matched": counters["match"],
         "missing": counters["missing"],
         "changed": counters["changed"],
@@ -254,9 +350,13 @@ def scan_library_artifacts(
         "changed_during_check": counters["changed_during_check"],
         "unknown": counters["unknown"],
         "excluded": counters["excluded"],
+        "unknown_reasons": {
+            key: unknown_reasons[key] for key in sorted(unknown_reasons)
+        },
         "bytes_hashed": bytes_hashed,
         "seconds": round(time.monotonic() - started, 6),
         "budget_exhausted_reason": reason if reason in _BUDGET_REASONS else None,
+        "stopped_at": stopped_at,
     }
     if stats is not None:
         stats.update(summary)
@@ -264,6 +364,8 @@ def scan_library_artifacts(
         "rows": rows,
         "next_cursor": next_cursor,
         "truncated": truncated,
+        "coverage": coverage,
+        "ledger": ledger,
         "stats": summary,
     }
 
@@ -281,7 +383,12 @@ def _audit_row(
     budget: ScanBudget,
 ) -> tuple[dict[str, Any], str | None, int]:
     """Return one frozen row, an optional stop reason and the bytes read."""
-    fmt = _row_fields(row)
+    fmt, detail = _row_fields(row)
+    if detail is not None:
+        # A stored value that is not what the column means stays visible on its
+        # own row: no file is touched, no verdict is invented and the pass
+        # continues with the next row.
+        return _row(fmt, "unknown", _ROW_INVALID, reason_detail=detail), None, 0
     try:
         ref = _path_ref(row["output_ref_json"])
     except (ContractError, ValueError, TypeError):
@@ -361,6 +468,7 @@ def _payload(
         "output_key": expectation.output_key,
         "size_recorded": expectation.size_bytes,
         "sha256_recorded": expectation.sha256,
+        "size_recorded_raw_type": None,
     }
     return _row(
         fmt,
@@ -417,16 +525,92 @@ def _recorded_expectation(
         return "artifact_record_invalid"
 
 
-def _row_fields(row: Any) -> dict[str, Any]:
-    return {
-        "artifact_id": str(row["artifact_id"]),
-        "delivery_id": str(row["delivery_id"]),
-        "illust_id": str(row["illust_id"]),
-        "page_index": int(row["page_index"]),
-        "output_key": str(row["output_key"]),
-        "size_recorded": None if row["size"] is None else int(row["size"]),
-        "sha256_recorded": None if row["sha256"] is None else str(row["sha256"]),
-    }
+def _resume_key(row: Any) -> tuple[str, str]:
+    """The (completed_at, artifact_id) pair, or a refusal to invent one."""
+    artifact_id = row["artifact_id"]
+    if type(artifact_id) is not str or not artifact_id or len(artifact_id) > 128:
+        raise _CursorUnavailable("artifact id")
+    completed_at = row["completed_at"]
+    if type(completed_at) is not str or not completed_at or len(completed_at) > 64:
+        raise _CursorUnavailable("completion time")
+    return (completed_at, artifact_id)
+
+
+def _text_value(value: Any) -> str:
+    """Display text for a descriptive column; never converted for judgement."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return repr(value)[:512]
+
+
+def _raw_size_type(value: Any) -> str:
+    """The stored type of a size that is not a positive integer."""
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "negative" if value <= 0 else "integer"
+    if isinstance(value, float):
+        return "real"
+    if isinstance(value, bytes):
+        return "blob"
+    if isinstance(value, str):
+        return "text"
+    if value is None:
+        return "null"
+    return "unknown"
+
+
+def _row_fields(row: Any) -> tuple[dict[str, Any], str | None]:
+    """Project one row without turning a broken value into a plausible one.
+
+    The resume key is validated first and raises _CursorUnavailable: without it
+    no next pass could continue from a known position.  Every other column is
+    checked against what it means -- a page index outside the schema range, a
+    size that is not a positive integer and a digest that is not 64 lowercase
+    hex digits are reported through the returned detail code instead of being
+    coerced.  A NULL size or digest is *legacy*, not broken, and keeps its own
+    reason later in the pass.
+    """
+    _resume_key(row)
+    page_index = row["page_index"]
+    size = row["size"]
+    digest = row["sha256"]
+    detail: str | None = None
+    if type(page_index) is not int or not 0 <= page_index <= 9999:
+        detail = "record_page_invalid"
+        page_index = None
+    size_raw: str | None
+    if type(size) is int and size > 0:
+        size_recorded: int | None = size
+        size_raw = None
+    else:
+        size_recorded = None
+        size_raw = _raw_size_type(size)
+        if size is not None:
+            detail = detail or "record_size_invalid"
+    if digest is None:
+        digest_recorded: str | None = None
+    elif isinstance(digest, str) and _DIGEST.match(digest) is not None:
+        digest_recorded = digest
+    else:
+        digest_recorded = None
+        detail = detail or "record_digest_invalid"
+    output_key = row["output_key"]
+    return (
+        {
+            "artifact_id": row["artifact_id"],
+            "delivery_id": _text_value(row["delivery_id"]),
+            "illust_id": _text_value(row["illust_id"]),
+            "page_index": page_index,
+            "output_key": output_key if type(output_key) is str else "",
+            "size_recorded": size_recorded,
+            "sha256_recorded": digest_recorded,
+            "size_recorded_raw_type": size_raw,
+        },
+        detail,
+    )
 
 
 def _row(
@@ -437,6 +621,7 @@ def _row(
     size_observed: int | None = None,
     observed_sha256: str | None = None,
     checked_at: str | None = None,
+    reason_detail: str | None = None,
 ) -> dict[str, Any]:
     if verdict not in VERDICTS:
         raise ContractError("Unsupported audit verdict")
@@ -453,6 +638,10 @@ def _row(
         "observed_sha256": observed_sha256,
         "checked_at": checked_at or _now(),
         "output_key": fmt["output_key"],
+        # A stable reason says a row is unusable; reason_detail says which
+        # stored value made it so, without inventing a second vocabulary.
+        "reason_detail": reason_detail,
+        "size_recorded_raw_type": fmt.get("size_recorded_raw_type"),
     }
 
 
@@ -520,6 +709,17 @@ class _Pages:
             except sqlite3.Error as exc:
                 raise LibraryAuditError("The library cannot be read") from exc
             return rows, projection
+        finally:
+            _close(connection)
+
+    def count(self) -> int:
+        """The number of artifact rows, through the same read-only owner."""
+        connection = self._connect()
+        try:
+            row = connection.execute("SELECT COUNT(*) FROM artifacts").fetchone()
+            return int(row[0])
+        except sqlite3.Error as exc:
+            raise LibraryAuditError("The library cannot be read") from exc
         finally:
             _close(connection)
 
@@ -636,6 +836,7 @@ def _cursor(value: Any) -> tuple[str, str] | None:
 
 
 __all__ = [
+    "COVERAGES",
     "DEFAULT_MAX_BYTES",
     "DEFAULT_MAX_SECONDS",
     "DEFAULT_PER_FILE_SECONDS",
