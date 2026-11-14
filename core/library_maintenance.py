@@ -1697,6 +1697,19 @@ def _scan_coverage(report: dict[str, object]) -> str:
     return "page" if report.get("truncated") else "complete"
 
 
+def _scan_is_empty(report: dict[str, object]) -> bool:
+    """True only when the ledger itself holds no delivered artifact.
+
+    Coverage 'empty' can also mean "the cursor sits at the end", so the row
+    count is the fact that decides whether the library holds any work at all.
+    """
+    stats = report.get("stats") or {}
+    library_rows = stats.get("library_rows")
+    if type(library_rows) is int:
+        return library_rows == 0
+    return _scan_coverage(report) == "empty"
+
+
 def _scan_findings(report: dict[str, object]) -> list[dict[str, object]]:
     return [
         row
@@ -1741,7 +1754,16 @@ def _scan_lines(report: dict[str, object]) -> list[str]:
     unknown = int(stats.get("unknown") or 0)
     considered = int(stats.get("considered") or examined)
     findings = _scan_findings(report)
-    if coverage == "empty":
+    ledger = report.get("ledger")
+    if isinstance(ledger, dict) and ledger.get("state") == "error":
+        cursor = ledger.get("last_safe_cursor")
+        return [
+            "巡检失败: 账本读不出来（%s）。" % (ledger.get("code") or "ledger_error"),
+            "最后安全游标: %s"
+            % ("%s,%s" % (cursor[0], cursor[1]) if cursor else "-"),
+            "本次没有给出任何核验结论。",
+        ]
+    if _scan_is_empty(report):
         return ["库里没有已登记的成品可核验。"]
     lines = [
         "核验: 覆盖 %d 行（匹配 %d，排除 %d，无法核验 %d）"
@@ -1752,7 +1774,7 @@ def _scan_lines(report: dict[str, object]) -> list[str]:
     if unknown:
         reasons = _scan_unknown_reasons(report)
         detail = "，".join(
-            "%s %d 行" % (name, count) for name, count in sorted(reasons.items())
+            "%s: %d" % (name, count) for name, count in sorted(reasons.items())
         )
         lines.append("无法核验: " + (detail or "原因未记录"))
     if findings:
@@ -1793,6 +1815,8 @@ def _scan_outcome(
     ledger = report.get("ledger")
     findings = _scan_findings(report)
     if isinstance(ledger, dict) and ledger.get("state") == "error":
+        return 3, findings
+    if _scan_coverage(report) == "error":
         return 3, findings
     if findings:
         return 2, findings

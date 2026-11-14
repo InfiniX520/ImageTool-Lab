@@ -191,7 +191,7 @@ def test_unverifiable_rows_are_counted_out_loud(tmp_path, capsys):
     # code says so (5 = not covered / unverifiable).  The engine's own reason is
     # reported verbatim instead of being relabelled as a legacy row.
     assert code == 5
-    assert "无法核验: file_exceeds_budget 1 行" in printed
+    assert "无法核验: file_exceeds_budget: 1" in printed
     assert "本次只核验了 0/1 行" in printed
     assert "每一行都与记录一致" not in printed
     assert "旧行或缺摘要" not in printed
@@ -256,7 +256,7 @@ def test_scan_allow_unknown_only_skips_legacy_rows(tmp_path, capsys):
 
     assert main(["scan", str(database)]) == 5
     printed = capsys.readouterr().out
-    assert "无法核验: no_recorded_digest 1 行" in printed
+    assert "无法核验: no_recorded_digest: 1" in printed
     assert "每一行都与记录一致" not in printed
 
     code = main(["scan", str(database), "--allow-unknown"])
@@ -338,3 +338,79 @@ def test_compare_cli_exits_two_for_a_changed_copy(tmp_path, capsys):
     assert code == 2
     assert "内容一致=False" in printed
     assert "copy_content_mismatch" in printed
+
+
+def test_scan_lines_say_no_work_only_when_the_ledger_is_empty():
+    """Coverage "empty" can be a cursor at the end, not an empty library."""
+    empty_ledger = {
+        "stats": {"library_rows": 0, "examined": 0, "matched": 0, "unknown": 0},
+        "rows": [],
+        "coverage": "complete",
+    }
+    assert "库里没有已登记的成品可核验" in maintenance._scan_lines(empty_ledger)[0]
+
+    finished_cursor = {
+        "stats": {"library_rows": 5, "examined": 0, "matched": 0, "unknown": 0},
+        "rows": [],
+        "coverage": "empty",
+    }
+    printed = "\n".join(maintenance._scan_lines(finished_cursor))
+    assert "库里没有已登记的成品可核验" not in printed
+    assert "每一行都与记录一致" not in printed
+
+
+def test_scan_lines_report_the_ledger_error_instead_of_a_verdict():
+    report = {
+        "stats": {"examined": 0, "matched": 0, "unknown": 0},
+        "rows": [],
+        "coverage": "error",
+        "ledger": {"state": "error", "code": "ledger_unreadable",
+                   "last_safe_cursor": ["2026-11-14T00:00:00+00:00", "artifact-1"]},
+    }
+    printed = "\n".join(maintenance._scan_lines(report))
+    assert "账本读不出来" in printed
+    assert "最后安全游标: 2026-11-14T00:00:00+00:00,artifact-1" in printed
+    assert "本次没有给出任何核验结论" in printed
+    assert "一致" not in printed
+
+
+def test_scan_outcome_treats_coverage_error_as_a_ledger_failure():
+    report = {"coverage": "error", "stats": {}, "rows": []}
+    code, findings = maintenance._scan_outcome(report, allow_unknown=False)
+    assert code == 3
+    assert findings == []
+
+
+def test_scan_outcome_requires_complete_coverage_before_allow_unknown():
+    report = {
+        "coverage": "page",
+        "rows": [{"verdict": "unknown", "reason": "no_recorded_digest"}],
+        "stats": {"examined": 1, "matched": 0, "unknown": 1,
+                  "unknown_reasons": {"no_recorded_digest": 1}},
+        "truncated": True,
+    }
+    assert maintenance._scan_outcome(report, allow_unknown=False)[0] == 5
+    assert maintenance._scan_outcome(report, allow_unknown=True)[0] == 5
+
+
+def test_scan_outcome_lets_allow_unknown_skip_only_a_legacy_row():
+    report = {
+        "coverage": "complete",
+        "rows": [{"verdict": "unknown", "reason": "no_recorded_digest"}],
+        "stats": {"examined": 1, "matched": 0, "unknown": 1,
+                  "unknown_reasons": {"no_recorded_digest": 1}},
+        "truncated": False,
+    }
+    assert maintenance._scan_outcome(report, allow_unknown=False)[0] == 5
+    assert maintenance._scan_outcome(report, allow_unknown=True)[0] == 0
+
+
+def test_scan_outcome_never_waves_a_malformed_row_through():
+    report = {
+        "coverage": "complete",
+        "rows": [{"verdict": "unknown", "reason": "artifact_record_invalid"}],
+        "stats": {"examined": 1, "matched": 0, "unknown": 1,
+                  "unknown_reasons": {"artifact_record_invalid": 1}},
+        "truncated": False,
+    }
+    assert maintenance._scan_outcome(report, allow_unknown=True)[0] == 5
