@@ -11,9 +11,11 @@ from pathlib import Path
 from core.app_paths import AppPaths
 from core.collection_settings import CollectionSettings, SettingsError
 from core.library_paths import PathResolver, _canonical_path, _reject_links
-from core.task_contracts import PathRef
+from core.task_contracts import ContractError, PathRef
 
 _ROOTS_REF = PathRef(relative_path='config/output_roots_v1.json')
+_MAX_MAPPING_BYTES = 256 * 1024
+_MAX_ROOTS = 64
 _RESERVED = {'core', 'gui', 'utils', 'config', 'tests', 'download_logs',
              'runtime_logs', 'record_backups', '.git', '.runtime', 'docs'}
 
@@ -74,6 +76,65 @@ def _write_mapping(resolver, values):
             pass
 
 
+def _mapping_bytes(resolver):
+    """The raw mapping bytes, or None when the project has no mapping file.
+
+    A missing file is the normal state of a project that never selected an
+    external root.  A file that exists but cannot be read is a different fact:
+    reporting it as "no external roots" would silently turn every external row
+    into an unmapped one, so it is refused instead of guessed.
+    """
+    try:
+        target = resolver.resolve(_ROOTS_REF)
+    except (ContractError, OSError):
+        raise LocationError('location_mapping_invalid') from None
+    try:
+        with target.open('rb') as stream:
+            return stream.read(_MAX_MAPPING_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise LocationError('location_mapping_unreadable') from None
+
+
+def load_output_roots(project_root=None, *, resolver=None):
+    """Read `config/output_roots_v1.json` as an immutable {root_id: Path}.
+
+    This is the read-only half of :meth:`OutputLocations.load`; the desktop and
+    the maintenance command line must agree about what a saved mapping means,
+    so both go through here.  Nothing is created, written or moved, and the
+    whole mapping is validated before any identity is returned:
+
+    missing file                -> {} (no external root was ever saved)
+    exists but cannot be read   -> LocationError('location_mapping_unreadable')
+    unparsable, wrong version,  -> LocationError('location_mapping_invalid')
+    too many roots, relative or
+    overlapping or linked root
+
+    A root that is legally defined but whose directory is absent right now is
+    *not* a mapping error: the volume may be unplugged.  The caller reports
+    that per row as `root_unavailable` instead of refusing the whole scan.
+    """
+    if resolver is None:
+        resolver = PathResolver(AppPaths(project_root))
+    raw = _mapping_bytes(resolver)
+    if raw is None:
+        return {}
+    if len(raw) > _MAX_MAPPING_BYTES:
+        raise LocationError('location_mapping_invalid')
+    try:
+        data = json.loads(raw)
+        if (not isinstance(data, dict) or set(data) != {'version', 'roots'}
+                or type(data['version']) is not int or data['version'] != 1
+                or not isinstance(data['roots'], dict) or len(data['roots']) > _MAX_ROOTS
+                or any(not isinstance(value, str) for value in data['roots'].values())):
+            raise ValueError()
+        # Validate the complete mapping before publishing any identity.
+        return PathResolver(AppPaths(resolver.project_root), data['roots']).external_roots
+    except (ValueError, TypeError, OSError):
+        raise LocationError('location_mapping_invalid') from None
+
+
 class OutputLocations:
     """Called on the desktop I/O owner, never while rendering or polling Tk."""
 
@@ -81,26 +142,9 @@ class OutputLocations:
         self.paths, self.resolver = paths, resolver
 
     def load(self):
-        try:
-            with self.resolver.resolve(_ROOTS_REF).open('rb') as stream:
-                raw = stream.read(256 * 1024 + 1)
-        except FileNotFoundError:
-            return
-        try:
-            if len(raw) > 256 * 1024:
-                raise ValueError()
-            data = json.loads(raw)
-            if (not isinstance(data, dict) or set(data) != {'version', 'roots'}
-                    or type(data['version']) is not int or data['version'] != 1
-                    or not isinstance(data['roots'], dict) or len(data['roots']) > 64
-                    or any(not isinstance(value, str) for value in data['roots'].values())):
-                raise ValueError()
-            # Validate the complete mapping before publishing any identity.
-            checked = PathResolver(self.paths, data['roots']).external_roots
-            for key, path in checked.items():
-                self.resolver.register_external(key, path)
-        except (ValueError, TypeError, OSError):
-            raise LocationError('location_mapping_invalid') from None
+        roots = load_output_roots(resolver=self.resolver)
+        for key, path in roots.items():
+            self.resolver.register_external(key, path)
 
     def form(self, settings):
         values = settings.form()
