@@ -286,6 +286,10 @@ class _RecoveryPage:
     # target must stay visible in the diagnosis instead of looking like "no
     # record at all" (RFA-04).
     successor_reason: str | None = None
+    # The delivery the batch page is linked to right now, before any artifact
+    # resolution.  This is the identity a caller saw in the list, so a stale
+    # row can be refused before a single byte is observed.
+    linked_delivery_id: str | None = None
 
 
 def _unavailable_reason(page: _RecoveryPage) -> str:
@@ -364,6 +368,7 @@ class DeliveryRecoveryMixin:
         illust_id: str,
         page_index: int,
         *,
+        expected_delivery_id: str | None = None,
         command_id: str | None = None,
     ) -> dict[str, Any]:
         """Re-check one page of a running batch and apply the decide-and-link step.
@@ -378,6 +383,15 @@ class DeliveryRecoveryMixin:
         queued repair reports 'repair_queued' without a second generation.  With
         'command_id' the first accepted result is replayed verbatim and no file
         is read again.
+
+        'expected_delivery_id' is the delivery the caller's own row named, which
+        is not the same thing as the id this command reads: the row may have
+        been carried, repaired or re-linked since it was listed.  When it is
+        given and does not match the page's current link, the command refuses
+        with 'state_changed' before any observation, so a stale row can never
+        hash, reuse, park or repair a generation the user never saw.  None means
+        "the caller did not name a row" and keeps the historical behaviour; the
+        desktop port always supplies it.
         """
         lib = _lib()
         batch_id = lib._validate_identifier(batch_id, "batch id")
@@ -386,6 +400,11 @@ class DeliveryRecoveryMixin:
             raise lib.LibraryError("Invalid page index")
         if command_id is not None:
             command_id = lib._validate_command_id(command_id)
+        if expected_delivery_id is not None and (
+            not isinstance(expected_delivery_id, str)
+            or not 0 < len(expected_delivery_id) <= 512
+        ):
+            raise lib.LibraryError("Invalid expected delivery id")
         self._ensure_open()
         if command_id is not None:
             stored = self._stored_recovery_result(
@@ -399,7 +418,18 @@ class DeliveryRecoveryMixin:
         observation: ArtifactHealth | None = None
         matched = False
         successor = page.successor
-        if page.delivery_state == "completed":
+        if (
+            expected_delivery_id is not None
+            and page.linked_delivery_id != expected_delivery_id
+        ):
+            # The listed row no longer names the delivery this page is linked
+            # to.  Refuse here, before the observation block below: no file is
+            # opened and no verdict about the bytes can be invented from it.
+            successor = None
+            decision = RecoveryDecision(
+                RecoveryOutcome.REFUSED, RecoveryAction.NONE, "state_changed"
+            )
+        elif page.delivery_state == "completed":
             decision = RecoveryDecision(
                 RecoveryOutcome.COMPLETED, RecoveryAction.NONE, "already_completed"
             )
@@ -501,6 +531,7 @@ class DeliveryRecoveryMixin:
                     None if successor is None else successor.get("artifact_id")
                 ),
                 "successor_reason": page.successor_reason,
+                "expected_delivery_id": expected_delivery_id,
                 "draft": draft,
             },
         )
@@ -670,6 +701,9 @@ class DeliveryRecoveryMixin:
             cross_task_receipt=cross_task_receipt,
             successor=successor,
             successor_reason=successor_reason,
+            linked_delivery_id=(
+                None if link["delivery_id"] is None else str(link["delivery_id"])
+            ),
         )
 
     def _read_recovery_candidates(

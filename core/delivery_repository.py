@@ -685,6 +685,13 @@ class DeliveryRepositoryMixin:
         same way, so an accept that inserts an earlier row cannot make a later
         page appear twice or be skipped.  limit=0 returns no rows and no
         cursor on purpose: the caller asked for counts only.
+
+        read_revision is the ledger's event revision read inside the very same
+        short transaction as stats.total and the rows, so one response always
+        describes one read version.  It is monotone and never decreases; a
+        caller can compare two responses and say "these are two different
+        reads" without pretending they were one snapshot.  observed_at is the
+        wall clock of that read, for display only.
         """
         lib = _lib()
         self._ensure_open()
@@ -728,11 +735,19 @@ class DeliveryRepositoryMixin:
             " d.output_key, d.attempts, d.retry_at, b.phase AS batch_phase"
         )
         with closing(self._readonly_connection()) as conn:
-            # One short read transaction: the total and the page come from the
-            # same snapshot, so "truncated" describes the rows it ships.
-            total = int(
-                conn.execute("SELECT COUNT(*)" + base + scope_where, params).fetchone()[0]
-            )
+            # One short read transaction: the revision, the total and the page
+            # come from the same snapshot, so "truncated" describes exactly the
+            # rows it ships and read_revision names that read.
+            # The revision rides in the same statement as the total: one more
+            # column, not one more round trip, so a page read is still two
+            # statements and the revision describes this very snapshot.
+            total, revision = conn.execute(
+                "SELECT COUNT(*), (SELECT COALESCE(MAX(event_seq), 0) FROM events)"
+                + base
+                + scope_where,
+                params,
+            ).fetchone()
+            total, revision = int(total), int(revision)
             if limit == 0:
                 fetched: list[sqlite3.Row] = []
             else:
@@ -760,6 +775,8 @@ class DeliveryRepositoryMixin:
             "rows": rows,
             "next_cursor": next_cursor,
             "truncated": truncated,
+            "read_revision": revision,
+            "observed_at": lib._utcnow(),
             "stats": {
                 "batch_id": batch_id,
                 "states": list(selected),
@@ -767,6 +784,7 @@ class DeliveryRepositoryMixin:
                 "total": total,
                 "returned": len(rows),
                 "truncated": truncated,
+                "read_revision": revision,
             },
         }
 
@@ -825,6 +843,10 @@ class DeliveryRepositoryMixin:
 
         truncated is always false: a GROUP BY aggregate cannot be cut.  The key
         exists so a future capped implementation reports the same shape.
+
+        read_revision and observed_at come from the same short read as the
+        counts.  They are the summary's own version, not a claim that a page
+        list read in another call saw the same snapshot.
         """
         lib = _lib()
         self._ensure_open()
@@ -852,17 +874,20 @@ class DeliveryRepositoryMixin:
                 params,
             ):
                 counts[str(state)] = int(number)
-            total, recoverable, existing = conn.execute(
+            total, recoverable, existing, revision = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(CASE WHEN d.state IN"
                 " ('needs_verification','pending') AND b.phase = 'running'"
                 " THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN"
                 " bip.delivery_id IS NULL AND bip.artifact_id IS NOT NULL"
-                " THEN 1 ELSE 0 END), 0) FROM batch_item_pages AS bip"
+                " THEN 1 ELSE 0 END), 0),"
+                " (SELECT COALESCE(MAX(event_seq), 0) FROM events)"
+                " FROM batch_item_pages AS bip"
                 " LEFT JOIN deliveries AS d ON d.delivery_id = bip.delivery_id"
                 " LEFT JOIN batches AS b ON b.batch_id = bip.batch_id"
                 + scope,
                 params,
             ).fetchone()
+            revision = int(revision)
         linked = sum(counts.values())
         existing_pages = int(existing)
         total_pages = int(total)
@@ -881,6 +906,8 @@ class DeliveryRepositoryMixin:
             "existing_pages": existing_pages,
             "unstarted_pages": unstarted,
             "truncated": False,
+            "read_revision": revision,
+            "observed_at": lib._utcnow(),
         }
 
     def list_cleanup_candidates(

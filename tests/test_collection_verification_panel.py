@@ -25,6 +25,8 @@ from gui.collection_view import CollectionView
 from gui.verification_panel import (
     BATCH_LIMIT,
     EMPTY_TEXT,
+    ERROR_TEXT,
+    READY_TEXT,
     ROW_LIMIT,
     VerificationPanel,
     describe_result,
@@ -125,9 +127,10 @@ class _FakeSession:
         self.future_error = future_error
 
     def recover_verification_page(self, batch_id, illust_id, page_index, *,
-                                  command_id=None):
+                                  expected_delivery_id=None, command_id=None):
         self.commands.append({"batch_id": batch_id, "illust_id": illust_id,
-                              "page_index": page_index, "command_id": command_id})
+                              "page_index": page_index, "command_id": command_id,
+                              "expected_delivery_id": expected_delivery_id})
         if self.error is not None:
             raise self.error
         result = Future()
@@ -792,7 +795,8 @@ def test_controller_dispatches_one_page_at_a_time_in_a_batch():
     session = _FakeSession()
     dispatched = []
 
-    def slow(batch_id, illust_id, page_index, *, command_id=None):
+    def slow(batch_id, illust_id, page_index, *, expected_delivery_id=None,
+             command_id=None):
         dispatched.append((illust_id, command_id))
         return pending
 
@@ -839,7 +843,8 @@ def test_controller_ignores_a_second_pass_while_one_is_running():
     session = _FakeSession()
     calls = {"count": 0}
 
-    def slow(batch_id, illust_id, page_index, *, command_id=None):
+    def slow(batch_id, illust_id, page_index, *, expected_delivery_id=None,
+             command_id=None):
         session.commands.append({"batch_id": batch_id, "illust_id": illust_id,
                                  "page_index": page_index, "command_id": command_id})
         calls["count"] += 1
@@ -1018,7 +1023,8 @@ def test_controller_stops_the_rest_of_a_pass_when_the_selection_changes():
         controller._poll()
     pending = Future()
 
-    def slow(batch_id, illust_id, page_index, *, command_id=None):
+    def slow(batch_id, illust_id, page_index, *, expected_delivery_id=None,
+             command_id=None):
         session.commands.append({"batch_id": batch_id, "illust_id": illust_id,
                                  "page_index": page_index, "command_id": command_id})
         return pending
@@ -1048,7 +1054,8 @@ def test_controller_keeps_an_in_flight_command_on_its_original_batch():
     pending = Future()
     calls = []
 
-    def slow(batch_id, illust_id, page_index, *, command_id=None):
+    def slow(batch_id, illust_id, page_index, *, expected_delivery_id=None,
+             command_id=None):
         calls.append((batch_id, illust_id, page_index, command_id))
         return pending
 
@@ -1144,9 +1151,10 @@ def test_controller_keeps_the_unknown_reason_in_the_final_line():
 def test_controller_reports_how_far_a_failing_pass_got():
     class _HalfBroken(_FakeSession):
         def recover_verification_page(self, batch_id, illust_id, page_index, *,
-                                      command_id=None):
+                                      expected_delivery_id=None, command_id=None):
             self.commands.append({"batch_id": batch_id, "illust_id": illust_id,
-                                  "page_index": page_index, "command_id": command_id})
+                                  "page_index": page_index, "command_id": command_id,
+                                  "expected_delivery_id": expected_delivery_id})
             result = Future()
             if len(self.commands) == 2:
                 result.set_exception(RuntimeError("writer said no"))
@@ -1211,3 +1219,383 @@ def test_controller_refuses_a_cached_row_whose_epoch_is_not_current():
     assert session.commands == []
     assert any("已不在待核验列表里" in call[1][0]
                for call in view.named("set_verification_result"))
+
+# ----------------------------------------------------------------------
+# contract v6 sec.4: paging, the read error state and the expected identity
+# ----------------------------------------------------------------------
+
+
+class _RecordingPanel:
+    """Stands in for the mounted panel and records the state it is told."""
+
+    def __init__(self):
+        self.states = []
+
+    def set_page_state(self, **kwargs):
+        self.states.append(dict(kwargs))
+
+    @property
+    def last(self):
+        return self.states[-1] if self.states else {}
+
+
+class _SlotView(_FakeView):
+    """The real view exposes its mounted panel; this fake does the same."""
+
+    def __init__(self):
+        super().__init__()
+        self.panel = _RecordingPanel()
+
+    @property
+    def verification_slot(self):
+        return self.panel
+
+
+class _PagedRuntime(_FakeRuntime):
+    """One page per cursor, and every cursor the controller asked for."""
+
+    def __init__(self, pages, summary=None):
+        super().__init__((), summary)
+        self.pages = dict(pages)
+        self.cursors = []
+
+    def verification_pages(self, *, batch_id=None, states=None, after=None, limit=50):
+        self.requests.append(("pages", batch_id, limit))
+        self.cursors.append(after)
+        future = Future()
+        value = self.pages.get(after)
+        if isinstance(value, Exception):
+            future.set_exception(value)
+        else:
+            future.set_result(value)
+        return future
+
+
+def _page(rows, *, cursor=None, total=None, truncated=None, revision=1):
+    return {"rows": list(rows), "next_cursor": cursor,
+            "truncated": bool(cursor) if truncated is None else bool(truncated),
+            "read_revision": revision,
+            "stats": {"total": len(rows) if total is None else total}}
+
+
+def _paged_controller(pages, summary=None):
+    view, root, dialogs = _SlotView(), _FakeRoot(), _FakeDialogs()
+    controller = CollectionController(root, view, _FakeSession(), dialogs=dialogs)
+    controller.runtime = _PagedRuntime(pages, summary)
+    # The periodic overview would replace the pinned task table; this section
+    # is about one list, so the next refresh is parked instead of fired.
+    controller._next_overview = float("inf")
+    return controller, view, controller.runtime
+
+
+def _fifty_one_rows():
+    return [_row(illust=str(1000 + index), delivery="d-%d" % index)
+            for index in range(51)]
+
+
+def _fifty_one_pages():
+    rows = _fifty_one_rows()
+    first = rows[:50]
+    cursor = (_BATCH, "1049", 0, "d-49")
+    return {None: _page(first, cursor=cursor, total=51, revision=7),
+            cursor: _page(rows[50:], total=51, revision=11)}, cursor
+
+
+# -- panel widget ------------------------------------------------------
+
+
+def test_panel_pager_follows_the_cursor_it_was_given(panel):
+    widget, calls, _root = panel
+    widget.set_rows([_row()])
+    widget.set_page_state(state="ready", has_previous=False, has_next=True)
+    assert "disabled" in widget._previous.state()
+    assert "disabled" not in widget._next.state()
+    widget.set_page_state(state="ready", has_previous=True, has_next=True)
+    assert "disabled" not in widget._previous.state()
+    widget._next.invoke()
+    widget._previous.invoke()
+    assert calls == [("verification_page_next", {}),
+                     ("verification_page_previous", {})]
+    widget.set_page_state(state="ready", has_previous=True, has_next=False)
+    assert "disabled" in widget._next.state()
+
+
+def test_panel_pager_is_disabled_while_a_pass_runs(panel):
+    widget, _calls, _root = panel
+    widget.set_rows([_row()])
+    widget.set_page_state(state="ready", has_previous=True, has_next=True)
+    widget.set_busy(True, text="已完成 0/1")
+    assert "disabled" in widget._previous.state()
+    assert "disabled" in widget._next.state()
+    widget.set_busy(False, text="")
+    assert "disabled" not in widget._next.state()
+
+
+def test_panel_error_state_removes_the_rows_and_every_action(panel):
+    widget, calls, _root = panel
+    widget.set_rows([_row()])
+    widget._tree.selection_set(_key())
+    widget.set_page_state(state="error", text="读取待核验页面没有完成。")
+    assert widget.rows() == () and widget._tree.get_children() == ()
+    assert widget.selected_key() is None
+    assert widget._hint.cget("text") == "读取待核验页面没有完成。"
+    assert widget._hint.cget("text") != EMPTY_TEXT
+    assert ERROR_TEXT and ERROR_TEXT != EMPTY_TEXT
+    assert "disabled" in widget._recover.state()
+    assert "disabled" in widget._batch.state()
+    assert "disabled" in widget._previous.state()
+    assert "disabled" in widget._next.state()
+    assert "disabled" not in widget._refresh.state()
+    assert calls == []
+
+
+def test_panel_loading_state_says_it_is_reading_and_shows_no_rows(panel):
+    widget, _calls, _root = panel
+    widget.set_rows([_row()])
+    widget.set_page_state(state="loading")
+    assert widget.rows() == ()
+    assert widget._hint.cget("text") == READY_TEXT
+    assert "disabled" in widget._recover.state()
+
+
+def test_panel_refuses_an_unknown_load_state(panel):
+    widget, _calls, _root = panel
+    with pytest.raises(ValueError):
+        widget.set_page_state(state="half-ready")
+
+
+# -- controller reads --------------------------------------------------
+
+
+def test_controller_reports_the_page_and_the_scope_total():
+    pages, _cursor = _fifty_one_pages()
+    controller, view, runtime = _paged_controller(pages, _summary(
+        {"needs_verification": 51}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    text = view.named("set_verification_rows")[-1][2]["page_text"]
+    assert "列出 50 行" in text
+    assert "本页 50 / 范围内 51" in text
+    assert view.panel.last["state"] == "ready"
+    assert view.panel.last["has_next"] is True
+    assert view.panel.last["has_previous"] is False
+    assert runtime.cursors == [None]
+
+
+def test_controller_reaches_the_fifty_first_row_and_acts_on_it():
+    pages, cursor = _fifty_one_pages()
+    controller, view, runtime = _paged_controller(pages, _summary(
+        {"needs_verification": 51}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_page_next", {})
+    for _ in range(3):
+        controller._poll()
+    assert runtime.cursors == [None, cursor]
+    display = view.named("set_verification_rows")[-1][1][0]
+    assert [row["illust_id"] for row in display] == ["1050"]
+    assert view.panel.last["has_previous"] is True
+    assert view.panel.last["has_next"] is False
+    key = _key(illust="1050", delivery="d-50")
+    assert key in controller._verify_rows
+    controller.handle("verification_recover", {"key": key})
+    for _ in range(3):
+        controller._poll()
+    assert len(controller.session.commands) == 1
+    assert controller.session.commands[0]["expected_delivery_id"] == "d-50"
+    assert controller.session.commands[0]["illust_id"] == "1050"
+
+
+def test_controller_previous_page_returns_to_the_stored_cursor():
+    pages, cursor = _fifty_one_pages()
+    controller, view, runtime = _paged_controller(pages, _summary({}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_page_next", {})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_page_previous", {})
+    for _ in range(3):
+        controller._poll()
+    assert runtime.cursors == [None, cursor, None]
+    display = view.named("set_verification_rows")[-1][1][0]
+    assert len(display) == 50
+    assert view.panel.last["has_previous"] is False
+
+
+def test_controller_never_turns_a_page_without_a_cursor():
+    pages, _cursor = _fifty_one_pages()
+    controller, _view, runtime = _paged_controller(pages, _summary({}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_page_previous", {})
+    assert runtime.cursors == [None]
+    # The first page is the last page: no continuation was returned for it.
+    controller.handle("verification_page_next", {})
+    for _ in range(3):
+        controller._poll()
+    assert runtime.cursors == [None, _cursor_from(pages)]
+
+
+def _cursor_from(pages):
+    return pages[None]["next_cursor"]
+
+
+def test_controller_refuses_a_malformed_cursor_instead_of_reading_it():
+    pages = {None: {"rows": [_row()], "next_cursor": ("100", "d-1"),
+                    "truncated": True, "stats": {"total": 1}}}
+    controller, view, runtime = _paged_controller(pages, _summary({}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_next is None
+    assert view.panel.last["has_next"] is False
+    # The truncation is still reported: the list really is not the whole scope.
+    assert "还有更多未列出" in view.named("set_verification_rows")[-1][2]["page_text"]
+    controller.handle("verification_page_next", {})
+    for _ in range(2):
+        controller._poll()
+    assert runtime.cursors == [None]
+
+
+def test_controller_turns_a_failed_page_read_into_an_error_state():
+    pages = {None: RuntimeError("ledger gone")}
+    controller, view, _runtime = _paged_controller(pages, _summary({}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_state == "error"
+    assert controller._verify_display == [] and controller._verify_rows == {}
+    assert view.panel.last["state"] == "error"
+    assert view.panel.last["has_next"] is False
+    assert view.panel.last["text"]
+    texts = [call[1][0] for call in view.named("set_verification_result")]
+    assert texts and all("没有完成" in text or "读取" in text for text in texts), texts
+    # A read failure is a panel state, not a modal dialog.
+    assert view.named("set_verification_result")[-1][1][1] == "danger"
+
+
+def test_controller_reports_a_failed_summary_apart_from_the_rows():
+    pages = {None: _page([_row()], total=1)}
+    controller, view, _runtime = _paged_controller(pages, _summary({}))
+    controller.runtime.verification_summary = lambda **kwargs: _failed(
+        RuntimeError("counts gone"))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert len(controller._verify_display) == 1
+    text = view.named("set_verification_rows")[-1][2]["page_text"]
+    assert "本批统计没有读出来" in text
+    assert controller._verify_summary_error
+
+
+def _failed(error):
+    future = Future()
+    future.set_exception(error)
+    return future
+
+
+def test_controller_carries_the_read_revision_and_never_mixes_batches():
+    pages, cursor = _fifty_one_pages()
+    controller, _view, _runtime = _paged_controller(pages, _summary({}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_read_revision == 7
+    controller.handle("verification_page_next", {})
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_read_revision == 11
+    # Another task is another read: the revision and the cursor belong to the
+    # selection, so they are dropped with it.
+    _pin_task_rows(controller, {"job-a": {"batch_id": "batch-a"},
+                                "job-b": {"batch_id": "batch-b"}})
+    controller.handle("select_task", {"id": "job-b"})
+    assert controller._verify_read_revision is None
+    assert controller._verify_cursors == [None] and controller._verify_next is None
+    assert controller._verify_state == "idle"
+
+
+def test_controller_invalidates_the_visible_page_when_the_selection_changes():
+    pages, cursor = _fifty_one_pages()
+    controller, view, runtime = _paged_controller(pages, _summary({}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_page_next", {})
+    for _ in range(3):
+        controller._poll()
+    _pin_task_rows(controller, {"job-a": {"batch_id": "batch-a"},
+                                "job-b": {"batch_id": "batch-b"}})
+    controller.handle("select_task", {"id": "job-b"})
+    assert controller._verify_display == [] and controller._verify_rows == {}
+    # The next read starts at the head of the new batch, never at the cursor a
+    # previous batch left behind.
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert runtime.cursors[-1] is None
+    assert cursor not in runtime.cursors[3:]
+
+
+def test_controller_invalidates_the_page_when_the_user_leaves_it():
+    pages, _cursor = _fifty_one_pages()
+    controller, _view, _runtime = _paged_controller(pages, _summary({}))
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_display
+    key = _key(illust="1000", delivery="d-0")
+    assert key in controller._verify_rows
+    controller.handle("navigate", {"page": "follow"})
+    assert controller._verify_display == [] and controller._verify_rows == {}
+    assert controller._verify_state == "idle"
+    controller._verify_rows[key] = {
+        "batch_id": _BATCH, "illust_id": "1000", "page_index": 0,
+        "delivery_id": "d-0", "_batch": _BATCH,
+        "_epoch": controller._verification_epoch - 1}
+    controller.handle("verification_recover", {"key": key})
+    for _ in range(2):
+        controller._poll()
+    assert controller.session.commands == []
+
+
+def test_the_real_view_exposes_the_panel_state_entry_point(mounted):
+    """The controller reaches the mounted panel; the real view must expose it."""
+    view, _calls, _root = mounted
+    panel = view.verification_slot
+    assert panel is not None and hasattr(panel, "set_page_state")
+    panel.set_page_state(state="loading")
+    assert panel._hint.cget("text") == READY_TEXT
+    panel.set_rows([_row()])
+    panel.set_page_state(state="ready", has_previous=True, has_next=True)
+    assert panel.rows() and "disabled" not in panel._next.state()
+    panel.set_page_state(state="error", text="读取待核验页面没有完成。")
+    assert panel._hint.cget("text") == "读取待核验页面没有完成。"
+    assert panel.rows() == ()
+    assert "disabled" in panel._next.state() and "disabled" in panel._previous.state()
+
+
+def test_controller_labels_a_header_read_from_another_transaction():
+    pages = {None: _page([_row()], total=1, revision=7)}
+    summary = dict(_summary({"needs_verification": 1}), read_revision=3)
+    controller, view, _runtime = _paged_controller(pages, summary)
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert "统计与列表不是同一次读取" in view.named(
+        "set_verification_rows")[-1][2]["page_text"]
+    # Same revision: the two reads agree, so nothing is claimed either way.
+    pages = {None: _page([_row()], total=1, revision=7)}
+    summary = dict(_summary({"needs_verification": 1}), read_revision=7)
+    controller, view, _runtime = _paged_controller(pages, summary)
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    assert "统计与列表不是同一次读取" not in view.named(
+        "set_verification_rows")[-1][2]["page_text"]
+

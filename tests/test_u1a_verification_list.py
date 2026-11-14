@@ -230,10 +230,16 @@ def _selects(seen):
 
 def test_an_empty_library_lists_no_pages_and_a_zero_summary(repo):
     page = repo.list_verification_pages()
+    # The response is still exactly these keys: the read version is part of the
+    # response (contract v6 sec.4.1), not an extra field a caller may ignore.
+    assert page["read_revision"] == 0
+    assert isinstance(page["observed_at"], str) and page["observed_at"]
     assert page == {
         "rows": [],
         "next_cursor": None,
         "truncated": False,
+        "read_revision": page["read_revision"],
+        "observed_at": page["observed_at"],
         "stats": {
             "batch_id": None,
             "states": ["needs_verification", "recovery_needed"],
@@ -241,6 +247,7 @@ def test_an_empty_library_lists_no_pages_and_a_zero_summary(repo):
             "total": 0,
             "returned": 0,
             "truncated": False,
+            "read_revision": 0,
         },
     }
     summary = repo.verification_summary()
@@ -796,3 +803,55 @@ def test_the_recoverable_states_match_the_recovery_decision_table():
     }
     assert decidable == {"needs_verification", "pending"}
     assert set(_RECOVERABLE_PAGE_STATES) == decidable
+
+
+# ---------------------------------------------------------------------------
+# Contract v6 sec.4.1: one page is one read version
+# ---------------------------------------------------------------------------
+
+
+def test_every_page_and_the_summary_report_their_own_read_version(repo):
+    """read_revision is read in the same statement as the counts it describes."""
+    job = _submit(repo)
+    _accept(repo, job["batch_id"], ("123",), pages=2)
+    first = repo.list_verification_pages(states=("pending",))
+    summary = repo.verification_summary(batch_id=job["batch_id"])
+    assert type(first["read_revision"]) is int and first["read_revision"] >= 0
+    assert first["stats"]["read_revision"] == first["read_revision"]
+    assert type(summary["read_revision"]) is int
+    assert summary["read_revision"] >= first["read_revision"]
+    for value in (first, summary):
+        observed = value["observed_at"]
+        assert isinstance(observed, str) and observed.endswith("+00:00")
+        assert time.mktime(time.strptime(observed[:19], "%Y-%m-%dT%H:%M:%S")) > 0
+    # Two reads of an unchanged ledger can share a revision, but a read never
+    # reports a version older than the one before it.
+    again = repo.list_verification_pages(states=("pending",))
+    assert again["read_revision"] >= first["read_revision"]
+
+
+def test_the_fifty_first_row_is_reached_by_the_returned_cursor(repo, db_path):
+    """200 is a page size: a 51-row scope is two pages, not one truncated list."""
+    job = _submit(repo)
+    batch_id = job["batch_id"]
+    _seed_pages(
+        db_path, batch_id=batch_id, job_id=job["job_id"], start=1, count=51
+    )
+    first = repo.list_verification_pages(states=("pending",), limit=50)
+    assert len(first["rows"]) == 50
+    assert first["truncated"] is True
+    assert first["stats"]["total"] == 51
+    cursor = first["next_cursor"]
+    assert isinstance(cursor, tuple) and len(cursor) == 4
+    second = repo.list_verification_pages(
+        states=("pending",), after=cursor, limit=50
+    )
+    assert [row["illust_id"] for row in second["rows"]] == ["00000051"]
+    assert second["truncated"] is False and second["next_cursor"] is None
+    # The scope total belongs to the whole selection, not to the page: a
+    # shrinking total on page two would make "truncated" meaningless.
+    assert second["stats"]["total"] == 51
+    reached = [row["illust_id"] for row in first["rows"]] + [
+        row["illust_id"] for row in second["rows"]
+    ]
+    assert len(reached) == len(set(reached)) == 51
