@@ -242,6 +242,13 @@ def summary_text(summary: object) -> str:
     total = summary.get("total_pages")
     if type(total) is int:
         parts.append("本批 %d 页" % total)
+    existing = summary.get("existing_pages")
+    existing = existing if type(existing) is int else 0
+    if existing:
+        # A page can carry a recorded artifact without a delivery of its own
+        # (a strict reuse from another batch).  Saying nothing here used to
+        # read as "0 pages registered", which is the opposite of the truth.
+        parts.append("已有 %d 页" % existing)
     unverified = counts.get("needs_verification")
     recovery = counts.get("recovery_needed")
     held = (unverified if type(unverified) is int else 0) + (
@@ -257,9 +264,18 @@ def summary_text(summary: object) -> str:
     completed = counts.get("completed")
     if type(completed) is int and completed:
         parts.append("已完成 %d 页" % completed)
-    linked = summary.get("linked_pages")
-    if type(linked) is int and type(total) is int and linked != total:
-        parts.append("已登记 %d 页" % linked)
+    # "unstarted" is reported, never inferred from total - linked: the
+    # difference belongs to the existing_pages bucket first.
+    unstarted = summary.get("unstarted_pages")
+    if type(unstarted) is not int:
+        linked = summary.get("linked_pages")
+        unstarted = (
+            max(0, total - linked - existing)
+            if type(linked) is int and type(total) is int
+            else 0
+        )
+    if unstarted:
+        parts.append("尚未开始 %d 页" % unstarted)
     phase = summary.get("phase")
     if isinstance(phase, str) and phase and phase != "running":
         parts.append("批次已暂停，恢复后才能核验或补下载")

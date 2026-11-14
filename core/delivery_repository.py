@@ -809,10 +809,16 @@ class DeliveryRepositoryMixin:
         Read-only and bounded: three statements per call and no per-row loop in
         Python.  counts always carries the five listable states (zero when
         absent) plus any other state actually present, so a caller can render a
-        stable set of chips.  total_pages counts every selected page link,
-        including pages that have no delivery yet, while linked_pages counts
-        the pages the state counts describe; the two differ exactly by the
-        pages this batch has not started.
+        stable set of chips.
+
+        total_pages counts every selected page link.  linked_pages counts the
+        pages that own a delivery row and therefore a state; existing_pages
+        counts the pages that only carry a recorded artifact (a strict reuse
+        from another batch, where the page was never downloaded again); the
+        remainder is unstarted_pages.  The page table's CHECK constraint
+        (delivery_id IS NOT NULL OR artifact_id IS NOT NULL) makes that
+        remainder zero today, and the field is reported instead of inferred so
+        a caller never has to guess which of the two kinds a page is.
 
         A batch id that does not exist is not an error: the counts are empty,
         known is false and a caller can say so without catching anything.
@@ -846,15 +852,23 @@ class DeliveryRepositoryMixin:
                 params,
             ):
                 counts[str(state)] = int(number)
-            total, recoverable = conn.execute(
+            total, recoverable, existing = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(CASE WHEN d.state IN"
                 " ('needs_verification','pending') AND b.phase = 'running'"
+                " THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN"
+                " bip.delivery_id IS NULL AND bip.artifact_id IS NOT NULL"
                 " THEN 1 ELSE 0 END), 0) FROM batch_item_pages AS bip"
                 " LEFT JOIN deliveries AS d ON d.delivery_id = bip.delivery_id"
                 " LEFT JOIN batches AS b ON b.batch_id = bip.batch_id"
                 + scope,
                 params,
             ).fetchone()
+        linked = sum(counts.values())
+        existing_pages = int(existing)
+        total_pages = int(total)
+        # Never let an inconsistent ledger produce a negative remainder: the
+        # three counts must add up, and a page can only be linked or existing.
+        unstarted = max(0, total_pages - linked - existing_pages)
         return {
             "batch_id": batch_id,
             "latest_batch_id": None if batch is None else str(batch["batch_id"]),
@@ -862,8 +876,10 @@ class DeliveryRepositoryMixin:
             "known": batch is not None,
             "counts": counts,
             "recoverable": int(recoverable),
-            "total_pages": int(total),
-            "linked_pages": sum(counts.values()),
+            "total_pages": total_pages,
+            "linked_pages": linked,
+            "existing_pages": existing_pages,
+            "unstarted_pages": unstarted,
             "truncated": False,
         }
 

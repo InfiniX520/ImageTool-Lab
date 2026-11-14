@@ -113,6 +113,11 @@ class _FakeView:
 
 
 class _FakeSession:
+    # Mirrors the real port: the controller reads identity when it refreshes the
+    # overview, and a fake that lacks it turns an unrelated assertion into an
+    # AttributeError.
+    identity = None
+
     def __init__(self, results=None, *, error=None, future_error=None):
         self.commands = []
         self.results = results or {}
@@ -325,10 +330,16 @@ def test_summary_says_a_paused_batch_must_be_resumed_before_recovery():
     assert "恢复后才能核验" not in running
 
 
-def test_summary_mentions_pages_that_only_have_a_recorded_artifact():
+def test_summary_counts_the_pages_that_have_no_delivery_of_their_own():
+    """A page can carry a recorded artifact instead of a delivery of its own.
+
+    Reporting it as "0 pages registered" (the old line) read as the opposite of
+    the truth, so the header now names the existing pages and the remainder.
+    """
     text = summary_text({"phase": "running", "total_pages": 908,
                          "linked_pages": 900, "counts": {"completed": 900}})
-    assert "本批 908 页" in text and "已登记 900 页" in text
+    assert "本批 908 页" in text and "尚未开始 8 页" in text
+    assert "已登记 0 页" not in text and "已登记 900 页" not in text
 
 
 def test_summary_skips_zero_counts_and_survives_a_missing_payload():
@@ -847,3 +858,356 @@ def test_controller_ignores_a_second_pass_while_one_is_running():
     texts = [call[1][0] for call in view.named("set_verification_result")]
     assert texts.count("正在核验，请等这一轮结束。") == 2, texts
 
+
+# ----------------------------------------------------------------------
+# contract v5: page scope, result aggregation and the existing-page count
+# ----------------------------------------------------------------------
+
+
+class _QueuedRuntime(_FakeRuntime):
+    """A runtime whose reads stay pending until the test resolves them."""
+
+    def __init__(self, rows=(), summary=None):
+        super().__init__(rows, summary)
+        self.pending = {"pages": [], "summary": []}
+
+    def verification_pages(self, *, batch_id=None, states=None, after=None, limit=50):
+        self.requests.append(("pages", batch_id, limit))
+        future = Future()
+        self.pending["pages"].append(future)
+        return future
+
+    def verification_summary(self, *, batch_id=None):
+        self.requests.append(("summary", batch_id))
+        future = Future()
+        self.pending["summary"].append(future)
+        return future
+
+
+def _pin_task_rows(controller, rows):
+    """Seed the task table and stop the periodic overview from replacing it.
+
+    The real overview re-supplies the same jobs, so an empty fake overview would
+    only erase this fixture's own rows; pinning the next refresh keeps the test
+    about the verification scope instead of about the task list.
+    """
+    controller._task_rows = dict(rows)
+    controller._next_overview = float("inf")
+
+
+def _queued_controller(rows=(), summary=None):
+    view, root, dialogs = _FakeView(), _FakeRoot(), _FakeDialogs()
+    controller = CollectionController(root, view, _FakeSession(), dialogs=dialogs)
+    controller.runtime = _QueuedRuntime(rows, summary if summary is not None else _summary({}))
+    _pin_task_rows(controller, {
+        "job-a": {"batch_id": "batch-a"}, "job-b": {"batch_id": "batch-b"}})
+    # The two task lookups the selection path issues must not resolve here.
+    controller.runtime.request = lambda job: Future()
+    controller.runtime.snapshot = lambda job: Future()
+    return controller, view
+
+
+def _resolve(future, value):
+    future.set_result(value)
+
+
+def _rows_page(rows, *, batch=None, truncated=False):
+    return {"rows": list(rows), "next_cursor": None, "truncated": truncated,
+            "stats": {"batch_id": batch}}
+
+
+def test_summary_reports_artifact_only_pages_as_existing():
+    text = summary_text({"phase": "running", "total_pages": 1,
+                         "linked_pages": 0, "existing_pages": 1,
+                         "unstarted_pages": 0, "counts": {}})
+    assert "本批 1 页" in text and "已有 1 页" in text
+    assert "已登记 0 页" not in text
+
+
+def test_summary_prefers_a_reported_unstarted_count_over_arithmetic():
+    text = summary_text({"phase": "running", "total_pages": 10,
+                         "linked_pages": 10, "existing_pages": 0,
+                         "unstarted_pages": 3, "counts": {}})
+    assert "尚未开始 3 页" in text
+
+
+def test_summary_keeps_a_quiet_library_to_one_segment():
+    assert summary_text({"phase": "running", "total_pages": 3,
+                         "linked_pages": 3, "counts": {}}) == "本批 3 页"
+
+
+def test_controller_drops_a_summary_that_belongs_to_an_older_selection():
+    controller, view = _queued_controller()
+    controller.handle("select_task", {"id": "job-a"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    stale_summary = controller.runtime.pending["summary"][0]
+    controller.handle("select_task", {"id": "job-b"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    _resolve(stale_summary, {"total_pages": 908, "counts": {"needs_verification": 7}})
+    controller.runtime.pending["pages"][-1].set_result(_rows_page([]))
+    for _ in range(3):
+        controller._poll()
+    rendered = [call[1][0] for call in view.named("set_verification_rows")]
+    assert rendered, view.calls
+    assert all("待核验 7 页" not in text for text in rendered), rendered
+    assert controller._verify_summary != {"total_pages": 908,
+                                          "counts": {"needs_verification": 7}}
+    # The new selection's own summary still lands.
+    controller.runtime.pending["summary"][-1].set_result(
+        {"total_pages": 2, "counts": {"needs_verification": 2}})
+    for _ in range(2):
+        controller._poll()
+    assert "待核验 2 页" in view.named("set_verification_rows")[-1][2]["page_text"]
+
+
+def test_controller_drops_rows_that_name_another_batch():
+    controller, view = _queued_controller()
+    controller.handle("select_task", {"id": "job-a"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    controller.handle("select_task", {"id": "job-b"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    current = controller.runtime.pending["pages"][-1]
+    _resolve(current, _rows_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_display == []
+    assert controller._verify_rows == {}
+    assert view.named("set_verification_rows")[-1][1][0] == []
+    assert "另有 1 行属于其他批次" in view.named("set_verification_rows")[-1][2]["page_text"]
+
+
+def test_controller_refuses_a_key_from_a_previous_epoch_after_a_new_read():
+    controller, _view = _queued_controller()
+    controller.handle("select_task", {"id": "job-a"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    _resolve(controller.runtime.pending["pages"][0],
+             _rows_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(2):
+        controller._poll()
+    assert _key(batch="batch-a") in controller._verify_rows
+    controller.handle("select_task", {"id": "job-b"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    assert controller._verify_rows == {}
+    controller.handle("verification_recover", {"key": _key(batch="batch-a")})
+    for _ in range(2):
+        controller._poll()
+    assert controller.session.commands == []
+
+
+def test_controller_stops_the_rest_of_a_pass_when_the_selection_changes():
+    session = _FakeSession()
+    rows = [_row(illust=str(200 + index), delivery="d-%d" % index) for index in range(3)]
+    keys = [_key(illust=str(200 + index), delivery="d-%d" % index) for index in range(3)]
+    controller, view, _dialogs = _controller(rows, _summary({"needs_verification": 3}), session)
+    _pin_task_rows(controller, {"job-a": {"batch_id": _BATCH},
+                                "job-b": {"batch_id": "batch-b"}})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    pending = Future()
+
+    def slow(batch_id, illust_id, page_index, *, command_id=None):
+        session.commands.append({"batch_id": batch_id, "illust_id": illust_id,
+                                 "page_index": page_index, "command_id": command_id})
+        return pending
+
+    session.recover_verification_page = slow
+    controller.handle("verification_batch", {"keys": keys})
+    assert len(session.commands) == 1
+    controller.handle("select_task", {"id": "job-b"})
+    pending.set_result({"outcome": "reused", "reason": "hash_match",
+                        "illust_id": "200", "page_index": 0})
+    for _ in range(4):
+        controller._poll()
+    assert len(session.commands) == 1
+    assert controller._verify_busy is False
+    last = view.named("set_verification_result")[-1]
+    assert last[1][1] == "warning"
+    assert "上一批（批次 %s）已停止" % _BATCH in last[1][0]
+    assert "还剩 2 页未处理" in last[1][0]
+
+
+def test_controller_keeps_an_in_flight_command_on_its_original_batch():
+    session = _FakeSession()
+    controller, view, _dialogs = _controller([_row(batch=_BATCH)], _summary(
+        {"needs_verification": 1}), session)
+    _pin_task_rows(controller, {"job-a": {"batch_id": _BATCH},
+                                "job-b": {"batch_id": "batch-b"}})
+    pending = Future()
+    calls = []
+
+    def slow(batch_id, illust_id, page_index, *, command_id=None):
+        calls.append((batch_id, illust_id, page_index, command_id))
+        return pending
+
+    session.recover_verification_page = slow
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_recover", {"key": _key()})
+    controller.handle("select_task", {"id": "job-b"})
+    pending.set_result({"outcome": "held", "reason": "artifact_changed",
+                        "illust_id": "100", "page_index": 0})
+    for _ in range(4):
+        controller._poll()
+    assert [item[0] for item in calls] == [_BATCH]
+    last = view.named("set_verification_result")[-1]
+    assert last[1][1] != "success"
+    assert "上一批" in last[1][0]
+
+
+def test_controller_touches_no_widget_when_a_read_lands_after_dispose():
+    controller, view = _queued_controller()
+    controller.handle("select_task", {"id": "job-a"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    pages = controller.runtime.pending["pages"][0]
+    controller.dispose()
+    before = len(view.calls)
+    _resolve(pages, _rows_page([_row(batch="batch-a")], batch="batch-a"))
+    controller._poll()
+    assert len(view.calls) == before
+
+
+def test_controller_ends_a_mixed_batch_on_the_worst_outcome():
+    session = _FakeSession({
+        "100": {"outcome": "reused", "reason": "hash_match",
+                "illust_id": "100", "page_index": 0},
+        "200": {"outcome": "held", "reason": "artifact_changed",
+                "illust_id": "200", "page_index": 0},
+    })
+    rows = [_row(illust="100", delivery="d-1"), _row(illust="200", delivery="d-2")]
+    keys = [_key(illust="100", delivery="d-1"), _key(illust="200", delivery="d-2")]
+    controller, view, _dialogs = _controller(rows, _summary({"needs_verification": 2}), session)
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_batch", {"keys": keys})
+    for _ in range(10):
+        controller._poll()
+    last = view.named("set_verification_result")[-1]
+    assert last[1][1] == "warning"
+    assert "本轮处理 2/2 页" in last[1][0]
+    assert "已复用 1" in last[1][0] and "保留待定 1" in last[1][0]
+    assert "artifact_changed" not in last[1][0]
+    assert "文件内容已变" in last[1][0]
+
+
+def test_controller_does_not_call_a_queued_repair_a_verified_recovery():
+    session = _FakeSession({"100": {"outcome": "repair_queued",
+                                    "reason": "artifact_missing",
+                                    "illust_id": "100", "page_index": 0}})
+    controller, view, _dialogs = _controller([_row(error="artifact_missing")],
+                                             _summary({"needs_verification": 1}), session)
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_recover", {"key": _key()})
+    for _ in range(5):
+        controller._poll()
+    last = view.named("set_verification_result")[-1]
+    assert last[1][1] != "success"
+    assert "已排补下 1" in last[1][0]
+    assert "本轮核验完成" not in last[1][0]
+
+
+def test_controller_keeps_the_unknown_reason_in_the_final_line():
+    session = _FakeSession({"100": {"outcome": "mystery", "reason": "brand_new_reason",
+                                    "illust_id": "100", "page_index": 0}})
+    controller, view, _dialogs = _controller([_row()], _summary({"needs_verification": 1}),
+                                             session)
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_recover", {"key": _key()})
+    for _ in range(5):
+        controller._poll()
+    last = view.named("set_verification_result")[-1]
+    assert last[1][1] == "warning"
+    assert "无法识别 1" in last[1][0]
+    assert "未知原因（brand_new_reason）" in last[1][0]
+
+
+def test_controller_reports_how_far_a_failing_pass_got():
+    class _HalfBroken(_FakeSession):
+        def recover_verification_page(self, batch_id, illust_id, page_index, *,
+                                      command_id=None):
+            self.commands.append({"batch_id": batch_id, "illust_id": illust_id,
+                                  "page_index": page_index, "command_id": command_id})
+            result = Future()
+            if len(self.commands) == 2:
+                result.set_exception(RuntimeError("writer said no"))
+            else:
+                result.set_result({"outcome": "reused", "reason": "hash_match",
+                                   "illust_id": illust_id, "page_index": page_index})
+            return result
+
+    session = _HalfBroken()
+    rows = [_row(illust="100", delivery="d-1"), _row(illust="200", delivery="d-2")]
+    keys = [_key(illust="100", delivery="d-1"), _key(illust="200", delivery="d-2")]
+    controller, view, _dialogs = _controller(rows, _summary({"needs_verification": 2}), session)
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(3):
+        controller._poll()
+    controller.handle("verification_batch", {"keys": keys})
+    for _ in range(10):
+        controller._poll()
+    last = view.named("set_verification_result")[-1]
+    assert last[1][1] == "danger"
+    assert "核验没有完成" in last[1][0]
+    assert "本轮已完成 1/2 页" in last[1][0]
+    assert controller._verify_busy is False
+
+def test_controller_drops_a_read_from_an_earlier_visit_to_the_same_batch():
+    """A->B->A keeps the batch id but not the read.
+
+    The row's batch still matches, so only the epoch can tell that this answer
+    belongs to the first visit and must not repopulate the list.
+    """
+    controller, view = _queued_controller()
+    controller.handle("select_task", {"id": "job-a"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    first = controller.runtime.pending["pages"][0]
+    controller.handle("select_task", {"id": "job-b"})
+    controller.handle("select_task", {"id": "job-a"})
+    controller.handle("navigate", {"page": "verify"})
+    for _ in range(2):
+        controller._poll()
+    _resolve(first, _rows_page([_row(batch="batch-a")], batch="batch-a"))
+    for _ in range(3):
+        controller._poll()
+    assert controller._verify_display == []
+    assert controller._verify_rows == {}
+
+
+def test_controller_refuses_a_cached_row_whose_epoch_is_not_current():
+    """Second gate: even a row left in the action table cannot leave this scope."""
+    session = _FakeSession()
+    controller, view, _dialogs = _controller([], _summary({}), session)
+    # This case exercises the action gate, not the periodic overview read.
+    controller._next_overview = float("inf")
+    key = _key()
+    controller._verify_rows[key] = {
+        "batch_id": _BATCH, "illust_id": "100", "page_index": 0, "delivery_id": "d-1",
+        "_batch": _BATCH, "_epoch": controller._verification_epoch - 1}
+    controller.handle("verification_recover", {"key": key})
+    for _ in range(2):
+        controller._poll()
+    assert session.commands == []
+    assert any("已不在待核验列表里" in call[1][0]
+               for call in view.named("set_verification_result"))

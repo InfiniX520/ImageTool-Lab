@@ -13,7 +13,7 @@ from core.library_queries import LibraryQuery
 from core.log_view import LogView, ViewDelta
 from core.task_contracts import PathRef
 from gui.collection_dialogs import NativeDialogs
-from gui.verification_panel import describe_result, row_key, summary_text
+from gui.verification_panel import describe_result, reason_text, row_key, summary_text
 
 _PHASE = {'queued':'等待开始','running':'收集中','cooling':'等待冷却','pausing':'正在暂停',
     'cancelling':'正在取消','settling':'正在收尾','paused':'已暂停','blocked':'需要处理',
@@ -35,6 +35,16 @@ _ERROR = {'output_relative':'保存目录须为项目内相对路径，且不能
 _ERROR.update({'file_access_failed':'无法访问保存目录；请检查目录权限，处理后可继续',
     'disk_full':'保存位置的可用空间不足；清出空间后可继续',
     'output_file_conflict':'目标位置已有无法确认归属的文件；请检查后再继续'})
+# Result buckets for one verification pass (contract v5 sec.3).  "verified"
+# and "repair_queued" are kept apart because a queued repair is not a verified
+# recovery, and an unrecognised outcome is its own bucket, never a success.
+_VERIFY_BUCKETS = ('verified', 'repair_queued', 'held', 'refused', 'unknown', 'error')
+_VERIFY_BUCKET_BY_OUTCOME = {
+    'reused': 'verified', 'completed': 'verified', 'repair_queued': 'repair_queued',
+    'held': 'held', 'refused': 'refused'}
+_VERIFY_BUCKET_TEXT = {'verified': '已复用', 'repair_queued': '已排补下',
+    'held': '保留待定', 'refused': '已拒绝', 'unknown': '无法识别', 'error': '失败'}
+_TONE_RANK = {'muted': 0, 'success': 0, 'warning': 1, 'danger': 2}
 _ERROR.update({
     'api_interval':'查询间隔请填写 0–60 秒，可填小数。',
     'image_interval':'图片请求间隔请填写 0–60 秒，可填小数。',
@@ -141,6 +151,19 @@ class CollectionController:
         self._verify_done = 0
         self._verify_skipped = 0
         self._verify_busy = False
+        # Scope identity (contract v5 sec.3): every verification read captures
+        # the selection it was issued for.  A result that arrives for an older
+        # epoch or another batch is dropped instead of being shown under the
+        # new selection, and a running pass keeps the batch it started with.
+        self._verification_epoch = 0
+        self._verification_batch = None
+        self._verify_pass_epoch = None
+        self._verify_pass_batch = None
+        self._verify_stale_remaining = 0
+        self._verify_counts = {}
+        self._verify_last_reason = None
+        self._verify_worst = None
+        self._verify_dropped = 0
 
     def _assert_ui(self):
         if threading.get_ident() != self._ui_thread:
@@ -294,6 +317,7 @@ class CollectionController:
         self._current_job, self._current_batch = job_id, row['batch_id']
         if hasattr(self.view,'select_task'):self.view.select_task(job_id)
         if changed:
+            self._invalidate_verification()
             self._snapshot_value=None
             for action in ('pause','resume','retry_failed','cancel','results'):
                 self.view.configure_action(action,enabled=False)
@@ -317,6 +341,10 @@ class CollectionController:
         if self._snapshot_value == value:
             return
         self._snapshot_value = value
+        if value['batch_id'] != self._current_batch:
+            # The same job can open a new batch (resume after a pause); the old
+            # verification read belongs to the old batch and must not survive.
+            self._invalidate_verification()
         self._current_batch = value['batch_id']
         result = value.get('results') or {}
         pages = result.get('pages', {})
@@ -517,6 +545,7 @@ class CollectionController:
     def _submitted(self, value):
         old=self._pending.pop('snapshot',None)
         if old is not None:old[0].cancel()
+        self._invalidate_verification()
         self._current_job, self._current_batch = value['job_id'], value['batch_id']
         self._record_version += 1
         self._record_query=None; self._record_next=None; self._record_cursors=[None]
@@ -657,44 +686,116 @@ class CollectionController:
     # Verification page (W5): a bounded read plus an exactly-once recovery
     # ------------------------------------------------------------------
 
+    def _invalidate_verification(self):
+        """Forget the previous selection's verification read and its rows.
+
+        Called from every path that can change which batch the page is about:
+        selecting another task, a snapshot that opens a new batch, a submitted
+        or resumed job, and teardown.  Dropping the pending entries is what
+        lets the new selection issue its own read instead of being skipped as
+        "already in flight".
+        """
+        self._verification_epoch += 1
+        self._verification_batch = None
+        for key in ('verification_pages', 'verification_summary'):
+            # Drop the watcher, never cancel the producer: a cancelled future
+            # is not a completion order guarantee, and the scope check already
+            # rejects whatever it eventually returns.
+            self._pending.pop(key, None)
+        self._verify_rows = {}
+        self._verify_display = []
+        self._verify_summary = {}
+        self._verify_truncated = False
+        self._verify_dropped = 0
+        if self._verify_busy and self._verify_queue:
+            # The page already in flight belongs to the old batch and runs to
+            # its own verdict; the rest of that selection is not dispatched.
+            self._verify_stale_remaining += len(self._verify_queue)
+            self._verify_queue = []
+
+    def _verification_scope_ok(self, epoch, batch):
+        """True when a finished read still describes what the user is looking at."""
+        if self._closed or self._closing:
+            return False
+        return epoch == self._verification_epoch and batch == self._current_batch
+
+    def _row_in_scope(self, row):
+        """Second gate for the action table: the row must belong to this view."""
+        if not isinstance(row, dict):
+            return False
+        if row.get('_epoch') != self._verification_epoch:
+            return False
+        if self._current_batch is not None and row.get('_batch') != self._current_batch:
+            return False
+        return True
+
+    def _record_verification_result(self, value, tone):
+        """Keep a bounded tally of the pass; the last success never hides a hold."""
+        outcome = value.get('outcome') if isinstance(value, dict) else None
+        bucket = _VERIFY_BUCKET_BY_OUTCOME.get(outcome)
+        if bucket is None:
+            bucket = 'unknown' if isinstance(value, dict) else 'error'
+        self._verify_counts[bucket] = self._verify_counts.get(bucket, 0) + 1
+        reason = value.get('reason') if isinstance(value, dict) else None
+        if isinstance(reason, str) and reason and bucket != 'verified':
+            self._verify_last_reason = reason
+        if _TONE_RANK.get(tone, 1) > _TONE_RANK.get(self._verify_worst or 'muted', 0):
+            self._verify_worst = tone
+
     def _refresh_verification(self):
         """Read the summary and one bounded page of held rows.
 
         Both requests run on the shared query owner.  The Tk thread only sees
         finished Futures through _poll, so no widget is ever built or updated
-        from a query thread.
+        from a query thread.  Each request carries the epoch and batch it was
+        issued for, and its callback is dropped when either has moved on.
         """
         if self.runtime is None or self._verify_busy:
             return
+        epoch, batch = self._verification_epoch, self._current_batch
+        self._verification_batch = batch
         if 'verification_summary' not in self._pending:
             self._watch('verification_summary',
-                self.runtime.verification_summary(batch_id=self._current_batch),
-                self._verification_summary)
+                self.runtime.verification_summary(batch_id=batch),
+                lambda value: self._verification_summary(value, epoch=epoch, batch=batch))
         if 'verification_pages' not in self._pending:
             self._watch('verification_pages',
-                self.runtime.verification_pages(batch_id=self._current_batch,
+                self.runtime.verification_pages(batch_id=batch,
                     limit=_VERIFY_PAGE_SIZE),
-                self._verification_pages)
+                lambda value: self._verification_pages(value, epoch=epoch, batch=batch))
 
-    def _verification_summary(self, value):
+    def _verification_summary(self, value, *, epoch=None, batch=None):
+        if epoch is not None and not self._verification_scope_ok(epoch, batch):
+            return
         self._verify_summary = value if isinstance(value, dict) else {}
         self._render_verification()
 
-    def _verification_pages(self, value):
+    def _verification_pages(self, value, *, epoch=None, batch=None):
+        if epoch is not None and not self._verification_scope_ok(epoch, batch):
+            return
         rows = value.get('rows') if isinstance(value, dict) else ()
         self._verify_rows = {}
         display = []
+        dropped = 0
         for row in rows or ():
             if not isinstance(row, dict):
                 continue
-            key = row_key(row.get('batch_id'), row.get('illust_id'),
+            identity = row.get('batch_id')
+            if batch is not None and identity != batch:
+                # A row for another batch is not ours to show or to act on.
+                dropped += 1
+                continue
+            key = row_key(identity, row.get('illust_id'),
                 row.get('page_index'), row.get('delivery_id'))
             if key is None:
                 continue
-            self._verify_rows[key] = row
+            frozen = dict(row)
+            frozen['_epoch'] = epoch if epoch is not None else self._verification_epoch
+            frozen['_batch'] = identity
+            self._verify_rows[key] = frozen
             display.append({
                 'key': key,
-                'batch_id': row.get('batch_id'),
+                'batch_id': identity,
                 'illust_id': row.get('illust_id'),
                 'page_index': row.get('page_index'),
                 'delivery_id': row.get('delivery_id'),
@@ -709,6 +810,7 @@ class CollectionController:
                 'recoverable': row.get('recoverable') is True,
             })
         self._verify_display = display
+        self._verify_dropped = dropped
         self._verify_truncated = bool(isinstance(value, dict) and value.get('truncated'))
         self._render_verification()
 
@@ -719,6 +821,8 @@ class CollectionController:
             parts.append(text)
         if self._verify_display:
             parts.append('列出 %d 行' % len(self._verify_display))
+        if self._verify_dropped:
+            parts.append('另有 %d 行属于其他批次，已忽略' % self._verify_dropped)
         if self._verify_truncated:
             parts.append('还有更多未列出')
         self.view.set_verification_rows(self._verify_display,
@@ -733,7 +837,9 @@ class CollectionController:
         skipped = 0
         for key in keys:
             row = self._verify_rows.get(key) if isinstance(key, str) else None
-            if row is None:
+            if row is None or not self._row_in_scope(row):
+                # A key from a previous selection (or from another batch) is
+                # not an instruction for this one.
                 skipped += 1
                 continue
             targets.append(row)
@@ -745,6 +851,16 @@ class CollectionController:
         self._verify_skipped = skipped + max(0, len(targets) - _VERIFY_BATCH_LIMIT)
         self._verify_total = len(self._verify_queue)
         self._verify_done = 0
+        self._verify_counts = {}
+        self._verify_last_reason = None
+        self._verify_worst = None
+        self._verify_stale_remaining = 0
+        # The pass owns the batch it started with; switching tasks later must
+        # not rewrite a command that is already in flight.
+        self._verify_pass_epoch = self._verification_epoch
+        self._verify_pass_batch = (
+            self._current_batch if self._current_batch is not None
+            else targets[0].get('_batch'))
         self._verify_busy = True
         self.view.set_verification_busy(True, text='已完成 0/%d' % self._verify_total)
         self._verify_step()
@@ -758,7 +874,15 @@ class CollectionController:
         if self._closed or self._closing:
             self._verify_queue = []
             self._verify_busy = False
+            self._verify_pass_epoch = None
+            self._verify_pass_batch = None
             return
+        if (self._verify_pass_epoch is not None
+                and self._verify_pass_epoch != self._verification_epoch):
+            # The user moved to another selection: the rest of this pass is not
+            # dispatched, and the page already in flight still finishes.
+            self._verify_stale_remaining += len(self._verify_queue)
+            self._verify_queue = []
         if not self._verify_queue:
             self._finish_verification()
             return
@@ -777,6 +901,7 @@ class CollectionController:
     def _verify_finished(self, row, value):
         self._verify_done += 1
         text, tone = describe_result(value)
+        self._record_verification_result(value, tone)
         self.view.set_verification_result(text, tone)
         if self._verify_total > 1:
             self.view.set_verification_busy(True,
@@ -784,13 +909,43 @@ class CollectionController:
         self._verify_step()
 
     def _finish_verification(self):
+        """Close one pass and let the last visible line carry its worst outcome.
+
+        "Processed" and "verified" are different facts: a held page, a refused
+        page and an unrecognised answer all finish the pass, and none of them is
+        a success.  The tally is bounded by the batch limit, so no extra state
+        is needed beyond this pass.
+        """
         self._verify_busy = False
         done, total, skipped = self._verify_done, self._verify_total, self._verify_skipped
+        counts = dict(self._verify_counts)
         self.view.set_verification_busy(False, text='')
-        text = '本轮核验完成：%d/%d 页。' % (done, total)
+        stale = (self._verify_pass_epoch is not None
+                 and self._verify_pass_epoch != self._verification_epoch)
+        pass_batch, remaining = self._verify_pass_batch, self._verify_stale_remaining
+        self._verify_pass_epoch = None
+        self._verify_pass_batch = None
+        self._verify_stale_remaining = 0
+        if stale:
+            self.view.set_verification_result(
+                '上一批（批次 %s）已停止：还剩 %d 页未处理；没有改动任何文件。'
+                % (pass_batch or '未知', remaining), 'warning')
+            return
+        failed = any(counts.get(bucket) for bucket in
+                     ('repair_queued', 'held', 'refused', 'unknown', 'error'))
+        if done and not failed and counts.get('verified', 0) == done:
+            text = '本轮核验完成：%d/%d 页。' % (done, total)
+            tone = 'success'
+        else:
+            parts = ['%s %d' % (_VERIFY_BUCKET_TEXT[bucket], counts[bucket])
+                     for bucket in _VERIFY_BUCKETS if counts.get(bucket)]
+            text = '本轮处理 %d/%d 页：%s。' % (done, total, '、'.join(parts) or '没有结果')
+            if self._verify_last_reason:
+                text += ' 最后一条原因：' + reason_text(self._verify_last_reason)
+            tone = self._verify_worst or 'warning'
         if skipped:
             text += ' 另有 %d 页已不在列表里，已跳过。' % skipped
-        self.view.set_verification_result(text, 'success')
+        self.view.set_verification_result(text, tone)
         self._next_overview = 0
         self._refresh_verification()
 
@@ -799,8 +954,15 @@ class CollectionController:
         self._verify_queue = []
         self._verify_busy = False
         self.view.set_verification_busy(False, text='')
+        stale = (self._verify_pass_epoch is not None
+                 and self._verify_pass_epoch != self._verification_epoch)
+        pass_batch = self._verify_pass_batch
+        self._verify_pass_epoch = None
+        self._verify_pass_batch = None
         text = _ERROR.get(getattr(error, 'code', None)) or (
             '核验没有完成。请刷新后重试；若持续出现，请查看诊断日志。')
+        if stale:
+            text = '上一批（批次 %s）：%s' % (pass_batch or '未知', text)
         if self._verify_total:
             text += '（本轮已完成 %d/%d 页）' % (self._verify_done, self._verify_total)
         self.view.set_verification_result(text, 'danger')
@@ -832,6 +994,7 @@ class CollectionController:
 
     def dispose(self):
         self._assert_ui(); self._closed=True
+        self._invalidate_verification()
         self._verify_queue=[]; self._verify_busy=False; self._busy.clear()
         if self._after is not None:
             self.root.after_cancel(self._after); self._after=None
