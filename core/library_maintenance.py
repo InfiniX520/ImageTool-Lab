@@ -633,29 +633,6 @@ def _file_group_copy(
     return files
 
 
-def _objects_match(
-    first: dict[str, object], second: dict[str, object]
-) -> bool:
-    """Two readable databases hold the same SQL objects.
-
-    Comparing each side against the shared declaration is equivalent to
-    comparing them with each other, and it needs no second copy of the DDL.
-    """
-    if first["status"] in {"missing", "empty", "unreadable"}:
-        return False
-    if second["status"] in {"missing", "empty", "unreadable"}:
-        return False
-    return all(
-        first[key] == second[key]
-        for key in (
-            "objects_actual",
-            "missing_objects",
-            "extra_objects",
-            "mismatched_objects",
-        )
-    )
-
-
 def backup_library(
     path: str | Path,
     destination_dir: str | Path,
