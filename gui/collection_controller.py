@@ -93,8 +93,28 @@ def _display_time(value):
 # One verification list request and one recovery pass stay small on purpose:
 # the list is a bounded read, and a pass is a serial chain of single-page
 # commands so the single I/O owner is never flooded (its queue holds four).
+# The page size is the read size, never the whole library: a 51st row is reached
+# by the pager, one cursor at a time.
 _VERIFY_PAGE_SIZE = 50
 _VERIFY_BATCH_LIMIT = 20
+_VERIFY_PAGE_TEXT = '列表读取失败'
+
+
+def _verification_cursor(value):
+    """A (batch, illust, page, delivery) continuation, or None.
+
+    Anything else is not a cursor: a short list, a bare string or a row without
+    a delivery id must never be handed back to the repository as if it named a
+    position, because the next read would silently restart or skip a range.
+    """
+    if not isinstance(value, (tuple, list)) or len(value) != 4:
+        return None
+    batch, illust, page, delivery = value
+    if not all(isinstance(item, str) and item for item in (batch, illust, delivery)):
+        return None
+    if type(page) is not int:
+        return None
+    return (batch, illust, page, delivery)
 
 
 def _scope_description(query):
@@ -164,6 +184,18 @@ class CollectionController:
         self._verify_last_reason = None
         self._verify_worst = None
         self._verify_dropped = 0
+        # One read is one page (contract v6 sec.4.1).  The stack keeps the
+        # cursors already visited so "previous" is a real position and never an
+        # arithmetic guess; next_cursor comes from the repository alone.
+        self._verify_cursors = [None]
+        self._verify_cursor = None
+        self._verify_next = None
+        self._verify_scope_total = None
+        self._verify_read_revision = None
+        self._verify_summary_revision = None
+        self._verify_state = 'idle'
+        self._verify_error_text = ''
+        self._verify_summary_error = None
 
     def _assert_ui(self):
         if threading.get_ident() != self._ui_thread:
@@ -220,10 +252,16 @@ class CollectionController:
             except Exception as error:
                 if not self._closing:
                     verify = str(key).startswith('verify:')
+                    # A failed verification read is a panel state, not a modal:
+                    # the user is looking at that page and needs to see there
+                    # that nothing is listed right now.
+                    read_failed = key in {'verification_pages','verification_summary'}
                     quiet = key not in {'overview','snapshot','artists','request','records'}
-                    self._show_error(error, notify=quiet and not verify)
+                    self._show_error(error, notify=quiet and not verify and not read_failed)
                     if verify:
                         self._verification_failed(error)
+                    elif read_failed:
+                        self._verification_read_failed(error, key)
                 if key in self._busy:
                     self._busy.discard(key); self.view.configure_action(key, enabled=True)
                 if key in {'verify_account','start_preferences','source_preferences'}:
@@ -594,10 +632,16 @@ class CollectionController:
         if 'update_authorization' in self._busy and action in {'start','start_source','verify_account'}:
             self.view.set_status('正在保存授权，请稍候。'); return
         if action=='navigate':
+            previous=self._page
             self._page=payload['page']
             self._refresh_output_label()
+            if self._page!=previous:
+                # Leaving a page invalidates what it showed: a selection, a
+                # cursor or a held row from the previous visit is not an
+                # instruction for this one.
+                self._invalidate_verification()
             if self._page=='records' and self.runtime:self._query_records(reset=True)
-            elif self._page=='verify' and self.runtime:self._refresh_verification()
+            elif self._page=='verify' and self.runtime:self._refresh_verification(reset=True)
             return
         if self.runtime is None:
             self.view.set_status('正在准备，请稍候'); return
@@ -643,7 +687,11 @@ class CollectionController:
                 self.view.set_record_form({'scope':'batch','search':'','result':'all'})
                 self.view.show_page('records'); self._page='records'; self._query_records(reset=True)
             elif action=='record_query':self._query_records(reset=True)
-            elif action=='verification_refresh':self._refresh_verification()
+            elif action=='verification_refresh':
+                self._verify_error_text = ''
+                self._refresh_verification(reset=True)
+            elif action=='verification_page_next':self._verification_step_page(1)
+            elif action=='verification_page_previous':self._verification_step_page(-1)
             elif action=='verification_recover':self._recover_verification([payload.get('key')])
             elif action=='verification_batch':
                 self._recover_verification(list(payload.get('keys') or ()))
@@ -707,6 +755,17 @@ class CollectionController:
         self._verify_summary = {}
         self._verify_truncated = False
         self._verify_dropped = 0
+        # The pager belongs to the selection too: a cursor from the old batch
+        # would read a position that does not exist here.
+        self._verify_cursors = [None]
+        self._verify_cursor = None
+        self._verify_next = None
+        self._verify_scope_total = None
+        self._verify_read_revision = None
+        self._verify_summary_revision = None
+        self._verify_state = 'idle'
+        self._verify_error_text = ''
+        self._verify_summary_error = None
         if self._verify_busy and self._verify_queue:
             # The page already in flight belongs to the old batch and runs to
             # its own verdict; the rest of that selection is not dispatched.
@@ -742,36 +801,71 @@ class CollectionController:
         if _TONE_RANK.get(tone, 1) > _TONE_RANK.get(self._verify_worst or 'muted', 0):
             self._verify_worst = tone
 
-    def _refresh_verification(self):
+    def _refresh_verification(self, *, reset=False):
         """Read the summary and one bounded page of held rows.
 
         Both requests run on the shared query owner.  The Tk thread only sees
         finished Futures through _poll, so no widget is ever built or updated
-        from a query thread.  Each request carries the epoch and batch it was
-        issued for, and its callback is dropped when either has moved on.
+        from a query thread.  Each request carries the epoch, the batch and the
+        cursor it was issued for, and its callback is dropped when any of them
+        has moved on.
+
+        'reset' means "start from the head": a new selection, a refresh or a
+        new batch throws away the visited cursors instead of continuing a walk
+        whose prefix the user can no longer see.
+
+        The summary and the page are two requests and therefore two reads; the
+        header says so when their read versions differ instead of pretending
+        they were one snapshot.
         """
         if self.runtime is None or self._verify_busy:
             return
+        if reset:
+            self._verify_cursors = [None]
+            self._verify_cursor = None
+            self._verify_next = None
+            self._verify_scope_total = None
+            self._verify_read_revision = None
+            self._verify_display = []
+            self._verify_rows = {}
+            self._verify_dropped = 0
+            self._verify_truncated = False
         epoch, batch = self._verification_epoch, self._current_batch
+        cursor = self._verify_cursor
         self._verification_batch = batch
+        self._verify_state = 'loading'
+        # While a read is on its way nothing on screen is a current fact: the
+        # old rows stop being clickable instead of looking like this page.
+        self._verify_display = []
+        self._verify_rows = {}
+        self._render_verification()
         if 'verification_summary' not in self._pending:
             self._watch('verification_summary',
                 self.runtime.verification_summary(batch_id=batch),
                 lambda value: self._verification_summary(value, epoch=epoch, batch=batch))
         if 'verification_pages' not in self._pending:
             self._watch('verification_pages',
-                self.runtime.verification_pages(batch_id=batch,
+                self.runtime.verification_pages(batch_id=batch, after=cursor,
                     limit=_VERIFY_PAGE_SIZE),
-                lambda value: self._verification_pages(value, epoch=epoch, batch=batch))
+                lambda value: self._verification_pages(value, epoch=epoch, batch=batch,
+                    cursor=cursor))
 
     def _verification_summary(self, value, *, epoch=None, batch=None):
         if epoch is not None and not self._verification_scope_ok(epoch, batch):
             return
         self._verify_summary = value if isinstance(value, dict) else {}
+        revision = self._verify_summary.get('read_revision')
+        self._verify_summary_revision = revision if type(revision) is int else None
+        self._verify_summary_error = None
         self._render_verification()
 
-    def _verification_pages(self, value, *, epoch=None, batch=None):
+    def _verification_pages(self, value, *, epoch=None, batch=None, cursor=None):
         if epoch is not None and not self._verification_scope_ok(epoch, batch):
+            return
+        if cursor != self._verify_cursor:
+            # The answer belongs to a page the user already left.  Showing it
+            # would name rows that are not the current page's, and acting on
+            # them would be a different read than the one on screen.
             return
         rows = value.get('rows') if isinstance(value, dict) else ()
         self._verify_rows = {}
@@ -812,21 +906,118 @@ class CollectionController:
         self._verify_display = display
         self._verify_dropped = dropped
         self._verify_truncated = bool(isinstance(value, dict) and value.get('truncated'))
+        self._verify_next = _verification_cursor(
+            value.get('next_cursor') if isinstance(value, dict) else None)
+        stats = value.get('stats') if isinstance(value, dict) else None
+        total = stats.get('total') if isinstance(stats, dict) else None
+        self._verify_scope_total = total if type(total) is int and total >= 0 else None
+        revision = value.get('read_revision') if isinstance(value, dict) else None
+        self._verify_read_revision = revision if type(revision) is int else None
+        self._verify_state = 'ready'
+        self._verify_error_text = ''
         self._render_verification()
+
+    def _verification_slot(self):
+        """The mounted panel, when this view exposes one (the real desktop).
+
+        A fake view in a test has no panel; the read path then simply renders
+        through set_verification_rows as before.  Nothing here writes to the
+        view: the panel state is read-only metadata about the shown rows.
+        """
+        slot = getattr(self.view, 'verification_slot', None)
+        return slot if hasattr(slot, 'set_page_state') else None
+
+    def _sync_panel_state(self):
+        slot = self._verification_slot()
+        if slot is None:
+            return
+        slot.set_page_state(state=self._verify_state,
+            has_previous=len(self._verify_cursors) > 1,
+            has_next=self._verify_next is not None,
+            text=self._verify_error_text or None)
 
     def _render_verification(self):
         parts = []
         text = summary_text(self._verify_summary)
         if text:
             parts.append(text)
+        if self._verify_summary_error:
+            parts.append(self._verify_summary_error)
         if self._verify_display:
             parts.append('列出 %d 行' % len(self._verify_display))
+            if self._verify_scope_total is not None:
+                parts.append('本页 %d / 范围内 %d' % (
+                    len(self._verify_display), self._verify_scope_total))
+        if self._verify_state == 'error':
+            parts.append(_VERIFY_PAGE_TEXT)
+        if (self._verify_summary_revision is not None
+                and self._verify_read_revision is not None
+                and self._verify_summary_revision != self._verify_read_revision):
+            # Two Futures, two reads: say it instead of implying one snapshot.
+            parts.append('统计与列表不是同一次读取')
         if self._verify_dropped:
             parts.append('另有 %d 行属于其他批次，已忽略' % self._verify_dropped)
         if self._verify_truncated:
             parts.append('还有更多未列出')
         self.view.set_verification_rows(self._verify_display,
             page_text=' · '.join(parts))
+        self._sync_panel_state()
+
+    def _verification_step_page(self, direction):
+        """Move one page of the list; a continuation is never invented.
+
+        Only a cursor the repository actually returned can be followed, and
+        only a cursor this controller pushed can be returned to.  The page
+        being left loses its watcher so its answer cannot land on the page the
+        user is now looking at.
+        """
+        if self.runtime is None or self._verify_busy:
+            return
+        if direction > 0:
+            cursor = self._verify_next
+            if cursor is None:
+                return
+            self._verify_cursors.append(self._verify_cursor)
+            self._verify_cursor = cursor
+        else:
+            if len(self._verify_cursors) <= 1:
+                return
+            self._verify_cursor = self._verify_cursors.pop()
+        self._verify_next = None
+        self._verify_error_text = ''
+        old = self._pending.pop('verification_pages', None)
+        if old is not None and not old[0].done():
+            # The producer keeps running; its result is rejected by the cursor
+            # scope check, so nothing has to be stopped to stay correct.
+            old[0].cancel()
+        self._refresh_verification()
+
+    def _verification_read_failed(self, error, key):
+        """A failed read is a visible state, not a modal and not an old list.
+
+        A summary failure leaves the rows alone (they were read by another
+        statement and are still true facts) but says so.  A page failure clears
+        the rows, the cursor and every action: the user must not be able to
+        click a page that the failed read never described.
+        """
+        text = _ERROR.get(getattr(error, 'code', None)) or (
+            '读取待核验页面没有完成。请点“刷新”重试；若持续出现，请查看诊断日志。')
+        if key == 'verification_summary':
+            self._verify_summary = {}
+            self._verify_summary_error = '本批统计没有读出来，下面的列表可能不完整'
+            self.view.set_verification_result(text, 'danger')
+            self._render_verification()
+            return
+        self._verify_state = 'error'
+        self._verify_error_text = text
+        self._verify_rows = {}
+        self._verify_display = []
+        self._verify_dropped = 0
+        self._verify_next = None
+        self._verify_scope_total = None
+        self._verify_truncated = False
+        self.view.set_verification_result(text, 'danger')
+        self._render_verification()
 
     def _recover_verification(self, keys):
         """Start one recovery pass over the frozen rows named by the panel."""
@@ -840,6 +1031,11 @@ class CollectionController:
             if row is None or not self._row_in_scope(row):
                 # A key from a previous selection (or from another batch) is
                 # not an instruction for this one.
+                skipped += 1
+                continue
+            if not isinstance(row.get('delivery_id'), str) or not row.get('delivery_id'):
+                # Without the delivery the row named, the backend cannot tell
+                # this row from a later generation, so it is not dispatched.
                 skipped += 1
                 continue
             targets.append(row)
@@ -892,7 +1088,8 @@ class CollectionController:
         command_id = uuid.uuid4().hex
         try:
             future = self.session.recover_verification_page(row['batch_id'],
-                row['illust_id'], row['page_index'], command_id=command_id)
+                row['illust_id'], row['page_index'],
+                expected_delivery_id=row['delivery_id'], command_id=command_id)
         except Exception as error:
             self._verification_failed(error)
             return

@@ -272,23 +272,33 @@ class DesktopSession:
             api.requests.close()
 
     def recover_verification_page(self, batch_id, illust_id, page_index, *,
-                                 command_id=None):
+                                 expected_delivery_id=None, command_id=None):
         """Re-check one held page on the single I/O owner.
 
         The recovery entry observes files and compare-and-sets rows; both run
         on this owner so the Tk thread never hashes bytes or opens a database
         transaction.  A repeated call with the same command_id replays the
         first accepted result instead of reading the file again.
-        """
-        return self._command(self._recover_verification_page, batch_id, illust_id,
-            page_index, command_id)
 
-    def _recover_verification_page(self, batch_id, illust_id, page_index, command_id):
+        'expected_delivery_id' is the delivery the row the user acted on named.
+        The port requires it: without it the repository would act on whatever
+        delivery the page is linked to now, which is exactly the stale-row
+        write this guard exists to stop.  Omitting it is a programming error,
+        not a quiet fallback.
+        """
+        if expected_delivery_id is None:
+            raise ValueError('expected_delivery_id is required')
+        return self._command(self._recover_verification_page, batch_id, illust_id,
+            page_index, expected_delivery_id, command_id)
+
+    def _recover_verification_page(self, batch_id, illust_id, page_index,
+                                   expected_delivery_id, command_id):
         runtime = self.runtime
         if runtime is None:
             raise RuntimeClosed('Desktop is not ready')
         return runtime.repository.recover_verification_page(batch_id, illust_id,
-            page_index, command_id=command_id)
+            page_index, expected_delivery_id=expected_delivery_id,
+            command_id=command_id)
 
     def save(self, preferences):
         return self._command(self._save, preferences)

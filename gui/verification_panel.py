@@ -20,6 +20,7 @@ widget.
 
 from __future__ import annotations
 
+import gc
 import tkinter as tk
 from tkinter import ttk
 
@@ -35,6 +36,10 @@ BATCH_LIMIT = 20
 
 EMPTY_TEXT = "当前批次没有待核验页面；停住的页会在这里出现。"
 READY_TEXT = "正在读取待核验页面…"
+# A failed read is its own state: the old rows are gone and nothing on screen
+# may be clicked as if it were a live page.
+ERROR_TEXT = "读取待核验页面没有完成；请检查后点“刷新”重试。"
+LOAD_STATES = ("idle", "loading", "ready", "error")
 
 _STATE_TEXT = {
     "needs_verification": "待核验",
@@ -300,6 +305,13 @@ class VerificationPanel(ttk.Frame):
         self._busy = False
         self._disposed = False
         self._suspend = False
+        # One read is one page: the pager flags come from the controller's
+        # cursor, never from the row count, so "next" can only exist when the
+        # repository really returned a continuation.
+        self._load_state = "idle"
+        self._state_text = ""
+        self._has_previous = False
+        self._has_next = False
         self._build()
 
     # -- construction ----------------------------------------------------
@@ -313,10 +325,18 @@ class VerificationPanel(ttk.Frame):
         bar.columnconfigure(0, weight=1)
         self._summary = ttk.Label(bar, text=READY_TEXT, style="CollectionMuted.TLabel")
         self._summary.grid(row=0, column=0, sticky="w")
+        self._previous = ttk.Button(bar, text="上一页", style="CollectionQuiet.TButton",
+            name="verification_previous_button", takefocus=True,
+            command=lambda: self._emit("verification_page_previous", {}))
+        self._previous.grid(row=0, column=1, sticky="e", padx=(s(20), 0))
+        self._next = ttk.Button(bar, text="下一页", style="CollectionQuiet.TButton",
+            name="verification_next_button", takefocus=True,
+            command=lambda: self._emit("verification_page_next", {}))
+        self._next.grid(row=0, column=2, sticky="e", padx=(s(8), 0))
         self._refresh = ttk.Button(bar, text="刷新", style="CollectionQuiet.TButton",
             name="verification_refresh_button", takefocus=True,
             command=lambda: self._emit("verification_refresh", {}))
-        self._refresh.grid(row=0, column=1, sticky="e", padx=(s(20), 0))
+        self._refresh.grid(row=0, column=3, sticky="e", padx=(s(8), 0))
         self._hint = ttk.Label(self, text="", style="CollectionMuted.TLabel",
             justify="left", wraplength=s(640))
         self._hint.grid(row=1, column=0, sticky="w", pady=(s(10), s(6)))
@@ -384,6 +404,35 @@ class VerificationPanel(ttk.Frame):
         self._page_text = str(page_text or "")
         self._render()
 
+    def set_page_state(self, *, state: str = "ready",
+                       has_previous: bool = False, has_next: bool = False,
+                       text: object = None) -> None:
+        """Say which read version the visible rows came from.
+
+        The rows themselves still arrive through set_rows; this call only
+        describes the read that produced them.  'loading' and 'error' clear the
+        list on purpose: an old row must never stay clickable while the current
+        read has no answer, and a failed read is not an empty library.  An
+        unknown state is a programming error, not something to guess at.
+        """
+        if self._disposed:
+            return
+        key = str(state)
+        if key not in LOAD_STATES:
+            raise ValueError("unknown verification load state: %r" % (state,))
+        self._load_state = key
+        self._has_previous = bool(has_previous)
+        self._has_next = bool(has_next) and key == "ready"
+        if key in {"loading", "error"}:
+            self._rows = ()
+            self._by_key = {}
+            self._selected = None
+        if text is not None:
+            self._state_text = str(text)
+        elif key != "error":
+            self._state_text = ""
+        self._render()
+
     def set_result(self, text: object, tone: str = "muted") -> None:
         if self._disposed:
             return
@@ -423,6 +472,16 @@ class VerificationPanel(ttk.Frame):
         self._rows = ()
         self._by_key = {}
         self._selected = None
+        self._load_state = "idle"
+        self._state_text = ""
+        self._has_previous = False
+        self._has_next = False
+        # Tk objects must be finalized while this panel's interpreter is still
+        # alive: one left over and collected later, on a worker thread that
+        # happens to start a GC cycle, calls into a destroyed Tcl interpreter
+        # (seen here as a native breakpoint).  Collecting at dispose is cheap
+        # and keeps teardown local to the thread that owns the widgets.
+        gc.collect()
 
     # -- internals -------------------------------------------------------
 
@@ -479,7 +538,7 @@ class VerificationPanel(ttk.Frame):
         try:
             self._summary.configure(
                 text=self._page_text or "共 %d 页待核验" % len(self._rows))
-            self._hint.configure(text="" if self._rows else EMPTY_TEXT)
+            self._hint.configure(text=self._hint_text())
         except tk.TclError:  # pragma: no cover - widget being destroyed
             return
         if self._rows:
@@ -487,6 +546,16 @@ class VerificationPanel(ttk.Frame):
         else:
             self._wrap.grid_remove()
         self._sync_actions()
+
+    def _hint_text(self) -> str:
+        """What the empty area means: loaded and empty, reading, or failed."""
+        if self._rows:
+            return ""
+        if self._load_state == "error":
+            return self._state_text or ERROR_TEXT
+        if self._load_state == "loading":
+            return READY_TEXT
+        return EMPTY_TEXT
 
     def _on_select(self, _event: object = None) -> None:
         if self._disposed or self._suspend:
@@ -501,14 +570,21 @@ class VerificationPanel(ttk.Frame):
     def _sync_actions(self) -> None:
         if self._disposed:
             return
+        ready = self._load_state != "error" and self._load_state != "loading"
         selected = self._by_key.get(self._selected) if self._selected else None
-        can_recover = (not self._busy and selected is not None
+        can_recover = (not self._busy and ready and selected is not None
                        and selected.get("recoverable") is True)
-        batchable = (not self._busy
+        batchable = (not self._busy and ready
                      and any(item.get("recoverable") is True for item in self._rows))
+        # A failed read leaves the refresh button as the only way out, and the
+        # cursor is unknown then, so no page can be offered in either direction.
+        previous = not self._busy and self._has_previous and ready
+        following = not self._busy and self._has_next and ready
         try:
             self._recover.state(["!disabled"] if can_recover else ["disabled"])
             self._batch.state(["!disabled"] if batchable else ["disabled"])
+            self._previous.state(["!disabled"] if previous else ["disabled"])
+            self._next.state(["!disabled"] if following else ["disabled"])
             self._refresh.state(["disabled"] if self._busy else ["!disabled"])
         except tk.TclError:  # pragma: no cover - widget being destroyed
             return
@@ -562,6 +638,9 @@ class VerificationPanel(ttk.Frame):
 __all__ = [
     "BATCH_LIMIT",
     "EMPTY_TEXT",
+    "ERROR_TEXT",
+    "LOAD_STATES",
+    "READY_TEXT",
     "ROW_LIMIT",
     "VerificationPanel",
     "blocked_text",
