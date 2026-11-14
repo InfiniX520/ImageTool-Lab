@@ -46,8 +46,8 @@ The result says how much of the library one pass actually covered:
 `coverage` is `complete` / `page` / `budget` / `cancelled` / `empty` /
 `error`, `stats["stopped_at"]` names the stop, `stats["unknown_reasons"]`
 counts why rows stayed unknown, and `ledger` carries the read failure and the
-last safe cursor.  `empty` means this pass examined nothing; `stats
-["library_rows"]` is `0` only when the whole ledger holds no artifact, and is
+last safe cursor.  `empty` means this pass examined nothing; the
+`library_rows` stat is `0` only when the whole ledger holds no artifact, and
 `None` when the pass resumed from a cursor and therefore did not count.
 
 Signatures are frozen by ``docs/optimization/2026-11-14/U1A_W5_W6_SCOPE.md``::
