@@ -1199,3 +1199,22 @@ def test_compare_library_reports_equal_counts_with_different_values(tmp_path):
     assert result["counts_match"] is True
     assert result["logical"]["state"] == "mismatch"
     assert "copy_content_mismatch" in result["reasons"]
+
+
+def test_verify_backup_accepts_a_file_group_backup_twice(tmp_path):
+    """The byte-for-byte mode must stay verifiable; -shm is bookkeeping."""
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=2, wal=True)
+    manifest = m.backup_library(library, tmp_path / "backups", label="fg", mode="file_group")
+    directory = Path(manifest["manifest_path"]).parent
+    assert manifest["sealed_members"] == ["library.sqlite3", "library.sqlite3-wal"]
+    for _ in range(2):
+        result = m.verify_backup(directory)
+        assert result["ok"] is True
+        assert result["sealed"]["state"] == "ok"
+        assert result["logical"]["state"] == "ok"
+    assert sorted(item.name for item in directory.iterdir()) == [
+        "library.sqlite3",
+        "library.sqlite3-shm",
+        "library.sqlite3-wal",
+        "manifest.json",
+    ]
