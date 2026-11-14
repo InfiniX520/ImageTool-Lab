@@ -45,6 +45,9 @@ import re
 import sqlite3
 import struct
 import sys
+import tempfile
+import time
+import uuid
 from pathlib import Path
 
 from core.library_repository import (
@@ -214,6 +217,19 @@ def _sqlite_reason(error: BaseException) -> str:
     return "library_unreadable"
 
 
+def _is_internal_object(name: object) -> bool:
+    """True for SQLite's own schema objects, judged by its literal prefix.
+
+    SQLite reserves the "sqlite_" prefix and compares it case insensitively,
+    but the underscore is an ordinary character.  A LIKE pattern would read it
+    as a single-character wildcard, so a legal user table such as
+    "sqliteXuser" would silently drop out of every digest and two databases
+    with different content in it would compare equal (PA-02).  Every object
+    enumeration in this module goes through this one predicate.
+    """
+    return str(name)[:7].lower() == "sqlite_"
+
+
 # ---------------------------------------------------------------------------
 # Reading facts
 # ---------------------------------------------------------------------------
@@ -223,9 +239,9 @@ def _normalized_objects(connection: sqlite3.Connection) -> dict[str, str]:
     return {
         str(row[0]): " ".join(str(row[1]).split())
         for row in connection.execute(
-            "SELECT name, sql FROM sqlite_master "
-            "WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'"
+            "SELECT name, sql FROM sqlite_master WHERE type IN ('table','index')"
         )
+        if not _is_internal_object(row[0])
     }
 
 
@@ -288,13 +304,19 @@ def _facts(connection: sqlite3.Connection) -> dict[str, object]:
     return facts
 
 
-def inspect_library(path: str | Path) -> dict[str, object]:
+def inspect_library(
+    path: str | Path, *, connection: sqlite3.Connection | None = None
+) -> dict[str, object]:
     """Read-only verdict on one library file.
 
     status is 'missing', 'empty', 'compatible', 'incompatible' or
     'unreadable'.  'healthy' covers the file's own integrity only, so an
     incompatible-but-intact database still reports healthy true and a corrupted
     one reports a reason instead of a plain verdict.
+
+    'connection' lets a caller that already holds one read transaction ask for
+    the health facts of that same snapshot; the default opens a read-only
+    connection of its own, which is what a plain inspect wants.
     """
     target = _resolve_target(path)
     report: dict[str, object] = {
@@ -332,8 +354,11 @@ def inspect_library(path: str | Path) -> dict[str, object]:
         report["warnings"].append("empty_file")
         return report
     try:
-        with contextlib.closing(_connect_readonly(target)) as connection:
+        if connection is not None:
             facts = _facts(connection)
+        else:
+            with contextlib.closing(_connect_readonly(target)) as opened:
+                facts = _facts(opened)
     except sqlite3.Error as error:
         report["status"] = "unreadable"
         report["warnings"].append(_sqlite_reason(error))
@@ -536,31 +561,97 @@ def _write_manifest(directory: Path, manifest: dict[str, object]) -> Path:
 def _restore_steps(
     source: Path, name: str, mode: str, files: list[dict[str, object]]
 ) -> list[str]:
-    """Restore instructions that match how the backup was taken.
+    """Restore instructions that always keep a way back.
 
-    An online snapshot is one self-contained file, so any -wal left beside the
-    target belongs to the *old* database and must go: replaying it onto a
-    different file is how a restore corrupts itself.  A file-group backup is a
-    consistent set instead, so the whole set goes back together and nothing is
-    deleted.
+    The previous text told the operator to overwrite the database and then
+    delete the -wal/-shm beside it.  That destroys the only copy of whatever
+    the old WAL still held before anyone proved the replacement opens, and it
+    cannot be undone.  This protocol moves the current group aside first, then
+    puts a verified group in its place, so every step is reversible (WR-01).
     """
-    steps = ["关闭 JpgPng 主程序，确认没有下载/整理任务在运行。"]
+    group = ", ".join(str(item["name"]) for item in files)
     if mode == "file_group":
-        names = ", ".join(str(item["name"]) for item in files)
-        steps.append(
-            "把备份目录里的整套文件（%s）一起复制覆盖回 %s。" % (names, source.parent)
-        )
-        steps.append(
-            "不要只复制主文件，也不要删除备份里的 %s-wal：它们属于同一个一致状态。" % name
+        prepared = "整套文件（%s）" % group
+        placement = (
+            "file_group 备份必须整套一起放回；禁止只放主文件，也禁止用新主库配旧 WAL。"
         )
     else:
-        steps.append("把备份目录里的 %s 复制覆盖回 %s。" % (name, source))
-        steps.append(
-            "如果原路径旁边还留着 %s-wal 或 %s-shm，一并删除：那是旧库的事务日志，"
-            "不能配还原后的文件。" % (name, name)
-        )
-    steps.append("启动前运行 python maintain.py inspect %s，状态须为 compatible。" % source)
-    return steps
+        prepared = "自包含的 %s（online 快照）" % name
+        placement = "online 快照是自包含单文件，放回后旁边不得再留 -wal/-shm。"
+    return [
+        "1. 关闭 JpgPng 主程序与所有辅助进程，确认没有进程或连接还持有 %s；"
+        "maintain.py inspect 报 library_locked 就说明还没关干净，不要继续。" % name,
+        "2. 先校验备份本身：python maintain.py verify <备份目录>，必须 ok=true；"
+        "记下清单里的模式（%s）与成员（%s）。" % (mode, group),
+        "3. 在暂存目录准备与备份模式匹配的恢复组：%s；对暂存副本运行 inspect 与 compare，"
+        "确认可用后才进入下一步。" % prepared,
+        "4. 把当前库文件组（%s 以及同目录的 -wal/-shm）整组移入同卷独立保留目录"
+        "（例如 record_backups/restore_rollback_<时间>）：移动，不删除、不覆盖。" % name,
+        "5. 只把第 3 步校验过的恢复组放进原位置：%s" % placement,
+        "6. 重新打开并对照：maintain.py inspect %s 须 compatible；"
+        "maintain.py compare <恢复后库> <备份里的库> 须内容一致；"
+        "restore_check 须无 orphan_wal。" % source,
+        "7. 任一步失败：把第 4 步保留的整组移回原位置，保留保留目录与报告，不删除现场。",
+    ]
+
+
+def _journal_header(path: Path) -> tuple[int, int] | None:
+    """The two journal-format bytes of a database header (offsets 18 and 19).
+
+    1 is the legacy rollback journal, 2 is write-ahead logging.  This is a
+    fact about the file itself; PRAGMA journal_mode reports "wal" as soon as a
+    -wal sits beside a database SQLite can open with one, which is exactly the
+    mixed group the restore check has to refuse.
+    """
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(20)
+    except OSError:
+        return None
+    if len(header) < 20 or header[:15] != b"SQLite format 3":
+        return None
+    return (header[18], header[19])
+
+
+def restore_check(path: str | Path) -> dict[str, object]:
+    """Is this file group one consistent state that may be opened?
+
+    A rollback-journal database with a non-empty -wal beside it is a mixed
+    group: SQLite ignores that log for the current content, so the files on
+    disk no longer describe one state, and the next writer would inherit a log
+    that belongs to another file.  A restore must never leave one behind, so
+    the check reports it instead of guessing which side is right.
+    """
+    target = _resolve_target(path)
+    report = inspect_library(target)
+    wal = Path(str(target) + "-wal")
+    wal_bytes = 0
+    try:
+        if wal.is_file():
+            wal_bytes = int(wal.stat().st_size)
+    except OSError:
+        wal_bytes = 0
+    header = _journal_header(target)
+    wal_mode = header == (2, 2)
+    reasons: list[str] = []
+    if report["status"] == "missing":
+        state = "library_missing"
+        reasons.append("library_missing")
+    elif not wal_mode and wal_bytes:
+        state = "orphan_wal"
+        reasons.append("orphan_wal")
+    else:
+        state = "ok"
+    return {
+        "path": str(target),
+        "state": state,
+        "status": report["status"],
+        "journal_mode": report["journal_mode"],
+        "wal_mode": wal_mode,
+        "header_journal": list(header) if header is not None else None,
+        "wal_bytes": wal_bytes,
+        "reasons": reasons,
+    }
 
 
 def _online_snapshot(source: Path, target: Path) -> list[dict[str, object]]:
@@ -895,13 +986,17 @@ def _encode_value(value: object) -> bytes:
 
 
 def _object_rows(connection: sqlite3.Connection) -> list[tuple[str, str, str, str | None]]:
-    """Every non-internal schema object, in a deterministic order."""
+    """Every non-internal schema object, in a deterministic order.
+
+    The internal-name test is applied here rather than in SQL, so tables,
+    views, triggers and indexes all use the same definition (PA-02).
+    """
     return [
         (str(row[0]), str(row[1]), str(row[2]), None if row[3] is None else str(row[3]))
         for row in connection.execute(
-            "SELECT type, name, tbl_name, sql FROM sqlite_master "
-            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
         )
+        if not _is_internal_object(row[1])
     ]
 
 
@@ -1092,10 +1187,42 @@ def _safe_member(directory: Path, name: object) -> Path:
     return candidate
 
 
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_BACKUP_MODES = ("online_backup", "file_group")
+
+
+def _recorded_bytes(item: dict[str, object], position: int) -> int:
+    """The recorded size, or a typed refusal; a string is never a byte count."""
+    value = item.get("bytes")
+    if type(value) is not int or value < 0:
+        raise BackupError(
+            "manifest_unreadable",
+            "member[%d].bytes is not a byte count: %r" % (position, value),
+        )
+    return int(value)
+
+
+def _recorded_digest(item: dict[str, object], position: int) -> str | None:
+    value = item.get("sha256")
+    if value is None:
+        return None
+    if not isinstance(value, str) or _HEX64_RE.fullmatch(value) is None:
+        raise BackupError(
+            "manifest_unreadable",
+            "member[%d].sha256 is not a sha256 digest: %r" % (position, value),
+        )
+    return value
+
+
 def _member_entries(
     directory: Path, manifest: dict[str, object]
 ) -> list[tuple[dict[str, object], Path]]:
-    """Validated (record, path) pairs; duplicate or colliding names refuse."""
+    """Validated (record, path) pairs; duplicate or colliding names refuse.
+
+    Every field a later stage relies on is checked here, before any file is
+    opened or copied, so a malformed manifest becomes one typed error instead
+    of a ValueError from whichever stage reads the field first (WR-04).
+    """
     raw = manifest.get("members")
     if not isinstance(raw, list):
         raw = manifest.get("files")
@@ -1103,7 +1230,7 @@ def _member_entries(
         raise BackupError("manifest_without_members")
     seen: set[str] = set()
     entries: list[tuple[dict[str, object], Path]] = []
-    for item in raw:
+    for position, item in enumerate(raw):
         if not isinstance(item, dict):
             raise BackupError("manifest_member_invalid", repr(item)[:80])
         name = item.get("name")
@@ -1112,8 +1239,119 @@ def _member_entries(
         if key in seen:
             raise BackupError("manifest_member_duplicate", str(name))
         seen.add(key)
+        _recorded_bytes(item, position)
+        _recorded_digest(item, position)
         entries.append((item, path))
     return entries
+
+
+def _sealed_names(
+    manifest: dict[str, object],
+    entries: list[tuple[dict[str, object], Path]],
+    library_name: str,
+    version: int,
+) -> list[str]:
+    """The sealed member list, checked against the member list itself."""
+    raw = manifest.get("sealed_members")
+    if raw is None or not raw:
+        return []
+    if version < 2:
+        raise BackupError("manifest_unreadable", "a v1 manifest cannot seal members")
+    if not isinstance(raw, list):
+        raise BackupError("manifest_unreadable", "sealed_members is not a list")
+    known = {str(item.get("name")) for item, _ in entries}
+    sealed: list[str] = []
+    for name in raw:
+        if not isinstance(name, str):
+            raise BackupError(
+                "manifest_unreadable", "sealed_members holds a non-string entry"
+            )
+        if name not in known:
+            raise BackupError("manifest_member_missing", name)
+        if name.endswith("-shm"):
+            raise BackupError(
+                "manifest_unreadable",
+                "%s cannot be sealed: SQLite rebuilds the shared-memory file" % name,
+            )
+        if name in sealed:
+            raise BackupError("manifest_unreadable", "sealed_members repeats %s" % name)
+        sealed.append(name)
+    if library_name not in sealed:
+        # Sealing a marker file beside an unsealed database proves nothing
+        # about the database, which is the only member that matters (WR-04).
+        raise BackupError(
+            "manifest_member_missing",
+            "%s is not sealed; sealing other files cannot vouch for the database"
+            % library_name,
+        )
+    return sealed
+
+
+def _check_mode_members(
+    manifest: dict[str, object],
+    entries: list[tuple[dict[str, object], Path]],
+    library_name: str,
+    version: int,
+) -> None:
+    """The recorded mode decides which sidecars may appear in the members."""
+    if version < 2:
+        return
+    mode = manifest.get("mode")
+    if mode not in _BACKUP_MODES:
+        raise BackupError(
+            "manifest_unreadable",
+            "mode is not one of %s: %r" % (", ".join(_BACKUP_MODES), mode),
+        )
+    if library_name.endswith(("-wal", "-shm")):
+        raise BackupError(
+            "manifest_unreadable",
+            "copy_name %s is a SQLite sidecar, not the database" % library_name,
+        )
+    if mode == "online_backup":
+        for item, _ in entries:
+            name = str(item.get("name"))
+            if name.endswith("-wal") and int(item["bytes"]):
+                raise BackupError(
+                    "manifest_unreadable",
+                    "an online snapshot is self-contained; %s cannot hold frames"
+                    % name,
+                )
+
+
+def _check_fingerprint(recorded: object, version: int) -> None:
+    """Shape of the recorded fingerprint, before it is compared with anything."""
+    if version < 2 or recorded is None:
+        return
+    if not isinstance(recorded, dict):
+        raise BackupError("manifest_unreadable", "logical_fingerprint is not an object")
+    value = recorded.get("version")
+    if type(value) is not int or value != FINGERPRINT_VERSION:
+        raise BackupError(
+            "manifest_unreadable",
+            "logical_fingerprint.version is not %d: %r" % (FINGERPRINT_VERSION, value),
+        )
+    digest = recorded.get("digest")
+    if not isinstance(digest, str) or _HEX64_RE.fullmatch(digest) is None:
+        raise BackupError(
+            "manifest_unreadable", "logical_fingerprint.digest is not a sha256 digest"
+        )
+    tables = recorded.get("tables")
+    if not isinstance(tables, dict):
+        raise BackupError(
+            "manifest_unreadable", "logical_fingerprint.tables is not an object"
+        )
+    for name, entry in tables.items():
+        if not isinstance(entry, dict):
+            raise BackupError(
+                "manifest_unreadable",
+                "logical_fingerprint.tables[%r] is not an object" % str(name),
+            )
+        entry_digest = entry.get("digest")
+        if not isinstance(entry_digest, str) or _HEX64_RE.fullmatch(entry_digest) is None:
+            raise BackupError(
+                "manifest_unreadable",
+                "logical_fingerprint.tables[%r] has no sha256 digest" % str(name),
+            )
 
 
 def _differing_tables(
@@ -1142,6 +1380,227 @@ def _differing_tables(
     return differing
 
 
+def _identity(info: os.stat_result) -> dict[str, int]:
+    """The four facts that must not move while one member is read."""
+    return {
+        "device": int(getattr(info, "st_dev", 0)),
+        "file_id": int(getattr(info, "st_ino", 0)),
+        "bytes": int(info.st_size),
+        "mtime_ns": int(info.st_mtime_ns),
+    }
+
+
+def _path_identity(path: Path) -> dict[str, object]:
+    """Identity of the name that still points at the member, or why it is gone."""
+    try:
+        return _identity(os.stat(path))
+    except FileNotFoundError:
+        return {"present": False}
+    except OSError as error:
+        return {"present": None, "error": type(error).__name__}
+
+
+def _copy_and_hash(source: Path, destination: Path) -> dict[str, object]:
+    """Copy one member byte for byte and hash exactly the bytes written.
+
+    The identity of the open file is read before and after the copy, and the
+    name is stat-ed once more afterwards.  A member rewritten while it is
+    being read therefore reports identities that disagree instead of a digest
+    assembled from two versions (PA-01).
+    """
+    digest = hashlib.sha256()
+    total = 0
+    with source.open("rb") as reader:
+        before = _identity(os.fstat(reader.fileno()))
+        with destination.open("xb") as writer:
+            while True:
+                chunk = reader.read(_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                writer.write(chunk)
+                total += len(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        after = _identity(os.fstat(reader.fileno()))
+    return {
+        "name": destination.name,
+        "bytes": total,
+        "sha256": digest.hexdigest(),
+        "before": before,
+        "after": after,
+        "path_now": _path_identity(source),
+    }
+
+
+def _readback_digest(path: Path) -> str:
+    """Hash the bytes as they now sit on disk, not as they were streamed."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verification_workspace(root: Path) -> tuple[Path, str]:
+    """A private directory for the copy, preferring the backup's own volume.
+
+    A backup on a read-only volume (an external disk mounted read-only, an
+    ACL that allows only reading) still has to be verifiable, so the system
+    temporary directory is the fallback.  The returned label says where the
+    copy really was, because "which volume did this proof land on" is part of
+    the evidence.  Neither location is ever inside the verified directory.
+    """
+    name = "%s.verify-%s" % (root.name, uuid.uuid4().hex)
+    try:
+        sibling = root.parent / name
+        sibling.mkdir(parents=False, exist_ok=False)
+    except OSError:
+        try:
+            return Path(tempfile.mkdtemp(prefix="pixivkeep-verify-")), "system_temp"
+        except OSError as error:
+            raise OSError(
+                "no writable place for the verification copy: %s" % error
+            ) from None
+    return sibling, "sibling"
+
+
+def _seal_members(
+    entries: list[tuple[dict[str, object], Path]],
+    copy_names: list[str],
+    sealed_names: list[str],
+    workspace: Path,
+) -> tuple[list[dict[str, object]], str, dict[str, object]]:
+    """Copy each member once, then judge exactly the bytes that were read.
+
+    Every copied member gets a record; only the sealed ones carry a verdict.
+    'changed' means the bytes or the file identity moved while the copy was
+    taken, so no single version can be described and the check must fail.
+    """
+    by_name = {str(item.get("name")): (item, path) for item, path in entries}
+    sealed = set(sealed_names)
+    facts: list[dict[str, object]] = []
+    states: list[str] = []
+    before: dict[str, object] = {}
+    after: dict[str, object] = {}
+    copy_seconds = 0.0
+    hash_seconds = 0.0
+    copy_bytes = 0
+    for name in copy_names:
+        record, path = by_name[name]
+        recorded_bytes = int(record["bytes"])
+        recorded_digest = record.get("sha256")
+        before[name] = _path_identity(path)
+        fact: dict[str, object] = {
+            "name": name,
+            "state": "missing",
+            "bytes_recorded": recorded_bytes,
+            "bytes_actual": 0,
+            "sha256_recorded": recorded_digest,
+            "sha256_actual": None,
+        }
+        if not path.is_file():
+            after[name] = _path_identity(path)
+            facts.append(fact)
+            states.append("missing")
+            continue
+        started = time.monotonic()
+        try:
+            copied = _copy_and_hash(path, workspace / name)
+        except FileNotFoundError:
+            after[name] = _path_identity(path)
+            facts.append(fact)
+            states.append("missing")
+            continue
+        except OSError as error:
+            # An unreadable member is an expected external condition, not a
+            # crash: it enters the public error protocol under the existing
+            # "this file cannot be read" code so the documented exit codes hold.
+            raise LibraryMaintenanceError(
+                "library_unavailable", "%s: %s" % (name, error)
+            ) from None
+        copy_seconds += time.monotonic() - started
+        copy_bytes += int(copied["bytes"])
+        after[name] = copied["path_now"]
+        started = time.monotonic()
+        readback = _readback_digest(workspace / name)
+        hash_seconds += time.monotonic() - started
+        fact["bytes_actual"] = int(copied["bytes"])
+        fact["sha256_actual"] = copied["sha256"]
+        if (
+            copied["before"] != copied["after"]
+            or copied["path_now"] != copied["before"]
+            or readback != copied["sha256"]
+        ):
+            fact["state"] = "changed"
+        elif name not in sealed:
+            fact["state"] = "not_checked"
+        elif int(copied["bytes"]) != recorded_bytes or copied["sha256"] != recorded_digest:
+            fact["state"] = "mismatch"
+        else:
+            fact["state"] = "ok"
+        states.append(str(fact["state"]))
+        facts.append(fact)
+    changed = any(state == "changed" for state in states)
+    if not changed:
+        # One more look after every member was copied: a writer that moved an
+        # earlier member while a later one was being read is caught here.
+        for index, name in enumerate(copy_names):
+            current = _path_identity(by_name[name][1])
+            after[name] = current
+            if current != before[name]:
+                changed = True
+                if states[index] == "ok":
+                    states[index] = "changed"
+                    facts[index]["state"] = "changed"
+    timings: dict[str, object] = {
+        "before": before,
+        "after": after,
+        "copy_seconds": round(copy_seconds, 6),
+        "hash_seconds": round(hash_seconds, 6),
+        "copy_bytes": copy_bytes,
+    }
+    return facts, ("changed" if changed else "stable"), timings
+
+
+def _sealed_verdict(
+    facts: list[dict[str, object]], sealed_names: list[str]
+) -> tuple[str, list[dict[str, object]]]:
+    """The worst state among the sealed members, and those members."""
+    sealed = set(sealed_names)
+    members = [fact for fact in facts if fact["name"] in sealed]
+    states = [str(fact["state"]) for fact in members]
+    if "changed" in states:
+        return "changed", members
+    if "missing" in states:
+        return "missing", members
+    if "mismatch" in states:
+        return "mismatch", members
+    if states and all(state == "ok" for state in states):
+        return "ok", members
+    return "not_checked", members
+
+
+def _recheck_members(
+    entries: list[tuple[dict[str, object], Path]],
+    copy_names: list[str],
+    before: dict[str, object],
+) -> tuple[bool, dict[str, object]]:
+    """Compare each member's identity with the one recorded before the copy."""
+    by_name = {str(item.get("name")): path for item, path in entries}
+    moved = False
+    after: dict[str, object] = {}
+    for name in copy_names:
+        current = _path_identity(by_name[name])
+        after[name] = current
+        if current != before.get(name):
+            moved = True
+    return moved, after
+
+
 def verify_backup(
     directory: str | Path, *, source: str | Path | None = None
 ) -> dict[str, object]:
@@ -1149,16 +1608,26 @@ def verify_backup(
 
     Four facts are reported apart and none of them defaults to true:
 
-    sealed      every sealed member file still matches the manifest byte for
-                byte (bookkeeping members such as -shm are excluded)
-    logical     the database still holds the sealed object definitions and
-                the sealed value of every row, at the same row counts
+    sealed      every sealed member still matches the manifest byte for byte
+    logical     the copy still holds the sealed object definitions and the
+                sealed value of every row, at the same row counts
     health      the copy passes this build's own integrity checks
     compatible  this build would open the copy
 
-    'ok' is true only when all four ran and passed.  'source_equivalent' is a
-    fifth, separate question (does the *current* source still hold the sealed
-    content) and never turns a sound backup into a broken one.
+    All of them describe one isolated copy: the member group is copied once,
+    hashed while it is read, and every later question is asked of that copy
+    through a single read transaction.  Reading the backup three times instead
+    let a file that changed between the reads satisfy each stage with a
+    different version, which is the PA-01 defect.
+
+    The guarantee ends with the copy.  A write that lands after the copy was
+    taken is outside this check; the report says so and names the copy it
+    describes, so nobody can read it as a statement about a later moment.
+
+    'ok' is true only when all four ran and passed on a copy that did not move
+    while it was taken.  'source_equivalent' is a fifth, separate question
+    (does the *current* source still hold the sealed content) and never turns
+    a sound backup into a broken one.
     """
     root = Path(directory).expanduser()
     if not root.exists():
@@ -1166,6 +1635,7 @@ def verify_backup(
     if not root.is_dir():
         raise BackupError("backup_not_a_directory", str(root))
     root = root.resolve()
+    started = time.monotonic()
     manifest = _load_manifest(root)
     version = int(manifest["manifest_version"])
     reasons: list[str] = []
@@ -1174,116 +1644,204 @@ def verify_backup(
     library_name = manifest.get("copy_name") or manifest.get("library_name")
     if not isinstance(library_name, str):
         raise BackupError("manifest_without_library_name")
-    copy_path = _safe_member(root, library_name)
+    # Resolved with the same guard as every other member; a name that leaves
+    # the directory is refused before anything is opened.
+    _safe_member(root, library_name)
+    known = {str(item.get("name")) for item, _ in entries}
+    if library_name not in known:
+        raise BackupError(
+            "manifest_member_missing",
+            "the database %s is not in the member list" % library_name,
+        )
+    sealed_names = _sealed_names(manifest, entries, library_name, version)
+    _check_mode_members(manifest, entries, library_name, version)
+    recorded = manifest.get("logical_fingerprint")
+    _check_fingerprint(recorded, version)
 
+    evidence: dict[str, object] = {
+        "scope": "manifest_only",
+        "snapshot_id": uuid.uuid4().hex,
+        "workspace": "none",
+        "path": None,
+        "cleanup": "not_needed",
+        "stability": "unknown",
+        "copy_seconds": 0.0,
+        "hash_seconds": 0.0,
+        "read_seconds": 0.0,
+        "copy_bytes": 0,
+        "source_state_before": {},
+        "source_state_after": {},
+        "started_at": _now_utc(),
+    }
     sealed_state = "not_checked"
     sealed_members: list[dict[str, object]] = []
-    sealed_names = [str(item) for item in (manifest.get("sealed_members") or [])]
-    if version >= 2 and sealed_names:
-        known = {str(item.get("name")) for item, _ in entries}
-        for name in sealed_names:
-            if name not in known:
-                raise BackupError("manifest_member_missing", name)
-        states: list[str] = []
-        for item, path in entries:
-            name = str(item.get("name"))
-            if name not in sealed_names:
+    stability = "unknown"
+    copy_report: dict[str, object] | None = None
+    actual_fingerprint: dict[str, object] | None = None
+    logical_error: str | None = None
+
+    unexpected: list[str] = []
+    try:
+        for entry in sorted(root.iterdir(), key=lambda item: item.name):
+            if entry.name in known:
                 continue
-            fact = _file_fact(path)
-            present = bool(fact["present"])
-            recorded_bytes = int(item.get("bytes") or 0)
-            actual_bytes = int(fact["bytes"]) if present else 0
-            recorded_digest = item.get("sha256")
-            actual_digest = fact["sha256"] if present else None
-            if not present:
-                state = "missing"
-            elif actual_bytes != recorded_bytes or actual_digest != recorded_digest:
-                state = "mismatch"
-            else:
-                state = "ok"
-            states.append(state)
-            sealed_members.append(
-                {
-                    "name": name,
-                    "state": state,
-                    "bytes_recorded": recorded_bytes,
-                    "bytes_actual": actual_bytes,
-                    "sha256_recorded": recorded_digest,
-                    "sha256_actual": actual_digest,
-                }
-            )
-        if "missing" in states:
-            sealed_state = "missing"
-        elif "mismatch" in states:
-            sealed_state = "mismatch"
+            if entry.name in {MANIFEST_NAME, MANIFEST_NAME + ".tmp"}:
+                continue
+            unexpected.append(entry.name)
+    except OSError:
+        unexpected = []
+    if unexpected:
+        # A stranger in the directory is not a change to the sealed facts, so
+        # it is reported and never deleted.
+        warnings.append("unexpected_members")
+    evidence["unexpected_members"] = unexpected
+
+    workspace: Path | None = None
+    try:
+        try:
+            workspace, where = _verification_workspace(root)
+        except OSError as error:
+            reasons.append("verify_workspace_unavailable")
+            warnings.append("verify_workspace_unavailable")
+            evidence["workspace"] = "unavailable"
+            evidence["detail"] = str(error)
         else:
-            sealed_state = "ok"
-        if sealed_state != "ok":
-            reasons.append("sealed_" + sealed_state)
-    elif version >= 2:
-        warnings.append("manifest_without_sealed_members")
+            evidence["workspace"] = where
+            evidence["path"] = str(workspace)
+            copy_names = sealed_names or [library_name]
+            facts, stability, timings = _seal_members(
+                entries, copy_names, sealed_names, workspace
+            )
+            evidence["source_state_before"] = timings["before"]
+            evidence["source_state_after"] = timings["after"]
+            evidence["copy_seconds"] = timings["copy_seconds"]
+            evidence["hash_seconds"] = timings["hash_seconds"]
+            evidence["copy_bytes"] = timings["copy_bytes"]
+            evidence["stability"] = stability
+            evidence["scope"] = "isolated_copy"
+            isolated = workspace / library_name
+            if isolated.is_file():
+                read_started = time.monotonic()
+                try:
+                    with contextlib.closing(_connect_readonly(isolated)) as opened:
+                        # One connection and one read transaction: the object
+                        # and row digest and the integrity checks describe the
+                        # same snapshot of the same copy.
+                        if version >= 2 and isinstance(recorded, dict):
+                            actual_fingerprint = _fingerprint_from_connection(opened)
+                        copy_report = inspect_library(isolated, connection=opened)
+                except sqlite3.Error as error:
+                    logical_error = _sqlite_reason(error)
+                    warnings.append("copy_unreadable")
+                except LibraryMaintenanceError as error:
+                    logical_error = str(getattr(error, "code", "library_unreadable"))
+                    warnings.append("copy_logical_unreadable")
+                evidence["read_seconds"] = round(time.monotonic() - read_started, 6)
+            else:
+                warnings.append("copy_missing")
+            # The last look comes after every read, so a member rewritten at any
+            # point of this check is reported as changed instead of described.
+            moved, final_states = _recheck_members(
+                entries, copy_names, timings["before"]
+            )
+            evidence["source_state_after"] = final_states
+            if moved and stability != "changed":
+                stability = "changed"
+                for fact in facts:
+                    if fact["state"] == "ok":
+                        fact["state"] = "changed"
+            evidence["stability"] = stability
+            evidence["scope"] = "isolated_copy"
+            evidence["member_states"] = {
+                str(fact["name"]): str(fact["state"]) for fact in facts
+            }
+            sealed_state, sealed_members = _sealed_verdict(facts, sealed_names)
+            if version >= 2 and not sealed_names:
+                warnings.append("manifest_without_sealed_members")
+            if sealed_state != "ok":
+                reasons.append("sealed_" + sealed_state)
+            if stability == "changed":
+                reasons.append("changed_during_check")
+    finally:
+        if workspace is not None:
+            try:
+                _discard(workspace)
+            except OSError as error:
+                evidence["cleanup"] = "failed"
+                evidence["left_behind"] = str(workspace)
+                warnings.append("verify_cleanup_failed")
+                warnings.append("verify_cleanup_failed:" + type(error).__name__)
+            else:
+                evidence["cleanup"] = "ok"
     if sealed_state == "not_checked":
         reasons.append("sealed_not_checked")
 
-    recorded = manifest.get("logical_fingerprint")
     logical_state = "not_checked"
     logical: dict[str, object] = {"state": "not_checked"}
-    if version >= 2 and isinstance(recorded, dict):
-        try:
-            actual_fingerprint = logical_fingerprint(copy_path)
-        except LibraryMaintenanceError as error:
-            warnings.append("copy_logical_unreadable")
-            logical = {
-                "state": "not_checked",
-                "reason": getattr(error, "code", "library_unreadable"),
-                "recorded_digest": recorded.get("digest"),
-            }
-        else:
-            recorded_digest = recorded.get("digest")
-            recorded_version = recorded.get("version")
-            digest_ok = (
-                recorded_version == FINGERPRINT_VERSION
-                and isinstance(recorded_digest, str)
-                and recorded_digest == actual_fingerprint["digest"]
-            )
-            logical_state = "ok" if digest_ok else "mismatch"
-            logical = {
-                "state": logical_state,
-                "recorded_digest": recorded_digest,
-                "actual_digest": actual_fingerprint["digest"],
-                "rows_recorded": recorded.get("rows"),
-                "rows_actual": actual_fingerprint["rows"],
-                "tables_differing": _differing_tables(recorded, actual_fingerprint),
-                "checked_at": actual_fingerprint["computed_at"],
-            }
-            if logical_state == "mismatch":
-                reasons.append("logical_mismatch")
+    if version < 2:
+        logical = {"state": "not_checked", "reason": "manifest_too_old"}
+        reasons.append("manifest_too_old")
+    elif not isinstance(recorded, dict):
+        logical = {"state": "not_checked", "reason": "manifest_without_fingerprint"}
+    elif copy_report is None:
+        logical = {
+            "state": "not_checked",
+            "reason": logical_error or "copy_missing",
+        }
+    elif actual_fingerprint is None:
+        logical = {
+            "state": "not_checked",
+            "reason": logical_error or "copy_logical_unreadable",
+            "recorded_digest": recorded.get("digest"),
+        }
     else:
-        reason = "manifest_too_old" if version < 2 else "manifest_without_fingerprint"
-        logical = {"state": "not_checked", "reason": reason}
-        if version < 2:
-            reasons.append("manifest_too_old")
+        recorded_digest = recorded.get("digest")
+        digest_ok = recorded_digest == actual_fingerprint["digest"]
+        logical_state = "ok" if digest_ok else "mismatch"
+        logical = {
+            "state": logical_state,
+            "recorded_digest": recorded_digest,
+            "actual_digest": actual_fingerprint["digest"],
+            "rows_recorded": recorded.get("rows"),
+            "rows_actual": actual_fingerprint["rows"],
+            "tables_differing": _differing_tables(recorded, actual_fingerprint),
+            "checked_at": actual_fingerprint["computed_at"],
+        }
+        if logical_state == "mismatch":
+            reasons.append("logical_mismatch")
 
-    copy_report = inspect_library(copy_path)
-    health_state = "ok" if copy_report["healthy"] else "failed"
-    if health_state != "ok":
-        reasons.append("copy_unhealthy")
-    compatible_ok = copy_report["status"] == "compatible"
-    if not compatible_ok:
-        reasons.append("copy_not_compatible")
-    health = {
-        "state": health_state,
-        "status": copy_report["status"],
-        "quick_check": copy_report["quick_check"],
-        "integrity_check": copy_report["integrity_check"],
-        "foreign_key_violations": copy_report["foreign_key_violations"],
-    }
-    compatible = {
-        "state": "ok" if compatible_ok else "mismatch",
-        "status": copy_report["status"],
-        "declared_ok": bool(compatible_ok),
-        "reasons": copy_report["reasons"],
-    }
+    if copy_report is None:
+        health_state = "not_checked"
+        compatible_ok = False
+        health: dict[str, object] = {
+            "state": "not_checked",
+            "reason": logical_error or "copy_unreadable",
+        }
+        compatible: dict[str, object] = {
+            "state": "not_checked",
+            "declared_ok": False,
+            "reasons": [],
+        }
+    else:
+        health_state = "ok" if copy_report["healthy"] else "failed"
+        if health_state != "ok":
+            reasons.append("copy_unhealthy")
+        compatible_ok = copy_report["status"] == "compatible"
+        if not compatible_ok:
+            reasons.append("copy_not_compatible")
+        health = {
+            "state": health_state,
+            "status": copy_report["status"],
+            "quick_check": copy_report["quick_check"],
+            "integrity_check": copy_report["integrity_check"],
+            "foreign_key_violations": copy_report["foreign_key_violations"],
+        }
+        compatible = {
+            "state": "ok" if compatible_ok else "mismatch",
+            "status": copy_report["status"],
+            "declared_ok": bool(compatible_ok),
+            "reasons": copy_report["reasons"],
+        }
 
     source_equivalent: dict[str, object] = {"state": "not_checked",
                                             "reason": "no_source_given"}
@@ -1320,7 +1878,10 @@ def verify_backup(
         and logical_state == "ok"
         and health_state == "ok"
         and compatible_ok
+        and stability == "stable"
     )
+    evidence["seconds"] = round(time.monotonic() - started, 6)
+    evidence["checked_at"] = _now_utc()
     return {
         "mode": "manifest",
         "question": "sealed_backup",
@@ -1337,6 +1898,7 @@ def verify_backup(
         "health": health,
         "compatible": compatible,
         "source_equivalent": source_equivalent,
+        "evidence": evidence,
         "ok": bool(ok),
         "reasons": sorted(set(reasons)),
         "warnings": sorted(set(warnings)),
@@ -1499,9 +2061,9 @@ def switch_plan(path: str | Path) -> dict[str, object]:
             "预期 status=compatible。",
             "记录当前版本（git rev-parse HEAD）与本文件字节数 %d。" % report["size_bytes"],
             "切换入口后启动；启动后再次运行 maintain.py inspect，状态仍须是 compatible。",
-            "回退：关闭程序，把备份目录里的 %s 覆盖回原路径；默认的单文件快照要求一并删除"
-            "原路径旁边的 -wal/-shm，而 --mode file_group 的整组备份要整套复制回去。"
-            % Path(library).name,
+            "回退：关闭程序后按恢复协议执行——先把当前文件组（主库与同目录的 -wal/-shm）"
+            "整组移入同卷保留目录，再放回备份组（online 快照是自包含单文件，file_group "
+            "整组放回）；不要只覆盖主文件，也不要直接删除 -wal。",
         ]
         if report["wal_bytes"]:
             steps.append(
@@ -1871,6 +2433,22 @@ def _verify_lines(result: dict[str, object]) -> list[str]:
     differing = logical.get("tables_differing") or []
     if differing:
         lines.append("  内容不同的表: " + ", ".join(str(name) for name in differing))
+    evidence = result.get("evidence") or {}
+    if evidence.get("scope") == "isolated_copy":
+        lines.append(
+            "证据: 隔离副本（%s）已复制 %d 字节，复制 %.3f 秒 / 回读哈希 %.3f 秒 / 读取 %.3f 秒"
+            % (
+                "同级目录" if evidence.get("workspace") == "sibling" else "系统临时目录",
+                int(evidence.get("copy_bytes") or 0),
+                float(evidence.get("copy_seconds") or 0.0),
+                float(evidence.get("hash_seconds") or 0.0),
+                float(evidence.get("read_seconds") or 0.0),
+            )
+        )
+        if evidence.get("stability") == "changed":
+            lines.append("注意: 复制期间备份文件被改动，本次核验不能描述任何一个版本。")
+        if evidence.get("cleanup") == "failed":
+            lines.append("提示: 隔离副本未能删除：%s" % evidence.get("left_behind"))
     lines.append("健康: %s" % result["health"]["state"])
     lines.append("兼容: %s" % result["compatible"]["state"])
     lines.append("与当前源: %s" % result["source_equivalent"]["state"])
@@ -1878,6 +2456,9 @@ def _verify_lines(result: dict[str, object]) -> list[str]:
         lines.append("原因: " + ", ".join(result["reasons"]))
     if result["warnings"]:
         lines.append("提示: " + ", ".join(result["warnings"]))
+    lines.append(
+        "边界: 以上结论描述那份隔离副本；核验返回之后备份目录再被改动，不在本次保证内。"
+    )
     lines.append("结论: ok=%s" % result["ok"])
     if int(result["manifest_version"]) < 2:
         lines.append(
