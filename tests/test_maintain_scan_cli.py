@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
+from core import library_maintenance as maintenance
 from core.library_maintenance import main
 from core.library_repository import LibraryRepository
 
@@ -140,8 +143,9 @@ def test_the_text_output_names_the_counts_and_the_verdict(tmp_path, capsys):
 
     printed = capsys.readouterr().out
     assert code == 0
-    assert "核验: 1 行" in printed
-    assert "每一行都与记录一致" in printed
+    # Contract v5 wording: coverage is stated, not implied.
+    assert "核验: 覆盖 1 行（匹配 1，排除 0，无法核验 0）" in printed
+    assert "本次核验覆盖全部 1 行，全部与记录一致" in printed
 
 
 def test_a_malformed_cursor_is_refused_instead_of_ignored(tmp_path, capsys):
@@ -183,9 +187,14 @@ def test_unverifiable_rows_are_counted_out_loud(tmp_path, capsys):
     code = main(["scan", str(database), "--max-bytes", "1"])
 
     printed = capsys.readouterr().out
-    assert code == 0
-    assert "无法核验 1" in printed
-    assert "另有 1 行没有可核验的记录" in printed
+    # Contract v5: a row nobody could read is not "all verified", and the exit
+    # code says so (5 = not covered / unverifiable).  The engine's own reason is
+    # reported verbatim instead of being relabelled as a legacy row.
+    assert code == 5
+    assert "无法核验: file_exceeds_budget: 1" in printed
+    assert "本次只核验了 0/1 行" in printed
+    assert "每一行都与记录一致" not in printed
+    assert "旧行或缺摘要" not in printed
 
 
 def test_an_unreadable_ledger_exits_three(tmp_path, capsys):
@@ -197,3 +206,211 @@ def test_an_unreadable_ledger_exits_three(tmp_path, capsys):
     assert code == 3
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "error"
+
+
+def _backup_of(tmp_path, database):
+    return maintenance.backup_library(database, tmp_path / "backups", label="cli")
+
+
+def _insert_legacy_artifact(database, relative_path, data):
+    """A pre-digest row: size recorded, sha256 NULL, so nobody can verify it."""
+    stamp = datetime.now(timezone.utc).isoformat()
+    reference = json.dumps(
+        {"kind": "project", "relative_path": relative_path, "root_id": "project"},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    connection = sqlite3.connect(str(database))
+    try:
+        connection.execute(
+            "INSERT INTO artifacts (artifact_id, delivery_id, job_id, illust_id, page_index,"
+            " artist_id, output_key, output_ref_json, quality_json, media_type, size, sha256,"
+            " verification, completed_at, legacy_origin, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy-1", "delivery-1", "job-1", "999", 0, "7", "key-1",
+                reference, "{}", "image/jpeg", len(data), None,
+                "structure_checked", stamp, None, stamp,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_scan_exits_zero_for_an_empty_library(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+
+    code = main(["scan", str(database)])
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "库里没有已登记的成品可核验" in printed
+
+
+def test_scan_allow_unknown_only_skips_legacy_rows(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+    data = b"\xff\xd8legacy row\xff\xd9"
+    _write_file(tmp_path, "downl_Pixiv/artist/8_p0.jpg", data)
+    _insert_legacy_artifact(database, "downl_Pixiv/artist/8_p0.jpg", data)
+
+    assert main(["scan", str(database)]) == 5
+    printed = capsys.readouterr().out
+    assert "无法核验: no_recorded_digest: 1" in printed
+    assert "每一行都与记录一致" not in printed
+
+    code = main(["scan", str(database), "--allow-unknown"])
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "已按 --allow-unknown 跳过 1 行无摘要旧行" in printed
+
+
+def test_verify_cli_accepts_a_fresh_backup(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+    manifest = _backup_of(tmp_path, database)
+    directory = Path(manifest["manifest_path"]).parent
+
+    code = main(["verify", str(directory), "--json"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["sealed"]["state"] == "ok"
+    assert payload["logical"]["state"] == "ok"
+    assert payload["manifest_version"] == 2
+
+
+def test_verify_cli_exits_two_for_a_tampered_backup(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+    manifest = _backup_of(tmp_path, database)
+    directory = Path(manifest["manifest_path"]).parent
+    copy = directory / "library.sqlite3"
+    data = bytearray(copy.read_bytes())
+    data[-1] = data[-1] ^ 0xFF
+    copy.write_bytes(bytes(data))
+
+    code = main(["verify", str(directory)])
+
+    printed = capsys.readouterr().out
+    assert code == 2
+    assert "结论: ok=False" in printed
+    assert "封存校验 mismatch" in printed
+
+
+def test_verify_cli_exits_three_for_a_missing_backup_directory(tmp_path, capsys):
+    code = main(["verify", str(tmp_path / "absent"), "--json"])
+
+    assert code == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["code"] == "backup_directory_missing"
+
+
+def test_verify_cli_two_paths_is_a_deprecated_compare(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+    second = _empty_library(tmp_path / "other")
+
+    code = main(["verify", str(database), str(second)])
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "已弃用" in printed
+    assert "结论: ok=True" in printed
+
+
+def test_compare_cli_exits_two_for_a_changed_copy(tmp_path, capsys):
+    database = _empty_library(tmp_path)
+    data = b"\xff\xd8compare row\xff\xd9"
+    _write_file(tmp_path, "downl_Pixiv/artist/9_p0.jpg", data)
+    _insert_artifact(database, "downl_Pixiv/artist/9_p0.jpg", data)
+    other = tmp_path / "other" / "library.sqlite3"
+    other.parent.mkdir()
+    shutil.copy2(database, other)
+    connection = sqlite3.connect(other)
+    try:
+        connection.execute("UPDATE artifacts SET size = size + 1")
+        connection.commit()
+    finally:
+        connection.close()
+
+    code = main(["compare", str(database), str(other)])
+
+    printed = capsys.readouterr().out
+    assert code == 2
+    assert "内容一致=False" in printed
+    assert "copy_content_mismatch" in printed
+
+
+def test_scan_lines_say_no_work_only_when_the_ledger_is_empty():
+    """Coverage "empty" can be a cursor at the end, not an empty library."""
+    empty_ledger = {
+        "stats": {"library_rows": 0, "examined": 0, "matched": 0, "unknown": 0},
+        "rows": [],
+        "coverage": "complete",
+    }
+    assert "库里没有已登记的成品可核验" in maintenance._scan_lines(empty_ledger)[0]
+
+    finished_cursor = {
+        "stats": {"library_rows": 5, "examined": 0, "matched": 0, "unknown": 0},
+        "rows": [],
+        "coverage": "empty",
+    }
+    printed = "\n".join(maintenance._scan_lines(finished_cursor))
+    assert "库里没有已登记的成品可核验" not in printed
+    assert "每一行都与记录一致" not in printed
+
+
+def test_scan_lines_report_the_ledger_error_instead_of_a_verdict():
+    report = {
+        "stats": {"examined": 0, "matched": 0, "unknown": 0},
+        "rows": [],
+        "coverage": "error",
+        "ledger": {"state": "error", "code": "ledger_unreadable",
+                   "last_safe_cursor": ["2026-11-14T00:00:00+00:00", "artifact-1"]},
+    }
+    printed = "\n".join(maintenance._scan_lines(report))
+    assert "账本读不出来" in printed
+    assert "最后安全游标: 2026-11-14T00:00:00+00:00,artifact-1" in printed
+    assert "本次没有给出任何核验结论" in printed
+    assert "一致" not in printed
+
+
+def test_scan_outcome_treats_coverage_error_as_a_ledger_failure():
+    report = {"coverage": "error", "stats": {}, "rows": []}
+    code, findings = maintenance._scan_outcome(report, allow_unknown=False)
+    assert code == 3
+    assert findings == []
+
+
+def test_scan_outcome_requires_complete_coverage_before_allow_unknown():
+    report = {
+        "coverage": "page",
+        "rows": [{"verdict": "unknown", "reason": "no_recorded_digest"}],
+        "stats": {"examined": 1, "matched": 0, "unknown": 1,
+                  "unknown_reasons": {"no_recorded_digest": 1}},
+        "truncated": True,
+    }
+    assert maintenance._scan_outcome(report, allow_unknown=False)[0] == 5
+    assert maintenance._scan_outcome(report, allow_unknown=True)[0] == 5
+
+
+def test_scan_outcome_lets_allow_unknown_skip_only_a_legacy_row():
+    report = {
+        "coverage": "complete",
+        "rows": [{"verdict": "unknown", "reason": "no_recorded_digest"}],
+        "stats": {"examined": 1, "matched": 0, "unknown": 1,
+                  "unknown_reasons": {"no_recorded_digest": 1}},
+        "truncated": False,
+    }
+    assert maintenance._scan_outcome(report, allow_unknown=False)[0] == 5
+    assert maintenance._scan_outcome(report, allow_unknown=True)[0] == 0
+
+
+def test_scan_outcome_never_waves_a_malformed_row_through():
+    report = {
+        "coverage": "complete",
+        "rows": [{"verdict": "unknown", "reason": "artifact_record_invalid"}],
+        "stats": {"examined": 1, "matched": 0, "unknown": 1,
+                  "unknown_reasons": {"artifact_record_invalid": 1}},
+        "truncated": False,
+    }
+    assert maintenance._scan_outcome(report, allow_unknown=True)[0] == 5

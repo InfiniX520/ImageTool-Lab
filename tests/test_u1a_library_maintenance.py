@@ -874,3 +874,328 @@ def test_the_script_entry_point_is_silent_on_import():
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# Logical content fingerprint (contract v5 section 1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_fingerprint_is_stable_for_the_same_database(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=3)
+    first = m.logical_fingerprint(library)
+    second = m.logical_fingerprint(library)
+    assert first["version"] == m.FINGERPRINT_VERSION
+    assert first["digest"] == second["digest"]
+    assert first["rows"] == second["rows"]
+    assert first["rows"]["jobs"] == 3
+    assert len(first["objects_digest"]) == 64
+
+
+def test_one_changed_value_changes_the_fingerprint_not_the_counts(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=2)
+    before = m.logical_fingerprint(library)
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("UPDATE jobs SET state='cancelled' WHERE job_id='job-0000'")
+    finally:
+        connection.close()
+    after = m.logical_fingerprint(library)
+    assert after["rows"] == before["rows"]
+    assert after["digest"] != before["digest"]
+    assert after["tables"]["jobs"]["digest"] != before["tables"]["jobs"]["digest"]
+
+
+def test_swapping_two_values_changes_the_fingerprint(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=2)
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("UPDATE jobs SET request_id='a' WHERE job_id='job-0000'")
+        connection.execute("UPDATE jobs SET request_id='b' WHERE job_id='job-0001'")
+    finally:
+        connection.close()
+    before = m.logical_fingerprint(library)["digest"]
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("UPDATE jobs SET request_id='b' WHERE job_id='job-0000'")
+        connection.execute("UPDATE jobs SET request_id='a' WHERE job_id='job-0001'")
+    finally:
+        connection.close()
+    after = m.logical_fingerprint(library)["digest"]
+    assert after != before
+
+
+def test_null_empty_text_and_empty_blob_are_distinct_values(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3")
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("CREATE TABLE scratch(value)")
+        connection.execute("INSERT INTO scratch(value) VALUES (NULL)")
+    finally:
+        connection.close()
+    null_digest = m.logical_fingerprint(library)["digest"]
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("UPDATE scratch SET value=''")
+    finally:
+        connection.close()
+    empty_text = m.logical_fingerprint(library)["digest"]
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("UPDATE scratch SET value=x''")
+    finally:
+        connection.close()
+    empty_blob = m.logical_fingerprint(library)["digest"]
+    assert len({null_digest, empty_text, empty_blob}) == 3
+
+
+def test_an_integer_and_its_text_form_do_not_collide(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3")
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("CREATE TABLE scratch(value)")
+        connection.execute("INSERT INTO scratch(value) VALUES (1)")
+    finally:
+        connection.close()
+    integer_digest = m.logical_fingerprint(library)["digest"]
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute("UPDATE scratch SET value='1'")
+    finally:
+        connection.close()
+    text_digest = m.logical_fingerprint(library)["digest"]
+    assert integer_digest != text_digest
+
+
+def test_the_fingerprint_covers_extra_objects(tmp_path):
+    plain = make_library(tmp_path / "a" / "library.sqlite3", jobs=1)
+    indexed = make_library(
+        tmp_path / "b" / "library.sqlite3",
+        jobs=1,
+        statements=("CREATE INDEX extra_same_name ON jobs(state)",),
+    )
+    left = m.logical_fingerprint(plain)
+    right = m.logical_fingerprint(indexed)
+    assert left["rows"] == right["rows"]
+    assert left["objects_digest"] != right["objects_digest"]
+    assert left["digest"] != right["digest"]
+
+
+def test_the_fingerprint_of_a_without_rowid_table_is_deterministic(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3")
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute(
+            "CREATE TABLE scratch(key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID"
+        )
+        for index in range(5):
+            connection.execute(
+                "INSERT INTO scratch(key,value) VALUES (?,?)",
+                ("k%d" % index, "v%d" % index),
+            )
+    finally:
+        connection.close()
+    first = m.logical_fingerprint(library)
+    second = m.logical_fingerprint(library)
+    assert first["digest"] == second["digest"]
+    assert first["tables"]["scratch"]["order"] == "primary_key"
+    assert first["rows"]["scratch"] == 5
+
+
+def test_the_fingerprint_does_not_depend_on_the_read_batch_size(tmp_path, monkeypatch):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=40)
+    default = m.logical_fingerprint(library)["digest"]
+    monkeypatch.setattr(m, "FINGERPRINT_CHUNK_ROWS", 7)
+    chunked = m.logical_fingerprint(library)["digest"]
+    assert chunked == default
+
+
+# ---------------------------------------------------------------------------
+# Sealed backup verification (contract v5 section 1.4)
+# ---------------------------------------------------------------------------
+
+
+def test_backup_writes_a_sealed_v2_manifest(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=2)
+    manifest = m.backup_library(library, tmp_path / "backups", label="sealed")
+    directory = Path(manifest["manifest_path"]).parent
+    payload = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    assert payload["manifest_version"] == 2
+    assert payload["finalizer"]["sealed_by"] == "backup_library"
+    assert payload["sealed_members"] == ["library.sqlite3"]
+    assert [item["name"] for item in payload["members"]] == ["library.sqlite3"]
+    fingerprint = payload["logical_fingerprint"]
+    assert fingerprint["version"] == m.FINGERPRINT_VERSION
+    assert len(fingerprint["digest"]) == 64
+    assert fingerprint["rows"]["jobs"] == 2
+    assert set(payload) >= {"members", "sealed_members", "finalizer", "files"}
+
+
+def test_verify_backup_accepts_a_fresh_backup_without_touching_it(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=2)
+    manifest = m.backup_library(library, tmp_path / "backups", label="fresh")
+    directory = Path(manifest["manifest_path"]).parent
+    before = facts(directory / "library.sqlite3")
+    result = m.verify_backup(directory)
+    after = facts(directory / "library.sqlite3")
+    assert result["ok"] is True
+    assert result["sealed"]["state"] == "ok"
+    assert result["logical"]["state"] == "ok"
+    assert result["health"]["state"] == "ok"
+    assert result["compatible"]["state"] == "ok"
+    assert result["source_equivalent"]["state"] == "not_checked"
+    assert result["reasons"] == []
+    assert before == after
+
+
+def test_verify_backup_rejects_a_same_count_row_change(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=2)
+    manifest = m.backup_library(library, tmp_path / "backups", label="changed")
+    directory = Path(manifest["manifest_path"]).parent
+    copy = directory / "library.sqlite3"
+    connection = sqlite3.connect(copy, isolation_level=None)
+    try:
+        connection.execute("UPDATE jobs SET state='cancelled'")
+    finally:
+        connection.close()
+    result = m.verify_backup(directory)
+    assert result["ok"] is False
+    assert result["logical"]["state"] == "mismatch"
+    assert "logical_mismatch" in result["reasons"]
+    assert result["sealed"]["state"] == "mismatch"
+
+
+def test_verify_backup_rejects_a_forged_logical_digest(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1)
+    manifest = m.backup_library(library, tmp_path / "backups", label="forged")
+    directory = Path(manifest["manifest_path"]).parent
+    path = directory / "manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["logical_fingerprint"]["digest"] = "0" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = m.verify_backup(directory)
+    assert result["sealed"]["state"] == "ok"
+    assert result["logical"]["state"] == "mismatch"
+    assert result["ok"] is False
+
+
+def test_verify_backup_reports_a_missing_member(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1)
+    manifest = m.backup_library(library, tmp_path / "backups", label="gone")
+    directory = Path(manifest["manifest_path"]).parent
+    (directory / "library.sqlite3").unlink()
+    result = m.verify_backup(directory)
+    assert result["sealed"]["state"] == "missing"
+    assert result["ok"] is False
+    assert "sealed_missing" in result["reasons"]
+
+
+def test_verify_backup_refuses_a_missing_manifest(tmp_path):
+    directory = tmp_path / "empty"
+    directory.mkdir()
+    with pytest.raises(m.BackupError) as caught:
+        m.verify_backup(directory)
+    assert caught.value.code == "manifest_missing"
+
+
+def test_verify_backup_refuses_an_unknown_manifest_version(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3")
+    manifest = m.backup_library(library, tmp_path / "backups", label="v99")
+    directory = Path(manifest["manifest_path"]).parent
+    path = directory / "manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["manifest_version"] = 99
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(m.BackupError) as caught:
+        m.verify_backup(directory)
+    assert caught.value.code == "manifest_version_unsupported"
+
+
+def test_verify_backup_refuses_a_v1_manifest(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1)
+    manifest = m.backup_library(library, tmp_path / "backups", label="v1")
+    directory = Path(manifest["manifest_path"]).parent
+    path = directory / "manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["manifest_version"] = 1
+    for key in ("logical_fingerprint", "members", "sealed_members", "finalizer"):
+        payload.pop(key, None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = m.verify_backup(directory)
+    assert result["ok"] is False
+    assert result["logical"]["state"] == "not_checked"
+    assert "manifest_too_old" in result["reasons"]
+    assert result["sealed"]["state"] == "not_checked"
+
+
+def test_verify_backup_refuses_a_member_outside_the_directory(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3")
+    manifest = m.backup_library(library, tmp_path / "backups", label="traversal")
+    directory = Path(manifest["manifest_path"]).parent
+    path = directory / "manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["members"][0]["name"] = "../outside.sqlite3"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(m.BackupError) as caught:
+        m.verify_backup(directory)
+    assert caught.value.code == "manifest_member_invalid"
+
+
+def test_verify_backup_refuses_case_colliding_members(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3")
+    manifest = m.backup_library(library, tmp_path / "backups", label="collide")
+    directory = Path(manifest["manifest_path"]).parent
+    path = directory / "manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["members"].append(dict(payload["members"][0], name="LIBRARY.SQLITE3"))
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(m.BackupError) as caught:
+        m.verify_backup(directory)
+    assert caught.value.code == "manifest_member_duplicate"
+
+
+def test_verify_backup_separates_a_changed_source_from_a_sound_backup(tmp_path):
+    library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=2)
+    manifest = m.backup_library(library, tmp_path / "backups", label="drift")
+    directory = Path(manifest["manifest_path"]).parent
+    connection = sqlite3.connect(library, isolation_level=None)
+    try:
+        connection.execute(
+            "INSERT INTO jobs(job_id,parent_job_id,request_id,request_version,"
+            "request_json,scope_fingerprint,account_ref,state,created_at,updated_at) "
+            "VALUES ('job-new',NULL,'request',1,'{}','scope','pixiv:1','queued',"
+            "'2026-11-14T00:00:00+00:00','2026-11-14T00:00:00+00:00')"
+        )
+    finally:
+        connection.close()
+    result = m.verify_backup(directory, source=library)
+    assert result["sealed"]["state"] == "ok"
+    assert result["logical"]["state"] == "ok"
+    assert result["source_equivalent"]["state"] == "mismatch"
+    assert "source_changed_since_backup" in result["warnings"]
+    assert result["ok"] is True
+
+
+def test_compare_library_accepts_two_identical_databases(tmp_path):
+    first = make_library(tmp_path / "a" / "library.sqlite3", jobs=2)
+    second = make_library(tmp_path / "b" / "library.sqlite3", jobs=2)
+    result = m.compare_library(first, second)
+    assert result["ok"] is True
+    assert result["logical_state"] == "ok"
+    assert result["objects_match_source"] is True
+    assert result["reasons"] == []
+
+
+def test_compare_library_reports_equal_counts_with_different_values(tmp_path):
+    first = make_library(tmp_path / "a" / "library.sqlite3", jobs=2)
+    second = make_library(tmp_path / "b" / "library.sqlite3", jobs=2)
+    connection = sqlite3.connect(second, isolation_level=None)
+    try:
+        connection.execute("UPDATE jobs SET state='cancelled'")
+    finally:
+        connection.close()
+    result = m.compare_library(first, second)
+    assert result["ok"] is False
+    assert result["counts_match"] is True
+    assert result["logical"]["state"] == "mismatch"
+    assert "copy_content_mismatch" in result["reasons"]

@@ -43,6 +43,7 @@ import json
 import os
 import re
 import sqlite3
+import struct
 import sys
 from pathlib import Path
 
@@ -56,8 +57,12 @@ from core.library_repository import (
 )
 from core.task_contracts import ContractError
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
+SUPPORTED_MANIFEST_VERSIONS = (1, 2)
 MANIFEST_NAME = "manifest.json"
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+FINGERPRINT_VERSION = 1
+FINGERPRINT_CHUNK_ROWS = 1000
 _CHUNK_BYTES = 1024 * 1024
 _READ_TIMEOUT_SECONDS = 2.0
 _BACKUP_SIBLINGS = ("", "-wal", "-shm")
@@ -75,6 +80,11 @@ _EXIT_BY_STATUS = {
     "unreadable": 3,
 }
 _EXIT_REFUSED = 4
+_EXIT_INCOMPLETE = 5
+# Legacy rows only: a record that never carried a digest or a size cannot be
+# verified by anyone, so --allow-unknown may skip exactly these reasons.  A
+# malformed value stays a reason to report, never something to wave through.
+_LEGACY_UNKNOWN_REASONS = frozenset({"no_recorded_size", "no_recorded_digest"})
 
 
 class LibraryMaintenanceError(RuntimeError):
@@ -623,29 +633,6 @@ def _file_group_copy(
     return files
 
 
-def _objects_match(
-    first: dict[str, object], second: dict[str, object]
-) -> bool:
-    """Two readable databases hold the same SQL objects.
-
-    Comparing each side against the shared declaration is equivalent to
-    comparing them with each other, and it needs no second copy of the DDL.
-    """
-    if first["status"] in {"missing", "empty", "unreadable"}:
-        return False
-    if second["status"] in {"missing", "empty", "unreadable"}:
-        return False
-    return all(
-        first[key] == second[key]
-        for key in (
-            "objects_actual",
-            "missing_objects",
-            "extra_objects",
-            "mismatched_objects",
-        )
-    )
-
-
 def backup_library(
     path: str | Path,
     destination_dir: str | Path,
@@ -726,7 +713,14 @@ def backup_library(
     after = _group(source)
     after_counts = _source_counts(source)
     copy_report = inspect_library(copy_path)
-    objects_match = _objects_match(source_report, copy_report)
+    # Compare the two sides with each other, not each side against the shared
+    # declaration: two databases can deviate from it in different ways and
+    # still look identical to a name-set comparison (WC-01).
+    source_definitions = _definitions_or_none(source, source_report["status"])
+    copy_definitions = _definitions_or_none(copy_path, copy_report["status"])
+    objects_match = (
+        source_definitions is not None and source_definitions == copy_definitions
+    )
     counts_match = (
         before_counts is not None and copy_report["counts"] == before_counts
     )
@@ -767,6 +761,16 @@ def backup_library(
             problems.append("counts_mismatch")
         else:
             warnings.append("counts_advanced_during_backup")
+    for item in files:
+        # -shm is SQLite bookkeeping rebuilt on the next open; every other
+        # member carries content, so it is sealed byte for byte.
+        item["sealed"] = not str(item["name"]).endswith("-shm")
+    try:
+        fingerprint = logical_fingerprint(copy_path)
+    except LibraryMaintenanceError as error:
+        fingerprint = None
+        problems.append("copy_logical_unreadable")
+        warnings.append(getattr(error, "code", "library_unreadable"))
     if problems:
         _discard(target)
         raise BackupError("backup_verification_failed", ",".join(sorted(set(problems))))
@@ -791,6 +795,18 @@ def backup_library(
         "journal_mode_source": source_report["journal_mode"],
         "journal_mode_copy": copy_report["journal_mode"],
         "files": files,
+        "members": [
+            {
+                "name": str(item["name"]),
+                "bytes": int(item["bytes"]),
+                "sha256": item["sha256"],
+            }
+            for item in files
+        ],
+        "sealed_members": [
+            str(item["name"]) for item in files if item.get("sealed")
+        ],
+        "logical_fingerprint": fingerprint,
         "copy_name": source.name,
         "copy_bytes": sum(int(item["bytes"]) for item in files),
         "objects_declared": copy_report["objects_declared"],
@@ -817,37 +833,567 @@ def backup_library(
         },
         "reasons": [],
         "warnings": sorted(set(warnings)),
+        "finalizer": {
+            "format": MANIFEST_NAME,
+            "written_at": _now_utc(),
+            "sealed_by": "backup_library",
+        },
         "restore_steps": _restore_steps(source, source.name, effective, files),
     }
     manifest["manifest_path"] = str(_write_manifest(target, manifest))
     return manifest
 
 
-def verify_library_copy(path: str | Path, copy_path: str | Path) -> dict[str, object]:
-    """Compare a copy with its source and with this build's declaration.
+def _now_utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds")
 
-    'ok' answers the question a restore actually asks: does this copy hold the
-    same SQL objects, the same rows and intact pages as the library it came
-    from.  'declared_ok' separately reports whether this build would open it.
-    A snapshot copy is logically identical, not byte identical, so differing
-    main bytes are reported without failing the copy.
+
+# ---------------------------------------------------------------------------
+# Logical content fingerprint (contract v5 section 1.3)
+# ---------------------------------------------------------------------------
+
+_TAG_NULL = b"\x00"
+_TAG_INTEGER = b"\x01"
+_TAG_REAL = b"\x02"
+_TAG_TEXT = b"\x03"
+_TAG_BLOB = b"\x04"
+
+
+def _quote_identifier(name: object) -> str:
+    return '"%s"' % str(name).replace('"', '""')
+
+
+def _quote_literal(name: object) -> str:
+    return "'%s'" % str(name).replace("'", "''")
+
+
+def _length_prefix(payload: bytes) -> bytes:
+    return len(payload).to_bytes(8, "big") + payload
+
+
+def _encode_value(value: object) -> bytes:
+    """Type-preserving encoding: NULL, '' and b'' must never collide."""
+    if value is None:
+        return _TAG_NULL + _length_prefix(b"")
+    if isinstance(value, bool):
+        # SQLite has no boolean storage class; a bool never comes back from a
+        # cursor, so encode it as the integer it means instead of guessing.
+        value = int(value)
+    if isinstance(value, int):
+        try:
+            payload = int(value).to_bytes(8, "big", signed=True)
+        except OverflowError:
+            raise LibraryMaintenanceError("integer_out_of_range") from None
+        return _TAG_INTEGER + _length_prefix(payload)
+    if isinstance(value, float):
+        return _TAG_REAL + _length_prefix(struct.pack(">d", float(value)))
+    if isinstance(value, str):
+        return _TAG_TEXT + _length_prefix(value.encode("utf-8"))
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _TAG_BLOB + _length_prefix(bytes(value))
+    raise LibraryMaintenanceError("unsupported_value_type", type(value).__name__)
+
+
+def _object_rows(connection: sqlite3.Connection) -> list[tuple[str, str, str, str | None]]:
+    """Every non-internal schema object, in a deterministic order."""
+    return [
+        (str(row[0]), str(row[1]), str(row[2]), None if row[3] is None else str(row[3]))
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    ]
+
+
+def _objects_digest(connection: sqlite3.Connection) -> tuple[int, str]:
+    """Fingerprint the schema definitions, triggers and views included."""
+    digest = hashlib.sha256()
+    rows = _object_rows(connection)
+    for kind, name, table, sql in rows:
+        for part in (kind, name, table, sql):
+            digest.update(_encode_value(part))
+    return len(rows), digest.hexdigest()
+
+
+def _object_definitions(connection: sqlite3.Connection) -> dict[str, dict[str, str | None]]:
+    """Name to full definition, so two sides are compared with each other."""
+    return {
+        name: {"type": kind, "table": table, "sql": sql}
+        for kind, name, table, sql in _object_rows(connection)
+    }
+
+
+def _table_columns(connection: sqlite3.Connection, name: str) -> list[tuple[str, int]]:
+    return [
+        (str(row[1]), int(row[5]))
+        for row in connection.execute(
+            "PRAGMA table_info(%s)" % _quote_literal(name)
+        )
+    ]
+
+
+def _has_rowid(connection: sqlite3.Connection, name: str) -> bool:
+    try:
+        connection.execute(
+            "SELECT rowid FROM %s LIMIT 0" % _quote_identifier(name)
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def _table_order(connection: sqlite3.Connection, name: str) -> tuple[str, str]:
+    """Deterministic row order for one table, named for the record."""
+    if _has_rowid(connection, name):
+        return "rowid", "ORDER BY rowid"
+    columns = _table_columns(connection, name)
+    primary = [column for column, position in columns if position > 0]
+    if primary:
+        return "primary_key", "ORDER BY " + ", ".join(
+            _quote_identifier(column) for column in primary
+        )
+    return "all_columns", "ORDER BY " + ", ".join(
+        _quote_identifier(column) for column, _ in columns
+    )
+
+
+def _table_digest(
+    connection: sqlite3.Connection, name: str, order_sql: str
+) -> tuple[int, str]:
+    """Stream one table in bounded batches; never fetch the whole table."""
+    cursor = connection.execute(
+        "SELECT * FROM %s %s" % (_quote_identifier(name), order_sql)
+    )
+    digest = hashlib.sha256()
+    rows = 0
+    while True:
+        batch = cursor.fetchmany(FINGERPRINT_CHUNK_ROWS)
+        if not batch:
+            break
+        for record in batch:
+            rows += 1
+            for value in record:
+                digest.update(_encode_value(value))
+    return rows, digest.hexdigest()
+
+
+def _fingerprint_from_connection(connection: sqlite3.Connection) -> dict[str, object]:
+    objects_count, objects_digest = _objects_digest(connection)
+    tables: dict[str, dict[str, object]] = {}
+    ordered: list[tuple[str, int, str]] = []
+    for kind, name, _table, _sql in _object_rows(connection):
+        if kind != "table":
+            continue
+        order, order_sql = _table_order(connection, name)
+        rows, digest = _table_digest(connection, name, order_sql)
+        tables[name] = {"rows": rows, "digest": digest, "order": order}
+        ordered.append((name, rows, digest))
+    combined = hashlib.sha256()
+    combined.update(_encode_value("fp%d" % FINGERPRINT_VERSION))
+    for name, rows, digest in sorted(ordered):
+        combined.update(_encode_value(name))
+        combined.update(_encode_value(rows))
+        combined.update(_encode_value(digest))
+    combined.update(_encode_value(objects_digest))
+    return {
+        "version": FINGERPRINT_VERSION,
+        "digest": combined.hexdigest(),
+        "rows": {name: int(item["rows"]) for name, item in sorted(tables.items())},
+        "objects_digest": objects_digest,
+        "objects_count": objects_count,
+        "computed_at": _now_utc(),
+        "tables": tables,
+    }
+
+
+def logical_fingerprint(
+    path: str | Path, *, connection: sqlite3.Connection | None = None
+) -> dict[str, object]:
+    """Full logical content of one database, readable by any SQLite build.
+
+    The digest covers the object definitions and, for every table, the typed
+    encoding of every value in a deterministic row order.  Two databases that
+    hold the same content therefore produce the same digest whatever journal
+    mode, page layout or file size they ended up with.
     """
-    source = _resolve_target(path)
-    copy = _resolve_target(copy_path)
-    source_report = inspect_library(source)
-    copy_report = inspect_library(copy)
-    counts_match: bool | None = None
+    if connection is not None:
+        return _fingerprint_from_connection(connection)
+    target = _resolve_target(path)
+    try:
+        with contextlib.closing(_connect_readonly(target)) as opened:
+            return _fingerprint_from_connection(opened)
+    except sqlite3.Error as error:
+        raise LibraryMaintenanceError(_sqlite_reason(error), str(error)) from None
+
+
+def _definitions(path: Path) -> dict[str, dict[str, str | None]]:
+    with contextlib.closing(_connect_readonly(path)) as opened:
+        return _object_definitions(opened)
+
+
+def _definitions_or_none(
+    path: Path, status: object
+) -> dict[str, dict[str, str | None]] | None:
+    """Definitions of a readable database, or None instead of an exception."""
+    if status not in {"compatible", "incompatible"}:
+        return None
+    try:
+        return _definitions(path)
+    except (sqlite3.Error, LibraryMaintenanceError, OSError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Manifest reading and sealing checks (contract v5 section 1.4)
+# ---------------------------------------------------------------------------
+
+
+def _load_manifest(directory: Path) -> dict[str, object]:
+    path = directory / MANIFEST_NAME
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        raise BackupError("manifest_missing", str(path)) from None
+    except OSError as error:
+        raise BackupError("manifest_unreadable", str(error)) from None
+    if size > MAX_MANIFEST_BYTES:
+        raise BackupError("manifest_too_large", str(path))
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        raise BackupError("manifest_unreadable", str(path)) from None
+    if not isinstance(manifest, dict):
+        raise BackupError("manifest_unreadable", str(path))
+    version = manifest.get("manifest_version")
+    if type(version) is not int or version not in SUPPORTED_MANIFEST_VERSIONS:
+        raise BackupError("manifest_version_unsupported", str(version))
+    return manifest
+
+
+def _safe_member(directory: Path, name: object) -> Path:
+    """Resolve one member name inside the backup directory, or refuse it."""
+    if not isinstance(name, str) or not name or len(name) > 200:
+        raise BackupError("manifest_member_invalid", repr(name)[:80])
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise BackupError("manifest_member_invalid", name)
+    if Path(name).is_absolute() or (len(name) > 1 and name[1] == ":"):
+        raise BackupError("manifest_member_invalid", name)
+    candidate = directory / name
+    try:
+        resolved = candidate.resolve()
+    except OSError as error:
+        raise BackupError("manifest_member_invalid", str(error)) from None
+    if resolved != directory.resolve() and directory.resolve() not in resolved.parents:
+        raise BackupError("manifest_member_outside", name)
+    if candidate.is_symlink() or (
+        hasattr(candidate, "is_junction") and candidate.is_junction()
+    ):
+        raise BackupError("manifest_member_linked", name)
+    return candidate
+
+
+def _member_entries(
+    directory: Path, manifest: dict[str, object]
+) -> list[tuple[dict[str, object], Path]]:
+    """Validated (record, path) pairs; duplicate or colliding names refuse."""
+    raw = manifest.get("members")
+    if not isinstance(raw, list):
+        raw = manifest.get("files")
+    if not isinstance(raw, list) or not raw:
+        raise BackupError("manifest_without_members")
+    seen: set[str] = set()
+    entries: list[tuple[dict[str, object], Path]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise BackupError("manifest_member_invalid", repr(item)[:80])
+        name = item.get("name")
+        path = _safe_member(directory, name)
+        key = str(name).casefold()
+        if key in seen:
+            raise BackupError("manifest_member_duplicate", str(name))
+        seen.add(key)
+        entries.append((item, path))
+    return entries
+
+
+def _differing_tables(
+    recorded: dict[str, object], actual: dict[str, object]
+) -> list[str]:
+    """Table names whose per-table digest differs from the sealed one."""
+    recorded_tables = recorded.get("tables")
+    actual_tables = actual.get("tables")
+    names: set[str] = set(actual_tables or {})
+    if isinstance(recorded_tables, dict):
+        names |= set(recorded_tables)
+    differing: list[str] = []
+    for name in sorted(names):
+        left = None
+        right = None
+        if isinstance(recorded_tables, dict):
+            entry = recorded_tables.get(name)
+            if isinstance(entry, dict):
+                left = entry.get("digest")
+        if isinstance(actual_tables, dict):
+            entry = actual_tables.get(name)
+            if isinstance(entry, dict):
+                right = entry.get("digest")
+        if left != right:
+            differing.append(name)
+    return differing
+
+
+def verify_backup(
+    directory: str | Path, *, source: str | Path | None = None
+) -> dict[str, object]:
+    """Does this backup still hold what its manifest sealed?
+
+    Four facts are reported apart and none of them defaults to true:
+
+    sealed      every sealed member file still matches the manifest byte for
+                byte (bookkeeping members such as -shm are excluded)
+    logical     the database still holds the sealed object definitions and
+                the sealed value of every row, at the same row counts
+    health      the copy passes this build's own integrity checks
+    compatible  this build would open the copy
+
+    'ok' is true only when all four ran and passed.  'source_equivalent' is a
+    fifth, separate question (does the *current* source still hold the sealed
+    content) and never turns a sound backup into a broken one.
+    """
+    root = Path(directory).expanduser()
+    if not root.exists():
+        raise BackupError("backup_directory_missing", str(root))
+    if not root.is_dir():
+        raise BackupError("backup_not_a_directory", str(root))
+    root = root.resolve()
+    manifest = _load_manifest(root)
+    version = int(manifest["manifest_version"])
     reasons: list[str] = []
     warnings: list[str] = []
-    if source_report["status"] in {"compatible", "incompatible"}:
-        counts_match = source_report["counts"] == copy_report["counts"]
-        if not counts_match:
-            reasons.append("counts_mismatch")
+    entries = _member_entries(root, manifest)
+    library_name = manifest.get("copy_name") or manifest.get("library_name")
+    if not isinstance(library_name, str):
+        raise BackupError("manifest_without_library_name")
+    copy_path = _safe_member(root, library_name)
+
+    sealed_state = "not_checked"
+    sealed_members: list[dict[str, object]] = []
+    sealed_names = [str(item) for item in (manifest.get("sealed_members") or [])]
+    if version >= 2 and sealed_names:
+        known = {str(item.get("name")) for item, _ in entries}
+        for name in sealed_names:
+            if name not in known:
+                raise BackupError("manifest_member_missing", name)
+        states: list[str] = []
+        for item, path in entries:
+            name = str(item.get("name"))
+            if name not in sealed_names:
+                continue
+            fact = _file_fact(path)
+            present = bool(fact["present"])
+            recorded_bytes = int(item.get("bytes") or 0)
+            actual_bytes = int(fact["bytes"]) if present else 0
+            recorded_digest = item.get("sha256")
+            actual_digest = fact["sha256"] if present else None
+            if not present:
+                state = "missing"
+            elif actual_bytes != recorded_bytes or actual_digest != recorded_digest:
+                state = "mismatch"
+            else:
+                state = "ok"
+            states.append(state)
+            sealed_members.append(
+                {
+                    "name": name,
+                    "state": state,
+                    "bytes_recorded": recorded_bytes,
+                    "bytes_actual": actual_bytes,
+                    "sha256_recorded": recorded_digest,
+                    "sha256_actual": actual_digest,
+                }
+            )
+        if "missing" in states:
+            sealed_state = "missing"
+        elif "mismatch" in states:
+            sealed_state = "mismatch"
+        else:
+            sealed_state = "ok"
+        if sealed_state != "ok":
+            reasons.append("sealed_" + sealed_state)
+    elif version >= 2:
+        warnings.append("manifest_without_sealed_members")
+    if sealed_state == "not_checked":
+        reasons.append("sealed_not_checked")
+
+    recorded = manifest.get("logical_fingerprint")
+    logical_state = "not_checked"
+    logical: dict[str, object] = {"state": "not_checked"}
+    if version >= 2 and isinstance(recorded, dict):
+        try:
+            actual_fingerprint = logical_fingerprint(copy_path)
+        except LibraryMaintenanceError as error:
+            warnings.append("copy_logical_unreadable")
+            logical = {
+                "state": "not_checked",
+                "reason": getattr(error, "code", "library_unreadable"),
+                "recorded_digest": recorded.get("digest"),
+            }
+        else:
+            recorded_digest = recorded.get("digest")
+            recorded_version = recorded.get("version")
+            digest_ok = (
+                recorded_version == FINGERPRINT_VERSION
+                and isinstance(recorded_digest, str)
+                and recorded_digest == actual_fingerprint["digest"]
+            )
+            logical_state = "ok" if digest_ok else "mismatch"
+            logical = {
+                "state": logical_state,
+                "recorded_digest": recorded_digest,
+                "actual_digest": actual_fingerprint["digest"],
+                "rows_recorded": recorded.get("rows"),
+                "rows_actual": actual_fingerprint["rows"],
+                "tables_differing": _differing_tables(recorded, actual_fingerprint),
+                "checked_at": actual_fingerprint["computed_at"],
+            }
+            if logical_state == "mismatch":
+                reasons.append("logical_mismatch")
     else:
-        warnings.append("source_unreadable")
-    objects_match = _objects_match(source_report, copy_report)
-    if not objects_match:
-        reasons.append("copy_objects_mismatch")
+        reason = "manifest_too_old" if version < 2 else "manifest_without_fingerprint"
+        logical = {"state": "not_checked", "reason": reason}
+        if version < 2:
+            reasons.append("manifest_too_old")
+
+    copy_report = inspect_library(copy_path)
+    health_state = "ok" if copy_report["healthy"] else "failed"
+    if health_state != "ok":
+        reasons.append("copy_unhealthy")
+    compatible_ok = copy_report["status"] == "compatible"
+    if not compatible_ok:
+        reasons.append("copy_not_compatible")
+    health = {
+        "state": health_state,
+        "status": copy_report["status"],
+        "quick_check": copy_report["quick_check"],
+        "integrity_check": copy_report["integrity_check"],
+        "foreign_key_violations": copy_report["foreign_key_violations"],
+    }
+    compatible = {
+        "state": "ok" if compatible_ok else "mismatch",
+        "status": copy_report["status"],
+        "declared_ok": bool(compatible_ok),
+        "reasons": copy_report["reasons"],
+    }
+
+    source_equivalent: dict[str, object] = {"state": "not_checked",
+                                            "reason": "no_source_given"}
+    if source is not None:
+        source_path = _resolve_target(source)
+        anchor = recorded.get("digest") if isinstance(recorded, dict) else None
+        if not isinstance(anchor, str):
+            source_equivalent = {
+                "state": "not_checked",
+                "reason": "manifest_without_fingerprint",
+            }
+        else:
+            try:
+                source_fingerprint = logical_fingerprint(source_path)
+            except LibraryMaintenanceError as error:
+                warnings.append("source_unreadable")
+                source_equivalent = {
+                    "state": "not_checked",
+                    "reason": getattr(error, "code", "library_unreadable"),
+                }
+            else:
+                same = source_fingerprint["digest"] == anchor
+                source_equivalent = {
+                    "state": "ok" if same else "mismatch",
+                    "source": str(source_path),
+                    "source_digest": source_fingerprint["digest"],
+                    "sealed_digest": anchor,
+                }
+                if not same:
+                    warnings.append("source_changed_since_backup")
+
+    ok = (
+        sealed_state == "ok"
+        and logical_state == "ok"
+        and health_state == "ok"
+        and compatible_ok
+    )
+    return {
+        "mode": "manifest",
+        "question": "sealed_backup",
+        "backup": str(root),
+        "manifest_path": str(root / MANIFEST_NAME),
+        "manifest_version": version,
+        "mode_recorded": manifest.get("mode"),
+        "created_at": manifest.get("created_at"),
+        "label": manifest.get("label"),
+        "library_name": library_name,
+        "member_count": len(entries),
+        "sealed": {"state": sealed_state, "members": sealed_members},
+        "logical": logical,
+        "health": health,
+        "compatible": compatible,
+        "source_equivalent": source_equivalent,
+        "ok": bool(ok),
+        "reasons": sorted(set(reasons)),
+        "warnings": sorted(set(warnings)),
+        "checked_at": _now_utc(),
+    }
+
+
+def compare_library(
+    source: str | Path, copy_path: str | Path
+) -> dict[str, object]:
+    """Do these two databases hold the same content right now?
+
+    This is the operator's comparison, not the restore gate: call
+    verify_backup(directory) when the question is whether a sealed backup can
+    be trusted.  Object definitions are compared with each other (not each
+    side against the declaration), so two databases that deviate in different
+    ways are still reported as different.
+    """
+    source_path = _resolve_target(source)
+    copy = _resolve_target(copy_path)
+    source_report = inspect_library(source_path)
+    copy_report = inspect_library(copy)
+    reasons: list[str] = []
+    warnings: list[str] = []
+    readable = (
+        source_report["status"] in {"compatible", "incompatible"}
+        and copy_report["status"] in {"compatible", "incompatible"}
+    )
+    objects_identical = False
+    logical_state = "not_checked"
+    logical: dict[str, object] = {"state": "not_checked",
+                                  "reason": "database_unreadable"}
+    if readable:
+        objects_identical = _definitions(source_path) == _definitions(copy)
+        source_fingerprint = logical_fingerprint(source_path)
+        copy_fingerprint = logical_fingerprint(copy)
+        digest_ok = source_fingerprint["digest"] == copy_fingerprint["digest"]
+        logical_state = "ok" if digest_ok else "mismatch"
+        logical = {
+            "state": logical_state,
+            "source_digest": source_fingerprint["digest"],
+            "copy_digest": copy_fingerprint["digest"],
+            "rows": copy_fingerprint["rows"],
+            "tables_differing": _differing_tables(source_fingerprint,
+                                                   copy_fingerprint),
+            "checked_at": _now_utc(),
+        }
+        if not objects_identical:
+            reasons.append("copy_objects_mismatch")
+        if not digest_ok:
+            reasons.append("copy_content_mismatch")
+    else:
+        reasons.append("database_unreadable")
+
+    counts_match = source_report["counts"] == copy_report["counts"]
+    if not counts_match:
+        reasons.append("counts_mismatch")
     checks_match = (
         copy_report["quick_check"] == source_report["quick_check"]
         and copy_report["integrity_check"] == source_report["integrity_check"]
@@ -865,28 +1411,69 @@ def verify_library_copy(path: str | Path, copy_path: str | Path) -> dict[str, ob
     )
     main_sha256_match: bool | None = None
     try:
-        main_sha256_match = _sha256_file(source) == _sha256_file(copy)
+        main_sha256_match = _sha256_file(source_path) == _sha256_file(copy)
     except OSError:
         warnings.append("copy_unreadable_bytes")
-    result: dict[str, object] = {
-        "source": str(source),
+    healthy_ok = bool(copy_report["healthy"])
+    if not healthy_ok:
+        reasons.append("copy_unhealthy")
+    compatible_ok = copy_report["status"] == "compatible"
+    if not compatible_ok:
+        reasons.append("copy_not_compatible")
+    ok = bool(
+        objects_identical
+        and logical_state == "ok"
+        and healthy_ok
+        and compatible_ok
+    )
+    return {
+        "mode": "compare",
+        "question": "same_content_as_source",
+        "source": str(source_path),
         "copy": str(copy),
         "source_status": source_report["status"],
         "copy_status": copy_report["status"],
-        "objects_match_source": bool(objects_match),
+        "sealed": {"state": "not_checked", "reason": "no_manifest"},
+        "logical": logical,
+        "health": {
+            "state": "ok" if healthy_ok else "failed",
+            "quick_check": copy_report["quick_check"],
+            "integrity_check": copy_report["integrity_check"],
+            "foreign_key_violations": copy_report["foreign_key_violations"],
+        },
+        "compatible": {
+            "state": "ok" if compatible_ok else "mismatch",
+            "declared_ok": bool(declared_ok),
+        },
+        "source_equivalent": {"state": "not_checked", "reason": "is_the_source"},
+        "objects_match_source": bool(objects_identical),
+        "logical_state": logical_state,
         "declared_ok": bool(declared_ok),
         "checks_match": bool(checks_match),
-        "healthy": bool(copy_report["healthy"]),
-        "counts_match": counts_match,
+        "healthy": healthy_ok,
+        "counts_match": bool(counts_match),
         "main_sha256_match": main_sha256_match,
         "counts": copy_report["counts"],
         "quick_check": copy_report["quick_check"],
         "integrity_check": copy_report["integrity_check"],
         "reasons": sorted(set(reasons)),
         "warnings": sorted(set(warnings)),
+        "ok": ok,
+        "checked_at": _now_utc(),
     }
-    result["ok"] = not result["reasons"]
-    return result
+
+
+def verify_library_copy(
+    path: str | Path, copy_path: str | Path
+) -> dict[str, object]:
+    """Deprecated alias of compare_library; it is not a backup gate.
+
+    It answers whether two databases hold the same content right now.  It
+    cannot answer whether a backup is trustworthy, because a copy nobody
+    sealed can still match a source that has since drifted.  Use
+    verify_backup(directory) for the restore decision.
+    """
+    return compare_library(path, copy_path)
 
 
 def switch_plan(path: str | Path) -> dict[str, object]:
@@ -906,8 +1493,8 @@ def switch_plan(path: str | Path) -> dict[str, object]:
             "关闭 JpgPng 主程序，确认没有下载/整理任务在运行。",
             "运行 python maintain.py backup %s <备份目录> --label before-w5 生成快照。"
             % library,
-            "运行 python maintain.py verify %s <备份目录>/<库文件名>，必须 ok=true。"
-            % library,
+            "运行 python maintain.py verify <备份目录>，必须 ok=true：它按清单校验封存内容，"
+            "而不是只比表计数。",
             "在副本上运行 python maintain.py inspect <备份目录>/<库文件名>，"
             "预期 status=compatible。",
             "记录当前版本（git rev-parse HEAD）与本文件字节数 %d。" % report["size_bytes"],
@@ -987,10 +1574,31 @@ def _parser() -> argparse.ArgumentParser:
         help="auto=健康库走在线快照、损坏库走整组字节复制",
     )
     verify = commands.add_parser(
-        "verify", parents=[_COMMON], help="逐对象、逐表计数校验副本"
+        "verify",
+        parents=[_COMMON],
+        help="按清单校验备份是否仍与封存时一致（恢复门槛）",
     )
-    verify.add_argument("database", type=Path)
-    verify.add_argument("copy", type=Path)
+    verify.add_argument("target", type=Path, help="备份目录（含 manifest.json）")
+    verify.add_argument(
+        "copy",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="已弃用：给出第二个路径时按 compare 处理",
+    )
+    verify.add_argument(
+        "--source",
+        type=Path,
+        default=None,
+        help="同时对照当前源库是否仍与封存内容相同（不影响 ok）",
+    )
+    compare = commands.add_parser(
+        "compare",
+        parents=[_COMMON],
+        help="比较两个库当前内容是否相同（不是备份门槛）",
+    )
+    compare.add_argument("source", type=Path)
+    compare.add_argument("copy", type=Path)
     plan = commands.add_parser(
         "plan", parents=[_COMMON], help="输出切换与回退顺序，不做任何写操作"
     )
@@ -1010,6 +1618,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--max-bytes", type=int, default=None, help="本轮最多读多少字节")
     scan.add_argument("--max-seconds", type=float, default=None, help="本轮最多用多少秒")
+    scan.add_argument(
+        "--allow-unknown",
+        action="store_true",
+        default=False,
+        help="只有“无尺寸/无摘要”的旧行可被跳过；坏记录与未覆盖仍然不通过",
+    )
     return parser
 
 
@@ -1065,19 +1679,104 @@ _SCAN_FINDINGS = (
 )
 
 
-def _scan_lines(report: dict[str, object]) -> list[str]:
-    stats = report["stats"]
-    rows = report["rows"]
-    lines = [
-        "核验: %s 行（匹配 %s，无法核验 %s）"
-        % (stats["examined"], stats["matched"], stats["unknown"]),
-        "字节: 读取 %s，用时 %.2f 秒" % (stats["bytes_hashed"], float(stats["seconds"])),
+def _scan_coverage(report: dict[str, object]) -> str:
+    """The engine's own coverage verdict, or a conservative reading of it.
+
+    The audit module reports coverage itself from contract v5 on.  While that
+    fix is still in flight the field can be absent, and the fallback must never
+    claim more coverage than the evidence supports.
+    """
+    coverage = report.get("coverage")
+    if isinstance(coverage, str) and coverage:
+        return coverage
+    stats = report.get("stats") or {}
+    if stats.get("budget_exhausted_reason"):
+        return "budget"
+    if int(stats.get("examined") or 0) == 0:
+        return "empty"
+    return "page" if report.get("truncated") else "complete"
+
+
+def _scan_is_empty(report: dict[str, object]) -> bool:
+    """True only when the ledger itself holds no delivered artifact.
+
+    Coverage 'empty' can also mean "the cursor sits at the end", so the row
+    count is the fact that decides whether the library holds any work at all.
+    """
+    stats = report.get("stats") or {}
+    library_rows = stats.get("library_rows")
+    if type(library_rows) is int:
+        return library_rows == 0
+    return _scan_coverage(report) == "empty"
+
+
+def _scan_findings(report: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        row
+        for row in (report.get("rows") or [])
+        if row.get("verdict") in _SCAN_FINDINGS
     ]
-    if stats["unknown"]:
-        lines.append(
-            "另有 %s 行没有可核验的记录（旧行或缺摘要），未计入结论。" % stats["unknown"]
+
+
+def _scan_unknown_reasons(report: dict[str, object]) -> dict[str, int]:
+    """Reason histogram for the rows nobody could verify.
+
+    The audit module reports this itself from contract v5 on.  The per-row
+    reasons are the same facts, so the CLI also reads them directly: a summary
+    that cannot name why a row was skipped is a summary nobody can act on.
+    """
+    stats = report.get("stats") or {}
+    raw = stats.get("unknown_reasons")
+    if isinstance(raw, dict) and raw:
+        counts: dict[str, int] = {}
+        for key, value in raw.items():
+            try:
+                counts[str(key)] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return counts
+    counts = {}
+    for row in report.get("rows") or []:
+        if row.get("verdict") != "unknown":
+            continue
+        reason = str(row.get("reason") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _scan_lines(report: dict[str, object]) -> list[str]:
+    """Report exactly what was verified; never upgrade unknown into a match."""
+    stats = report.get("stats") or {}
+    coverage = _scan_coverage(report)
+    examined = int(stats.get("examined") or 0)
+    matched = int(stats.get("matched") or 0)
+    excluded = int(stats.get("excluded") or 0)
+    unknown = int(stats.get("unknown") or 0)
+    considered = int(stats.get("considered") or examined)
+    findings = _scan_findings(report)
+    ledger = report.get("ledger")
+    if isinstance(ledger, dict) and ledger.get("state") == "error":
+        cursor = ledger.get("last_safe_cursor")
+        return [
+            "巡检失败: 账本读不出来（%s）。" % (ledger.get("code") or "ledger_error"),
+            "最后安全游标: %s"
+            % ("%s,%s" % (cursor[0], cursor[1]) if cursor else "-"),
+            "本次没有给出任何核验结论。",
+        ]
+    if _scan_is_empty(report):
+        return ["库里没有已登记的成品可核验。"]
+    lines = [
+        "核验: 覆盖 %d 行（匹配 %d，排除 %d，无法核验 %d）"
+        % (examined, matched, excluded, unknown),
+        "字节: 读取 %s，用时 %.2f 秒"
+        % (stats.get("bytes_hashed", 0), float(stats.get("seconds") or 0)),
+    ]
+    if unknown:
+        reasons = _scan_unknown_reasons(report)
+        detail = "，".join(
+            "%s: %d" % (name, count) for name, count in sorted(reasons.items())
         )
-    findings = [row for row in rows if row["verdict"] in _SCAN_FINDINGS]
+        lines.append("无法核验: " + (detail or "原因未记录"))
     if findings:
         lines.append("需要你知道的 %d 行:" % len(findings))
         for row in findings[:20]:
@@ -1087,15 +1786,124 @@ def _scan_lines(report: dict[str, object]) -> list[str]:
             )
         if len(findings) > 20:
             lines.append("  … 还有 %d 行未列出" % (len(findings) - 20))
-    else:
-        lines.append("结论: 本次核验的每一行都与记录一致。")
-    if report["truncated"]:
-        reason = stats["budget_exhausted_reason"]
-        cursor = report["next_cursor"]
+    if coverage != "complete":
+        cursor = report.get("next_cursor")
         lines.append(
-            "提示: 本次没有覆盖整库（%s），续跑游标 %s"
-            % (reason or "还有更多行", "%s,%s" % (cursor[0], cursor[1]) if cursor else "-")
+            "覆盖: 未完成（%s）；续跑游标 %s"
+            % (coverage, "%s,%s" % (cursor[0], cursor[1]) if cursor else "-")
         )
+    if findings:
+        tail = "结论: 本次核验发现 %d 行与记录不一致" % len(findings)
+        if unknown:
+            tail += "；另有 %d 行无法核验" % unknown
+        lines.append(tail + "。")
+    elif coverage == "complete" and unknown == 0:
+        lines.append("结论: 本次核验覆盖全部 %d 行，全部与记录一致。" % examined)
+    else:
+        lines.append(
+            "结论: 本次只核验了 %d/%d 行，%d 行无法核验。"
+            % (matched + excluded, max(considered, examined), unknown)
+        )
+    return lines
+
+
+def _scan_outcome(
+    report: dict[str, object], *, allow_unknown: bool
+) -> tuple[int, list[dict[str, object]]]:
+    """Exit code and findings for one scan report (contract v5 section 2.3)."""
+    stats = report.get("stats") or {}
+    ledger = report.get("ledger")
+    findings = _scan_findings(report)
+    if isinstance(ledger, dict) and ledger.get("state") == "error":
+        return 3, findings
+    if _scan_coverage(report) == "error":
+        return 3, findings
+    if findings:
+        return 2, findings
+    coverage = _scan_coverage(report)
+    unknown = int(stats.get("unknown") or 0)
+    if coverage == "empty" or (coverage == "complete" and unknown == 0):
+        return 0, findings
+    if allow_unknown and unknown and coverage == "complete":
+        reasons = set(_scan_unknown_reasons(report))
+        if reasons and reasons <= _LEGACY_UNKNOWN_REASONS:
+            return 0, findings
+    return _EXIT_INCOMPLETE, findings
+
+
+def _verify_lines(result: dict[str, object]) -> list[str]:
+    sealed = result["sealed"]
+    logical = result["logical"]
+    members = sealed.get("members") or []
+    lines = [
+        "备份: %s（清单 v%s，生成于 %s）"
+        % (
+            result["backup"],
+            result["manifest_version"],
+            result.get("created_at") or "-",
+        ),
+        "成员: %d 个，封存 %d 个，封存校验 %s"
+        % (int(result.get("member_count") or 0), len(members), sealed["state"]),
+    ]
+    for member in members:
+        if member["state"] == "ok":
+            continue
+        lines.append(
+            "  %s  %s  记录 %s 字节 / 实际 %s 字节"
+            % (
+                member["name"],
+                member["state"],
+                member["bytes_recorded"],
+                member["bytes_actual"],
+            )
+        )
+    lines.append(
+        "逻辑内容: %s%s"
+        % (
+            logical["state"],
+            ("（%s）" % logical["reason"]) if logical.get("reason") else "",
+        )
+    )
+    differing = logical.get("tables_differing") or []
+    if differing:
+        lines.append("  内容不同的表: " + ", ".join(str(name) for name in differing))
+    lines.append("健康: %s" % result["health"]["state"])
+    lines.append("兼容: %s" % result["compatible"]["state"])
+    lines.append("与当前源: %s" % result["source_equivalent"]["state"])
+    if result["reasons"]:
+        lines.append("原因: " + ", ".join(result["reasons"]))
+    if result["warnings"]:
+        lines.append("提示: " + ", ".join(result["warnings"]))
+    lines.append("结论: ok=%s" % result["ok"])
+    if int(result["manifest_version"]) < 2:
+        lines.append(
+            "提示: 这份备份的清单是旧版本，无法证明内容一致；请重新运行 backup。"
+        )
+    return lines
+
+
+def _compare_lines(result: dict[str, object]) -> list[str]:
+    lines = [
+        "源: %s (%s)" % (result["source"], result["source_status"]),
+        "副本: %s (%s)" % (result["copy"], result["copy_status"]),
+        "对象定义一致=%s 内容一致=%s 计数一致=%s 完整性一致=%s 本版本可打开=%s"
+        % (
+            result["objects_match_source"],
+            result["logical"]["state"] == "ok",
+            result["counts_match"],
+            result["checks_match"],
+            result["declared_ok"],
+        ),
+        "健康: %s" % result["health"]["state"],
+        "结论: ok=%s" % result["ok"],
+    ]
+    differing = result["logical"].get("tables_differing") or []
+    if differing:
+        lines.append("内容不同的表: " + ", ".join(str(name) for name in differing))
+    if result["reasons"]:
+        lines.append("原因: " + ", ".join(result["reasons"]))
+    if result["warnings"]:
+        lines.append("提示: " + ", ".join(result["warnings"]))
     return lines
 
 
@@ -1143,26 +1951,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if arguments.command == "verify":
-            result = verify_library_copy(arguments.database, arguments.copy)
-            _emit(
-                result,
-                as_json,
-                [
-                    "源: %s (%s)" % (result["source"], result["source_status"]),
-                    "副本: %s (%s)" % (result["copy"], result["copy_status"]),
-                    "对象一致=%s 计数一致=%s 完整性一致=%s 本版本可打开=%s 主文件字节一致=%s"
-                    % (
-                        result["objects_match_source"],
-                        result["counts_match"],
-                        result["checks_match"],
-                        result["declared_ok"],
-                        result["main_sha256_match"],
-                    ),
-                    "健康: healthy=%s" % result["healthy"],
-                    "结论: ok=%s" % result["ok"],
-                ]
-                + (["原因: " + ", ".join(result["reasons"])] if result["reasons"] else []),
-            )
+            if arguments.copy is not None:
+                # The old two-path form was a comparison, not a seal check.
+                result = compare_library(arguments.target, arguments.copy)
+                _emit(
+                    result,
+                    as_json,
+                    _compare_lines(result)
+                    + ["提示: verify 的两个路径写法已弃用，请改用 compare。"],
+                )
+                return 0 if result["ok"] else 2
+            result = verify_backup(arguments.target, source=arguments.source)
+            _emit(result, as_json, _verify_lines(result))
+            return 0 if result["ok"] else 2
+        if arguments.command == "compare":
+            result = compare_library(arguments.source, arguments.copy)
+            _emit(result, as_json, _compare_lines(result))
             return 0 if result["ok"] else 2
         if arguments.command == "scan":
             from core.app_paths import AppPaths
@@ -1213,10 +2017,24 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print("巡检失败: 账本读不出来（%s）" % error, file=sys.stderr)
                 return 3
-            _emit(report, as_json, _scan_lines(report))
-            if any(row["verdict"] in _SCAN_FINDINGS for row in report["rows"]):
-                return 2
-            return 0
+            code, findings = _scan_outcome(report, allow_unknown=arguments.allow_unknown)
+            report["exit_code"] = code
+            report["findings"] = len(findings)
+            if code == 0 and arguments.allow_unknown and int(
+                (report.get("stats") or {}).get("unknown") or 0
+            ):
+                _emit(
+                    report,
+                    as_json,
+                    _scan_lines(report)
+                    + [
+                        "提示: 已按 --allow-unknown 跳过 %d 行无摘要旧行。"
+                        % int((report.get("stats") or {}).get("unknown") or 0)
+                    ],
+                )
+            else:
+                _emit(report, as_json, _scan_lines(report))
+            return code
         plan = switch_plan(arguments.database)
         _emit(
             plan,
@@ -1264,6 +2082,15 @@ def main(argv: list[str] | None = None) -> int:
             "library_unreadable",
             "not_a_sqlite_file",
             "source_unreadable",
+            "backup_directory_missing",
+            "backup_not_a_directory",
+            "manifest_missing",
+            "manifest_unreadable",
+            "manifest_too_large",
+            "manifest_version_unsupported",
+            "manifest_without_members",
+            "manifest_without_library_name",
+            "manifest_member_missing",
         }:
             return 3
         return _EXIT_REFUSED
