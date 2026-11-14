@@ -25,7 +25,7 @@
 
 | 原编号 | 工作与合并方式 | 当前状态 | 验收与依赖 |
 | --- | --- | --- | --- |
-| U1-A + A1，共同策略 | 下载本地核验与归档共用内容代次、核验来源和复用判断 | **RFB/W5/W6 属历史交付；最新独立审计的 WR-01..07 尚未关闭，本轮只整理目录和文档，不部署或恢复真实库** | 见第 4K/4L 节与[切换 runbook](../optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)；剩余为已登记遗留 |
+| U1-A + A1，共同策略 | 下载本地核验与归档共用内容代次、核验来源和复用判断 | **RFB/W5/W6 属历史交付；整理后审计的 PA-01/02/03 与 WR-01..07 已在 post-tidy 修复轮按行为关闭（见第 4N 节与[维护记录](../maintenance/2026-11-14_jpgpng_post_tidy_closure.md)）；仍未部署、未恢复真实库** | 见第 4K/4L 节与[切换 runbook](../optimization/2026-11-14/U1A_SWITCH_RUNBOOK.md)；剩余为已登记遗留 |
 | U1-A + A1，其余基础 | 有界只读核验、清单/容量、范围枚举、确定性分包与临时计划适配 | **AR4-01..08 已关闭；严格读取、范围、原子接受+计划与 schema 5 索引完成（R0–R6）** | 见第 4A/4B/4D/4H 节；合成范围通过不等于真实归档发布 |
 | U1-B | 共享依赖维护与发布可回退性 | 待实施，单列变更批次 | 查实际在用状态、安装规则、依赖约束；受影响联网路径的实测前处理 |
 | U1-C | 来源/结构/解码/页集/后续完整性分别说明，深解码组件验证 | 待实施 | 保持原字节；严格能力缺失时不冒充通过；外部组件按规则核验 |
@@ -194,6 +194,23 @@ MISSING 短缓存只允许调度/hold，不变成健康证据；不盲目重复�
 契约修订 A1..A8 与判据见[契约 v5](../optimization/2026-11-14/U1A_W5_W6_CONTRACT_V5.md)；红基线（审计 12 条反例）从 9 红 3 绿转 12/12。只读复审：**P1=0、P2=0**，1 项 P3（续跑页误判空库）已修并补回归测试。
 
 详见[维护记录](../maintenance/2026-11-14_jpgpng_u1a_w5w6_proof.md)。未合并 main；日常目录仍跟踪 `daily/u1a-w5-w6-20261114`，切换是用户的一条明确动作。
+
+## 4N. 本轮：JPGPNG-POST-TIDY-CLOSURE-20261114-01（PA-01/02/03、WR-01..07 关闭）
+
+从 `4ba891e`（日常冻结点，产品源码等于 `e4eb6ce`）建立 `fix/a1-post-tidy-closure-20261114`，先并入审计包 `5f19553`。[整理后审计](../audits/2026-11-14-post-tidy/README.md)提出 PA-01（P1）、PA-02（P2）、PA-03（P2），另有一直未关闭的 WR-01..07。
+
+- **PA-01 P1**：`verify` 的四项事实改为取自**同一份私有隔离副本**（同级优先、系统临时目录回退）：成员边复制边哈希，复制前后用同一句柄 `fstat` 并用 `lstat` 复核路径，逻辑指纹与健康检查共用同一只读连接与读事务，结束时再 stat 全组；复制期间或之后被动过一律 `changed_during_check`、`ok=False`。报告新增 `evidence`（`scope=isolated_copy`、workspace、copy/hash/read 秒、cleanup）。
+- **PA-02 P2**：对象集合改由唯一判定 `_is_internal_object`（字面量 `sqlite_` 前缀、大小写不敏感）负责，`_object_rows`/`_normalized_objects`/指纹全部复用；`name NOT LIKE 'sqlite_%'` 把 `sqliteXuser` 当系统表的老问题关闭。
+- **WR-04 P2**：清单先严格校验再碰文件（`bytes` 非负 int 且拒绝 bool、`sha256` 64 位小写十六进制、名字唯一、`copy_name` 必须属于 sealed、`-shm` 永不封存、`mode` 与 WAL 规则按模式校验），违规即 `manifest_*` 退出 3。
+- **WR-01 P1**：恢复步骤重写为七步可逆协议（关进程→先验备份→暂存匹配组→当前组整组移入保留目录→放入匹配组→重开对照→失败整组退回），新增 `restore-check` 子命令按数据库头判断 `orphan_wal`；runbook 的旧「覆盖+删 WAL」明确标为已废止。
+- **WR-02 P2**：CLI 只从 `<root>/config/output_roots_v1.json` 只读加载映射；定义非法（相对/重叠/链接/版本/解析/读不了）→ `mapping_unreadable` 退出 3，定义合法但目录不在 → 逐行 `root_unavailable` 退出 2，未知 root 绝不回退项目根。
+- **WR-03 P2**：新增 `core/library_scan.py` 的 `scan_library_report`：默认全程遍历，裸 `--after` 恒 `scope=continuation`/`coverage=partial`/退出 5，严重度单调，中途账本坏退出 3。
+- **WR-05/06/07**：核验列表支持游标分页（第 51 行可达）、`read_revision` 与计数同一条语句读出、`loading/ready/error` 三态、失败清空可操作行；恢复命令携带 `expected_delivery_id`，后端在**任何文件观察之前**比对，不符 `state_changed` + `health=None` + 零观察。
+- **PA-03 P2**：归档采集器改用 `open`+`fstat` 取身份、`lstat` 复核路径，零值写 `identity: unknown`，两侧缺证据永不判等；旧证明只能更正，600,447 个文件的搬迁前身份基线补不回来。
+
+契约修订 A1–A6 见[契约 v6 修订](../optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD1.md)。审计 9 条反例从 **7 红 2 绿** 转 **10/10 绿**（含新加的重叠根边界）；主体全量 <!--PENDING:matrix-->；三个 Tk 模块各自独立进程 <!--PENDING:tk-->。只读复审结论与两处已记录的夹具/注入点偏差见[维护记录](../maintenance/2026-11-14_jpgpng_post_tidy_closure.md)。
+
+未合并 main、未部署、未恢复真实库；真实库只做只读 `inspect`/`scan`/`verify`。
 
 ## 5. 接续记录规则
 

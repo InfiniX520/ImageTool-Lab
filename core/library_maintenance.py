@@ -1623,9 +1623,12 @@ def verify_backup(
     let a file that changed between the reads satisfy each stage with a
     different version, which is the PA-01 defect.
 
-    The guarantee ends with the copy.  A write that lands after the copy was
-    taken is outside this check; the report says so and names the copy it
-    describes, so nobody can read it as a statement about a later moment.
+    The guarantee has a named end.  A write that lands between the copy and
+    the final stat of every member is reported as 'changed' (the members are
+    re-checked after every read); a write after that last stat, including one
+    after this function returns, is outside the check.  The report says so and
+    names the copy it describes, so nobody can read it as a statement about a
+    later moment.
 
     'ok' is true only when all four ran and passed on a copy that did not move
     while it was taken.  'source_equivalent' is a fifth, separate question
@@ -2261,7 +2264,7 @@ def _restore_lines(report: dict[str, object]) -> list[str]:
         "库: %s" % report["path"],
         "状态: %s" % report["state"],
         "journal_mode: %s  header: %s"
-        % (report["journal_mode"], report["header_journal"]),
+        % (report["journal_mode"] or "-", report["header_journal"] or "-"),
         "WAL: %d 字节%s"
         % (report["wal_bytes"], "（WAL 模式）" if report["wal_mode"] else ""),
     ]
@@ -2394,7 +2397,10 @@ def _scan_lines(report: dict[str, object], *, continuation: bool = False) -> lis
         )
         lines.append("无法核验: " + (detail or "原因未记录"))
     if findings:
-        lines.append("需要你知道的 %d 行:" % len(findings))
+        # The listed rows are bounded, the counter is not: name both so a
+        # large library never sounds smaller than it is.
+        exact = int(stats.get("findings") or len(findings))
+        lines.append("需要你知道的 %d 行（下面最多列出 20 行）:" % exact)
         for row in findings[:20]:
             lines.append(
                 "  %s p%s  %s  %s"
@@ -2421,30 +2427,6 @@ def _scan_lines(report: dict[str, object], *, continuation: bool = False) -> lis
             % (matched + excluded, max(considered, examined), unknown)
         )
     return lines
-
-
-def _scan_outcome(
-    report: dict[str, object], *, allow_unknown: bool
-) -> tuple[int, list[dict[str, object]]]:
-    """Exit code and findings for one scan report (contract v5 section 2.3)."""
-    stats = report.get("stats") or {}
-    ledger = report.get("ledger")
-    findings = _scan_findings(report)
-    if isinstance(ledger, dict) and ledger.get("state") == "error":
-        return 3, findings
-    if _scan_coverage(report) == "error":
-        return 3, findings
-    if findings:
-        return 2, findings
-    coverage = _scan_coverage(report)
-    unknown = int(stats.get("unknown") or 0)
-    if coverage == "empty" or (coverage == "complete" and unknown == 0):
-        return 0, findings
-    if allow_unknown and unknown and coverage == "complete":
-        reasons = set(_scan_unknown_reasons(report))
-        if reasons and reasons <= _LEGACY_UNKNOWN_REASONS:
-            return 0, findings
-    return _EXIT_INCOMPLETE, findings
 
 
 def _report_scan_error(as_json: bool, code: str, detail: str) -> None:
@@ -2692,7 +2674,9 @@ def main(argv: list[str] | None = None) -> int:
                     str(ledger.get("code") or "ledger_unreadable"),
                 )
                 return 3
-            # The walk owns the answer; _scan_outcome must not re-derive it
+            # The walk owns the answer.  The old per-page outcome helper that
+            # re-derived it was deleted with the WR-03 hole (a bare continuation
+            # at the end of the ledger came back as 0).
             # (a continuation at the end would come back as 0).
             code = int(report["exit_code"])
             lines = _scan_scope_lines(report) + _scan_lines(

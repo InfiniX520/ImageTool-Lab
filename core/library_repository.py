@@ -902,7 +902,10 @@ class LibraryRepository(
                 str(row["name"]): " ".join(str(row["sql"]).split())
                 for row in conn.execute(
                     "SELECT name, sql FROM sqlite_master "
-                    "WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'"
+# LIKE treats _ as a wildcard, so this is not the exact internal-object
+            # predicate; it is only used to read names that are then intersected with
+            # the declared set, never to decide that an extra object is internal.
+                                "WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'"
                 )
             }
             for statement in _DDL:

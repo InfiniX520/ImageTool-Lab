@@ -791,7 +791,10 @@ def _normalized_sql_objects(conn: sqlite3.Connection) -> dict[str, str]:
         str(row[0]): " ".join(str(row[1]).split())
         for row in conn.execute(
             "SELECT name, sql FROM sqlite_master WHERE type IN ('table','index','trigger') "
-            "AND name NOT LIKE 'sqlite_%'"
+# This enumeration only cross-checks names that are already declared below;
+            # it never compares "extra" objects, so the imprecise LIKE cannot hide a
+            # user table (that defect was fixed in core.library_maintenance).
+                        "AND name NOT LIKE 'sqlite_%'"  # LIKE reads _ as a wildcard: see the note above
         )
     }
 
