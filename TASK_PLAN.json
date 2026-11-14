@@ -346,23 +346,23 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "Post-tidy closure: PA-01/PA-02 and WR-01..07 closed with behavioural evidence; PA-03 corrected as proof + tool (identity baseline cannot be rebuilt)",
-      "status": "product_fixes_closed_pending_release_decision",
-      "resume": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
-      "next_step": "Root-cause the Tk teardown race in gui/collection_view.py; then a separate batch for a real-library restore drill and the archive collector apply() on a real batch.",
+      "phase": "Post-tidy closure independent audit: 1 P1 + 5 P2 remain; Tk root cause separate",
+      "status": "independently_audited_repairs_required",
+      "resume": "docs/audits/2026-11-14-post-tidy-closure/DEVELOPMENT_GUIDE.md",
+      "next_step": "S0 contract, S1 owned cleanup and error lifecycle, S2 prefix semantics, S3 refresh generation, S4 archive identity; S5 Tk diagnosis separately",
       "supersedes": "W5/W6 proof closeout as the previous historical batch; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-POST-TIDY-CLOSURE-20261114-01",
+      "latest_batch": "JPGPNG-POST-TIDY-CLOSURE-AUDIT-20261114-01",
       "foundation": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD1.md",
-      "evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
-      "previous_completed_batch": "JPGPNG-POST-TIDY-AUDIT-20261114-01",
-      "unfinished_draft": "Tk teardown race only mitigated (P2, baseline flakes too); real-library restore and archive apply() not drilled; the 600447-file pre-move identity baseline cannot be reconstructed.",
+      "evidence": "docs/audits/2026-11-14-post-tidy-closure/evidence/results.json",
+      "previous_completed_batch": "JPGPNG-POST-TIDY-CLOSURE-20261114-01",
+      "unfinished_draft": "CL-01 P1; WR-04/CL-02/CL-03/WR-06/PA-03 P2; known Tk stability unclosed; no production restore or archival apply",
       "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
-      "latest_overview": "docs/audits/2026-11-14-post-tidy/README.md",
-      "latest_evidence": "docs/audits/2026-11-14-post-tidy/evidence/results.json",
-      "audited_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
-      "fixed_commit": "27dd8b7b345f34ac39891c95553d40d4f9a7cfe4",
-      "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114 until the user switches. This round changed product code on fix/a1-post-tidy-closure-20261114 only: no deployment, no database restore, real library read-only. Restore gate is maintain.cmd verify <backup dir>; compare is not a gate."
+      "latest_overview": "docs/audits/2026-11-14-post-tidy-closure/README.md",
+      "latest_evidence": "docs/audits/2026-11-14-post-tidy-closure/evidence/results.json",
+      "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
+      "fixed_commit": "9ee62068273324848a83061662d86ce9da46876c",
+      "runtime_checkout_note": "Daily 4ba891e unchanged. Candidate 9ee6206 has unresolved audit findings. This audit changes only reports, synthetic probes and navigation; no deployment."
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -1395,6 +1395,31 @@
       "real_library": "read-only inspect/scan/verify only; 4435968 bytes and sha256 unchanged",
       "deployed": false,
       "merged_to_main": false
+    },
+    "post_tidy_closure_audit": {
+      "id": "JPGPNG-POST-TIDY-CLOSURE-AUDIT-20261114-01",
+      "status": "audit_complete_repairs_required",
+      "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
+      "branch": "audit/post-tidy-closure-20261114",
+      "report": "docs/audits/2026-11-14-post-tidy-closure/README.md",
+      "guide": "docs/audits/2026-11-14-post-tidy-closure/DEVELOPMENT_GUIDE.md",
+      "results": "docs/audits/2026-11-14-post-tidy-closure/evidence/results.json",
+      "open": [
+        "CL-01",
+        "WR-04",
+        "CL-02",
+        "CL-03",
+        "WR-06",
+        "PA-03"
+      ],
+      "p1": 1,
+      "p2": 5,
+      "known_tk_p2_separate": true,
+      "suite": "2259 passed / 4 skipped / 0 failed",
+      "new_probes": "12 failed / 2 passed / 0 errors / 0 skipped",
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "deployed": false
     }
   }
 }

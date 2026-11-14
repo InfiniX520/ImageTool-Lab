@@ -1,0 +1,223 @@
+{
+  "audit_id": "JPGPNG-POST-TIDY-CLOSURE-AUDIT-20261114-01",
+  "date": "2026-11-14",
+  "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
+  "audited_branch": "fix/a1-post-tidy-closure-20261114",
+  "audit_branch": "audit/post-tidy-closure-20261114",
+  "comparison_base": "5f19553d3043d38824102135fa1a9b5c6b254f92",
+  "daily_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+  "daily_product_changed": false,
+  "scope": {
+    "product_changed_files": [
+      "core/archive_schema.py",
+      "core/collection_desktop.py",
+      "core/delivery_recovery.py",
+      "core/delivery_repository.py",
+      "core/library_maintenance.py",
+      "core/library_repository.py",
+      "core/library_scan.py",
+      "core/output_locations.py",
+      "gui/collection_controller.py",
+      "gui/verification_panel.py"
+    ],
+    "compiled_baseline_python_files": 251,
+    "active_runtime_worktrees": 12,
+    "dirty_scratch_worktrees_preserved": 3
+  },
+  "existing_suite": {
+    "tests": 2263,
+    "passed": 2259,
+    "skipped": 4,
+    "failures": 0,
+    "errors": 0,
+    "main": {
+      "tests": 2229,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 4,
+      "passed": 2225,
+      "seconds": 594.187
+    },
+    "separate_view": {
+      "tests": 25,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 25,
+      "seconds": 30.911
+    },
+    "presentation": {
+      "tests": 9,
+      "passed": 9,
+      "method": "one test per process"
+    },
+    "main_exclusions": [
+      "tests/test_collection_view.py",
+      "tests/test_collection_presentation.py",
+      "tests/test_source_presentation.py"
+    ]
+  },
+  "independent_probes": {
+    "tests": 14,
+    "passed": 2,
+    "failed": 12,
+    "errors": 0,
+    "skipped": 0,
+    "exit_code": 1,
+    "test_sha256": "035a6a7c938dc36269b3e70c9cbd60d5557aba7e4136bf9fc0cf3a36988a3d65",
+    "cases": [
+      {
+        "name": "test_cl01_verify_cleanup_preserves_an_unowned_file",
+        "status": "failed"
+      },
+      {
+        "name": "test_cl01_verify_cleanup_does_not_follow_a_junction",
+        "status": "failed"
+      },
+      {
+        "name": "test_wr04_late_manifest_failure_is_typed_and_accounted",
+        "status": "failed"
+      },
+      {
+        "name": "test_wr04_cleanup_error_preserves_primary_failure",
+        "status": "failed"
+      },
+      {
+        "name": "test_cl02_restore_check_cannot_approve_an_unusable_database[corrupt]",
+        "status": "failed"
+      },
+      {
+        "name": "test_cl02_restore_check_cannot_approve_an_unusable_database[incompatible]",
+        "status": "failed"
+      },
+      {
+        "name": "test_cl02_restore_check_cannot_approve_an_unusable_database[empty]",
+        "status": "failed"
+      },
+      {
+        "name": "test_cl03_unproven_scan_prefix_is_not_certified",
+        "status": "failed"
+      },
+      {
+        "name": "test_wr04_unavailable_verify_workspace_has_unreadable_exit",
+        "status": "failed"
+      },
+      {
+        "name": "test_control_static_backup_verifies",
+        "status": "passed"
+      },
+      {
+        "name": "test_control_legal_similar_prefix_table_changes_digest",
+        "status": "passed"
+      },
+      {
+        "name": "test_wr06_refresh_drops_the_previous_inflight_page",
+        "status": "failed"
+      },
+      {
+        "name": "test_wr04_nul_member_is_a_typed_refusal",
+        "status": "failed"
+      },
+      {
+        "name": "test_pa03_missing_path_identity_cannot_be_reported_proven",
+        "status": "failed"
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "CL-01",
+      "priority": "P1",
+      "state": "open",
+      "cases_failed": 2,
+      "title": "Cleanup deletes unowned members and traverses a Windows junction"
+    },
+    {
+      "id": "WR-04",
+      "priority": "P2",
+      "state": "partially_fixed",
+      "cases_failed": 4,
+      "title": "Failure lifecycle and typed CLI protocol remain incomplete"
+    },
+    {
+      "id": "CL-02",
+      "priority": "P2",
+      "state": "open",
+      "cases_failed": 3,
+      "title": "Restore-check approves corrupt, empty and incompatible databases"
+    },
+    {
+      "id": "CL-03",
+      "priority": "P2",
+      "state": "open",
+      "cases_failed": 1,
+      "title": "Incomplete scan certifies an unproven prefix"
+    },
+    {
+      "id": "WR-06",
+      "priority": "P2",
+      "state": "partially_fixed",
+      "cases_failed": 1,
+      "title": "Refresh accepts a pre-refresh inflight response"
+    },
+    {
+      "id": "PA-03",
+      "priority": "P2",
+      "state": "partially_fixed",
+      "cases_failed": 1,
+      "title": "Unknown path identity is hidden by known handle identity"
+    }
+  ],
+  "known_open_risks_not_counted_as_new_findings": [
+    "Tk teardown stability lacks root-cause proof",
+    "real restore and archive apply not exercised in this audit"
+  ],
+  "archive_collector": {
+    "sha256": {
+      "resume_archive.py": "7706883ab8855dd1430b9e6c51685a07d70e7498ffb13d28c2e933f7dd692625",
+      "test_identity_capability.py": "24514f57a26ee67bdb9cf861d5090ad40a9f93867819b4397e2c4a2c42734d6f"
+    },
+    "existing_capability_tests": {
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 14,
+      "seconds": 0.4
+    },
+    "source_is_outside_product_git": true,
+    "executed_on_synthetic_data_only": true
+  },
+  "old_original_probes": {
+    "tests": 9,
+    "passed": 7,
+    "failures": 2,
+    "accepted_adaptations": [
+      "WR-02 fixture must put external root outside project",
+      "PA-01 equivalent injection point moved to isolated-copy phase"
+    ],
+    "adapted_implementation_tests_passed_in_suite": 10
+  },
+  "historical_archive": {
+    "reused_previous_audit_proof": true,
+    "rehashed_this_turn": false,
+    "previous_content_verified_files": 600447,
+    "previous_verified_batches": 18,
+    "pre_move_identity_cannot_be_reconstructed": true,
+    "batches_without_before_content_hashes": 40
+  },
+  "artifacts": {
+    "full01.xml": "91a476779638c0aa5cb2507d17521892a46ad2a8c837fbb5f852780f91fdeff0",
+    "tk_view.xml": "a0334518fb68dae0e54cafe1ac22d9c8a62a26a1847bc2e92e9343b6d30e40e5",
+    "probe_final.xml": "07a943604fb6bea47f9122718a8b4ea1ed71c056bf3c51d589c931b9155b3027",
+    "archive_capability.xml": "15c0fcaa80725897a3889d8914cdd1f983d6116ab498bf356629c2157e5237e0",
+    "worktrees_inventory.json": "689ab0e8ccb180ed06cced6285c2f1cba600674e7da09e04e150ea9cba5f83ee"
+  },
+  "changes": {
+    "product_code": false,
+    "business_data": false,
+    "main_merged": false,
+    "deployed": false,
+    "historical_directories_moved_or_deleted": false
+  }
+}

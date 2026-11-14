@@ -2170,6 +2170,67 @@
       "business_data_changed": false,
       "deployed": false,
       "merged_to_main": false
+    },
+    {
+      "id": "JPGPNG-POST-TIDY-CLOSURE-AUDIT-20261114-01",
+      "session_date": "2026-11-14",
+      "status": "audit_complete_repairs_required",
+      "summary": "独立审计 9ee6206：认可实质修复，发现 1 P1 + 5 P2；保留 Tk 风险；整理当前索引与 dirty scratch，不修改产品。",
+      "audited_commit": "9ee62068273324848a83061662d86ce9da46876c",
+      "report": "docs/audits/2026-11-14-post-tidy-closure/README.md",
+      "results": "docs/audits/2026-11-14-post-tidy-closure/evidence/results.json",
+      "findings": [
+        "CL-01",
+        "WR-04",
+        "CL-02",
+        "CL-03",
+        "WR-06",
+        "PA-03"
+      ],
+      "suite": {
+        "tests": 2263,
+        "passed": 2259,
+        "skipped": 4,
+        "failures": 0,
+        "errors": 0,
+        "main": {
+          "tests": 2229,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4,
+          "passed": 2225,
+          "seconds": 594.187
+        },
+        "separate_view": {
+          "tests": 25,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "passed": 25,
+          "seconds": 30.911
+        },
+        "presentation": {
+          "tests": 9,
+          "passed": 9,
+          "method": "one test per process"
+        },
+        "main_exclusions": [
+          "tests/test_collection_view.py",
+          "tests/test_collection_presentation.py",
+          "tests/test_source_presentation.py"
+        ]
+      },
+      "new_probes": {
+        "tests": 14,
+        "passed": 2,
+        "failed": 12,
+        "errors": 0,
+        "skipped": 0
+      },
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "deployed": false,
+      "merged_to_main": false
     }
   ]
 }
