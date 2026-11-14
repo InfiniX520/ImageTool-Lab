@@ -1,6 +1,6 @@
 # PixivKeep
 
-**最新独立审计（2026-11-14）**：被审 `e4eb6ce` 的现有主体回归 2,149 项中 2,145 通过/4 跳过、Tk 9/9，但新反例确认 WR-01..07（1 P1、6 P2），另有 4 项整理问题。**先不要照现有 runbook 恢复真实库，也不要把 scan 当成所有图库的一键全库巡检。** 日常目录仍为 `daily/u1a-w5-w6-20261114`，本审计未改其产品代码。先读[审计与开发指导](docs/audits/2026-11-14-u1a-w5w6-proof-independent/README.md)及[契约 v6](docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6.md)。历史结论保持原版本范围。
+**当前审计（2026-11-14，整理后）**：日常 `4ba891e` 的产品源码与 `e4eb6ce` 相同，WR-01..07 仍未修复。本轮新增备份共同版本/对象漏检两项产品问题，以及归档身份取值的证据问题；现有套件 2,154 通过/4 跳过，新增反例 7 红/2 绿。18 批 600,447 文件内容摘要全部一致。先读[整理后审计](docs/audits/2026-11-14-post-tidy/README.md)和[下一轮指导](docs/audits/2026-11-14-post-tidy/DEVELOPMENT_GUIDE.md)。暂不按旧 runbook 恢复真实库，也不把单页 scan 当全库结论。
 
 **把喜欢的 Pixiv 作品，按原图好好留下来。**
 
@@ -41,6 +41,7 @@ PixivKeep 是面向个人收藏的 Pixiv 原图下载与整理工具。以关注
 | `预览新界面.bat` | 同一界面的离线演示，生成少量样本图片，不读取真实授权 |
 | `启动.bat --legacy` | 保留的旧版入口，使用旧记录；请先关闭新版 |
 | `启动.bat --help` | 查看启动参数，不联网 |
+| `maintain.cmd` | 库预检、备份、核验与扫描；当前边界见[使用说明](使用说明.md#库维护-cli) |
 | `organize.cmd` | 独立关注整理 CLI，供 AI 盘点、实际看图及受控分组；见 [操作说明](ORGANIZER_CLI.md) |
 
 启动器通过项目或上级 `.venv-path` 查找已有解释器，并设置 `PYTHONNOUSERSITE=1`。项目内的数据路径与终端当前目录无关；外部输出目录通过本机映射保存。依赖见 [requirements.txt](requirements.txt)，授权见 [授权说明](docs/AUTHENTICATION.md)。在已有工作区运行时，继续沿用工作区的环境约定。

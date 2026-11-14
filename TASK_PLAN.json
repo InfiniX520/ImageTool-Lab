@@ -297,7 +297,7 @@
   ],
   "current_plan": {
     "id": "JPGPNG-REFACTOR-20261023",
-    "updated_at": "2026-11-13",
+    "updated_at": "2026-11-14",
     "mainline": "P0-P8 completed",
     "cleanup": "completed",
     "progress": "docs/refactor/REFACTOR_PROGRESS.md",
@@ -346,21 +346,21 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "Independent audit of e4eb6ce found WR-01..07 (1 P1, 6 P2) and WG-01..04 in maintenance/UI entry boundaries; historical WC/RFB closures remain in scope; not merged to main",
+      "phase": "Post-tidy audit: PA-01 P1, PA-02 P2, PA-03 evidence P2; WR-01..07 remain open; organization verified, product unchanged",
       "status": "audit_completed_findings_open_no_product_change",
-      "resume": "docs/audits/2026-11-14-u1a-w5w6-proof-independent/DEVELOPMENT_GUIDE.md",
-      "next_step": "Freeze the v6 contract and red regressions; close backup failure handling, external-root/full-walk scanning, verification paging/stale views and the unsafe restore instructions before deployment or archive release.",
+      "resume": "docs/audits/2026-11-14-post-tidy/DEVELOPMENT_GUIDE.md",
+      "next_step": "Extend v6 with stable backup generation and exact object enumeration; align before fork; close S1/S2/S3 and separately correct archival identity acquisition.",
       "supersedes": "W5/W6 proof closeout as the previous historical batch; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-U1A-W5W6-PROOF-INDEPENDENT-AUDIT-20261114-01",
+      "latest_batch": "JPGPNG-POST-TIDY-AUDIT-20261114-01",
       "foundation": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6.md",
-      "evidence": "../.runtime/jpgpng_e4_audit_20261114_01/README.md",
+      "evidence": "docs/audits/2026-11-14-post-tidy/evidence/results.json",
       "previous_completed_batch": "JPGPNG-U1A-W5W6-PROOF-INDEPENDENT-AUDIT-20261114-01",
-      "unfinished_draft": "WR-01..07 and WG-01..04 remain product work. Organization-only archive is separately recorded under workspace_tidy; no deployment, schema or protected data change.",
+      "unfinished_draft": "PA-01/02 and WR-01..07 product fixes pending; PA-03 historical identity evidence cannot be reconstructed. WG navigation/evidence/entry documentation addressed in audit branch.",
       "latest_repair_evidence": null,
-      "latest_overview": "docs/audits/2026-11-14-u1a-w5w6-proof-independent/README.md",
-      "latest_evidence": "../.runtime/jpgpng_e4_audit_20261114_01/runs/non_tk_exact.xml",
-      "audited_commit": "e4eb6cee79c5b85e1d124e54b086f52b81a453e4",
+      "latest_overview": "docs/audits/2026-11-14-post-tidy/README.md",
+      "latest_evidence": "docs/audits/2026-11-14-post-tidy/evidence/results.json",
+      "audited_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
       "fixed_commit": null,
       "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114; product source baseline is e4eb6ce. Documentation-only commits may advance HEAD. No product deployment or database restore; preserve the sealed v2 backup and follow the latest audit restrictions."
     },
@@ -1237,6 +1237,97 @@
       },
       "product_fixes": false,
       "pending_product_work_unchanged": "WR-01..07 / WG-01..04; U1-B; A2-A6; E1-3/E1-4"
+    },
+    "post_tidy_audit": {
+      "id": "JPGPNG-POST-TIDY-AUDIT-20261114-01",
+      "status": "audit_complete_product_findings_open",
+      "branch": "audit/post-tidy-20261114",
+      "report": "docs/audits/2026-11-14-post-tidy/README.md",
+      "verification": {
+        "audited_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+        "product_code_equal_to": "e4eb6cee79c5b85e1d124e54b086f52b81a453e4",
+        "product_diff": "",
+        "compiled_python_files": 243,
+        "archive": {
+          "batches": 58,
+          "all_mappings_valid": true,
+          "worktrees": 73,
+          "all_registered": true,
+          "all_heads_match": true,
+          "all_branches_match": true,
+          "all_dirty_states_match": true,
+          "dirty_worktrees": 7,
+          "completion_seal_errors": [],
+          "hashed_batches": 18,
+          "hashed_files": 600447,
+          "hashed_bytes": 20221053327,
+          "missing": 0,
+          "hash_errors": 0,
+          "extras": 34,
+          "extras_only_git_pointers": true,
+          "remaining_reparse_entries": 0,
+          "baseline_nonzero_file_id": 0,
+          "baseline_nonzero_hardlink_count": 0,
+          "current_nonzero_file_id": 600447,
+          "current_multilink_file_entries": 5800
+        },
+        "full01": {
+          "tests": 2149,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 4,
+          "seconds": 658.79,
+          "passed": 2145
+        },
+        "tk_collection": {
+          "tests": 4,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "seconds": 3.982,
+          "passed": 4
+        },
+        "tk_source": {
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "seconds": 4.161,
+          "passed": 5
+        },
+        "probe03": {
+          "tests": 9,
+          "failures": 7,
+          "errors": 0,
+          "skipped": 0,
+          "seconds": 5.12,
+          "passed": 2
+        },
+        "restored_evidence": {
+          "path": "docs/audits/2026-11-14-u1a-w5-w6/evidence/test_w5w6_recheck.py",
+          "source_commit": "0c11b1ad9b87bde944a184288c7f5c7f917fa6bf",
+          "sha256": "569f97b30df928be39a38ba93d03abb06e2b54ae4b6cc4762ce48d238a7c43de",
+          "byte_identical": true
+        },
+        "probe_source_sha256": "d7648ab62b2a4a0bf5e188de6f6de2d8116986d57428cbb89e43dc5810dad577",
+        "restored_wc_tests": {
+          "tests": 12,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "passed": 12
+        },
+        "packaged_probes": {
+          "tests": 9,
+          "failures": 7,
+          "errors": 0,
+          "skipped": 0,
+          "passed": 2
+        },
+        "final_probe_xml": "packaged02.xml"
+      },
+      "product_changed": false,
+      "deployed": false
     }
   }
 }

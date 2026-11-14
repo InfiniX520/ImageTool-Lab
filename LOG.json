@@ -2046,6 +2046,56 @@
         "WR-01..07 / WG-01..04 remain open",
         "Other product plans and protected data unchanged"
       ]
+    },
+    {
+      "id": "JPGPNG-POST-TIDY-AUDIT-20261114-01",
+      "session_date": "2026-11-14",
+      "status": "audit_complete_findings_open_no_product_change",
+      "summary": "整理后独立审计：复核归档内容/Git、发现备份共同版本与对象枚举缺口、更正身份关系证明，恢复旧反例和更新当前导航",
+      "audited_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
+      "report": "docs/audits/2026-11-14-post-tidy/README.md",
+      "results": "docs/audits/2026-11-14-post-tidy/evidence/results.json",
+      "existing_tests": {
+        "passed": 2154,
+        "skipped": 4,
+        "failures": 0
+      },
+      "new_probes": {
+        "failed": 7,
+        "passed": 2
+      },
+      "new_findings": [
+        "PA-01/P1",
+        "PA-02/P2",
+        "PA-03/P2 evidence"
+      ],
+      "previous_product_findings_open": "WR-01..07",
+      "archive": {
+        "batches": 58,
+        "all_mappings_valid": true,
+        "worktrees": 73,
+        "all_registered": true,
+        "all_heads_match": true,
+        "all_branches_match": true,
+        "all_dirty_states_match": true,
+        "dirty_worktrees": 7,
+        "completion_seal_errors": [],
+        "hashed_batches": 18,
+        "hashed_files": 600447,
+        "hashed_bytes": 20221053327,
+        "missing": 0,
+        "hash_errors": 0,
+        "extras": 34,
+        "extras_only_git_pointers": true,
+        "remaining_reparse_entries": 0,
+        "baseline_nonzero_file_id": 0,
+        "baseline_nonzero_hardlink_count": 0,
+        "current_nonzero_file_id": 600447,
+        "current_multilink_file_entries": 5800
+      },
+      "product_source_changed": false,
+      "business_data_changed": false,
+      "deployed": false
     }
   ]
 }

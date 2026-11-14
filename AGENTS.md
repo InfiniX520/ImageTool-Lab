@@ -54,4 +54,4 @@ This project is indexed by GitNexus as **PixivKeep** (10382 symbols, 26888 relat
 ## 仓库名称与本地路径
 
 - GitHub 仓库为 `InfiniX520/PixivKeep`，origin 为 `https://github.com/InfiniX520/PixivKeep.git`。本地目录及启动入口继续沿用 JpgPng，不批量替换内部标识。
-- 上方 GitNexus 生成区中的 `ImageTool-Lab` 是已有索引登记名；使用工具时按实际注册的仓库路径/名称定位，不因 GitHub 改名就手改索引 URI。
+- GitNexus 生成区和历史工作树可能使用不同索引名；工具调用按当前工作树实际注册的路径/名称定位，不用历史 `ImageTool-Lab` 名称猜测，也不手改生成区 URI。
