@@ -346,23 +346,23 @@
     "active_workstream": {
       "id": "JPGPNG-OPTIMIZATION-AND-ARCHIVING",
       "updated_date": "2026-11-14",
-      "phase": "Post-tidy audit: PA-01 P1, PA-02 P2, PA-03 evidence P2; WR-01..07 remain open; organization verified, product unchanged",
-      "status": "audit_completed_findings_open_no_product_change",
-      "resume": "docs/audits/2026-11-14-post-tidy/DEVELOPMENT_GUIDE.md",
-      "next_step": "Extend v6 with stable backup generation and exact object enumeration; align before fork; close S1/S2/S3 and separately correct archival identity acquisition.",
+      "phase": "Post-tidy closure: PA-01/PA-02 and WR-01..07 closed with behavioural evidence; PA-03 corrected as proof + tool (identity baseline cannot be rebuilt)",
+      "status": "product_fixes_closed_pending_release_decision",
+      "resume": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
+      "next_step": "Root-cause the Tk teardown race in gui/collection_view.py; then a separate batch for a real-library restore drill and the archive collector apply() on a real batch.",
       "supersedes": "W5/W6 proof closeout as the previous historical batch; preserves U1-U4, A1-A6 and E1 detailed plans",
       "started_jobs": [],
-      "latest_batch": "JPGPNG-POST-TIDY-AUDIT-20261114-01",
-      "foundation": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6.md",
-      "evidence": "docs/audits/2026-11-14-post-tidy/evidence/results.json",
-      "previous_completed_batch": "JPGPNG-U1A-W5W6-PROOF-INDEPENDENT-AUDIT-20261114-01",
-      "unfinished_draft": "PA-01/02 and WR-01..07 product fixes pending; PA-03 historical identity evidence cannot be reconstructed. WG navigation/evidence/entry documentation addressed in audit branch.",
-      "latest_repair_evidence": null,
+      "latest_batch": "JPGPNG-POST-TIDY-CLOSURE-20261114-01",
+      "foundation": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD1.md",
+      "evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
+      "previous_completed_batch": "JPGPNG-POST-TIDY-AUDIT-20261114-01",
+      "unfinished_draft": "Tk teardown race only mitigated (P2, baseline flakes too); real-library restore and archive apply() not drilled; the 600447-file pre-move identity baseline cannot be reconstructed.",
+      "latest_repair_evidence": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
       "latest_overview": "docs/audits/2026-11-14-post-tidy/README.md",
       "latest_evidence": "docs/audits/2026-11-14-post-tidy/evidence/results.json",
       "audited_commit": "4ba891e34c312f049ef933eeb517da1e928b7575",
-      "fixed_commit": null,
-      "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114; product source baseline is e4eb6ce. Documentation-only commits may advance HEAD. No product deployment or database restore; preserve the sealed v2 backup and follow the latest audit restrictions."
+      "fixed_commit": "27dd8b7b345f34ac39891c95553d40d4f9a7cfe4",
+      "runtime_checkout_note": "Daily branch remains daily/u1a-w5-w6-20261114 until the user switches. This round changed product code on fix/a1-post-tidy-closure-20261114 only: no deployment, no database restore, real library read-only. Restore gate is maintain.cmd verify <backup dir>; compare is not a gate."
     },
     "archiving_design": {
       "id": "JPGPNG-ARCHIVE-DESIGN-20261111-01",
@@ -1328,6 +1328,73 @@
       },
       "product_changed": false,
       "deployed": false
+    },
+    "post_tidy_closure": {
+      "id": "JPGPNG-POST-TIDY-CLOSURE-20261114-01",
+      "status": "product_fixes_closed_pending_release_decision",
+      "branch": "fix/a1-post-tidy-closure-20261114",
+      "baseline": "5f19553",
+      "contract": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD1.md",
+      "record": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
+      "closed": [
+        "PA-01",
+        "PA-02",
+        "WR-01",
+        "WR-02",
+        "WR-03",
+        "WR-04",
+        "WR-05",
+        "WR-06",
+        "WR-07"
+      ],
+      "corrected_only": [
+        "PA-03"
+      ],
+      "verification": {
+        "audit_counterexamples": {
+          "tests": 10,
+          "passed": 10,
+          "seconds": 5.68,
+          "red_baseline": "7 failed / 2 passed"
+        },
+        "w5w6_boundaries": {
+          "tests": 12,
+          "passed": 12
+        },
+        "suite": {
+          "tests": 2229,
+          "passed": 2225,
+          "skipped": 4,
+          "failures": 0,
+          "errors": 0,
+          "seconds": 662.631
+        },
+        "tk_view": {
+          "tests": 25,
+          "passed": 25,
+          "module_repeats": "3/3 green"
+        },
+        "tk_display": {
+          "tests": 9,
+          "passed": 9,
+          "method": "one test per process"
+        },
+        "read_only_audit": {
+          "p1": 0,
+          "p2_open": 1,
+          "p2_fixed": 1,
+          "p3_fixed": 6
+        }
+      },
+      "open_risks": [
+        "Tk teardown race (baseline flakes too)",
+        "real-library restore not drilled",
+        "archive collector apply() not drilled on a real batch",
+        "600447-file pre-move identity baseline cannot be reconstructed"
+      ],
+      "real_library": "read-only inspect/scan/verify only; 4435968 bytes and sha256 unchanged",
+      "deployed": false,
+      "merged_to_main": false
     }
   }
 }

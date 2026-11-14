@@ -2096,6 +2096,80 @@
       "product_source_changed": false,
       "business_data_changed": false,
       "deployed": false
+    },
+    {
+      "id": "JPGPNG-POST-TIDY-CLOSURE-20261114-01",
+      "session_date": "2026-11-14",
+      "status": "product_fixes_closed_pending_release_decision",
+      "summary": "Closed PA-01/PA-02 and WR-01..07 with behavioural evidence; PA-03 corrected as proof plus tool. verify reads one isolated copy, object enumeration is literal, manifests are strict before any file is read, the restore protocol is reversible, scan walks the whole library with typed exit codes, and the verification panel pages and carries the row identity.",
+      "audited_commit": "5f19553d3043d38824102135fa1a9b5c6b254f92",
+      "product_baseline": "4ba891e34c312f049ef933eeb517da1e928b7575",
+      "fixed_commit": "27dd8b7b345f34ac39891c95553d40d4f9a7cfe4",
+      "report": "docs/maintenance/2026-11-14_jpgpng_post_tidy_closure.md",
+      "contract": "docs/optimization/2026-11-14/U1A_MAINTENANCE_CLOSURE_CONTRACT_V6_AMD1.md",
+      "results": {
+        "audit_counterexamples": {
+          "tests": 10,
+          "passed": 10,
+          "seconds": 5.68,
+          "before": "7 failed / 2 passed"
+        },
+        "w5w6_boundaries": {
+          "tests": 12,
+          "passed": 12
+        },
+        "suite": {
+          "tests": 2229,
+          "passed": 2225,
+          "skipped": 4,
+          "failures": 0,
+          "errors": 0,
+          "seconds": 662.631
+        },
+        "tk_view": {
+          "tests": 25,
+          "passed": 25,
+          "module_repeats": "3/3 green"
+        },
+        "tk_display": {
+          "tests": 9,
+          "passed": 9,
+          "method": "one test per process"
+        },
+        "archive_identity": {
+          "tests": 14,
+          "passed": 14
+        },
+        "read_only_audit": {
+          "p1": 0,
+          "p2_open": 1,
+          "p2_fixed": 1,
+          "p3_fixed": 6
+        },
+        "real_library": {
+          "bytes": 4435968,
+          "sha256_unchanged": true,
+          "record_backups_unchanged": true,
+          "verify_workspace_leftovers": 0
+        }
+      },
+      "new_findings": [
+        "PA-01 (P1)",
+        "PA-02 (P2)",
+        "WR-01..07",
+        "PA-03 evidence correction"
+      ],
+      "previous_product_findings_open": "none",
+      "open_risks": [
+        "Tk teardown race: only mitigated; the untouched baseline flakes the same way when several Tk roots share one process",
+        "real-library restore not drilled; the runbook is a protocol only",
+        "the archive collector apply() ran on a synthetic batch only",
+        "the 600447-file pre-move identity baseline cannot be reconstructed"
+      ],
+      "product_source_changed": true,
+      "business_data_changed": false,
+      "deployed": false,
+      "merged_to_main": false
     }
   ]
 }
