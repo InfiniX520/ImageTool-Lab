@@ -677,10 +677,19 @@ def test_the_restore_steps_depend_on_the_backup_mode(tmp_path):
     library = make_library(tmp_path / "lib" / "library.sqlite3", jobs=1, wal=True)
     online = m.backup_library(library, tmp_path / "b1", label="online")
     group = m.backup_library(library, tmp_path / "b2", label="group", mode="file_group")
-    assert any("一并删除" in step for step in online["restore_steps"])
+    # WR-01: the old text told the operator to delete the -wal beside the
+    # target.  Neither mode may do that any more; both must keep the current
+    # group in a retention directory before anything is put back.
+    assert not any("一并删除" in step for step in online["restore_steps"])
     assert not any("一并删除" in step for step in group["restore_steps"])
     assert any("整套文件" in step for step in group["restore_steps"])
     assert any("-wal" in step for step in group["restore_steps"])
+    assert any("自包含" in step for step in online["restore_steps"])
+    for steps in (online["restore_steps"], group["restore_steps"]):
+        assert any("保留目录" in step for step in steps)
+        assert any("verify" in step for step in steps)
+        assert any("compare" in step for step in steps)
+        assert steps[-1].startswith("7."), "the last step must be the way back"
 
 
 def test_the_manifest_hashes_match_the_copied_bytes(tmp_path):
